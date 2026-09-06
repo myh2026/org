@@ -1,18 +1,18 @@
-1|2026-09-06T16:50:09.145Z|1:decompose|kernel|open|抓取某站点近一周公告，输出结构化表格
-2|2026-09-06T16:50:09.150Z|1:decompose|kernel|decompose|抓取某站点近一周公告，输出结构化表格
-3|2026-09-06T16:50:09.179Z|1:decompose|kernel|clarify|输出字段偏好：标题、日期、部门、分类？
-4|2026-09-06T16:50:09.180Z|1:decompose|kernel|clarify|日期格式用 ISO 8601 还是保留原文？
-5|2026-09-06T16:50:09.180Z|1:decompose|kernel|answer|字段偏好：标题、日期、部门、分类
-6|2026-09-06T16:50:09.181Z|1:decompose|kernel|answer|日期用 ISO 8601，无法解析的保留原文并标注
-7|2026-09-06T16:50:09.185Z|2:route|router|route|task#1 fetch -> A:inline
-8|2026-09-06T16:50:09.187Z|3:supervise|pool|dispatch|task#1 channel=inline (kernel context)
-9|2026-09-06T16:50:09.188Z|3:supervise|supervisor|review|task#1 fetch verdict=Accept coverage=1.00
-10|2026-09-06T16:50:09.192Z|3:supervise|pool|worker-done|task#1 coverage=1.00 tokens=0
-11|2026-09-06T16:50:09.193Z|2:route|router|route|task#2 parse -> B:reuse
-12|2026-09-06T16:50:09.194Z|3:supervise|pool|dispatch|task#2 channel=reuse notice-parser
-13|2026-09-06T16:50:09.205Z|3:supervise|supervisor|review|task#2 parse verdict=Accept coverage=1.00
-14|2026-09-06T16:50:09.208Z|3:supervise|pool|worker-done|task#2 coverage=1.00 tokens=480
-15|2026-09-06T16:50:09.209Z|2:route|router|route|task#3 validate -> B:reuse
-16|2026-09-06T16:50:09.210Z|3:supervise|pool|dispatch|task#3 channel=reuse record-validator
-17|2026-09-06T16:50:09.353Z|3:supervise|supervisor|review|task#3 validate verdict=Accept coverage=1.00
-18|2026-09-06T16:50:09.379Z|3:supervise|pool|worker-done|task#3 coverage=1.00 tokens=0
+1|2026-09-06T16:52:59.405Z|1:decompose|kernel|open|抓取某站点近一周公告，输出结构化表格
+2|2026-09-06T16:52:59.410Z|1:decompose|kernel|decompose|抓取某站点近一周公告，输出结构化表格
+3|2026-09-06T16:52:59.414Z|1:decompose|kernel|clarify|输出字段偏好：标题、日期、部门、分类？
+4|2026-09-06T16:52:59.414Z|1:decompose|kernel|clarify|日期格式用 ISO 8601 还是保留原文？
+5|2026-09-06T16:52:59.414Z|1:decompose|kernel|answer|字段偏好：标题、日期、部门、分类
+6|2026-09-06T16:52:59.415Z|1:decompose|kernel|answer|日期用 ISO 8601，无法解析的保留原文并标注
+7|2026-09-06T16:52:59.418Z|2:route|router|route|task#1 fetch -> A:inline
+8|2026-09-06T16:52:59.419Z|3:supervise|pool|dispatch|task#1 channel=inline (kernel context)
+9|2026-09-06T16:52:59.421Z|3:supervise|supervisor|review|task#1 fetch verdict=Accept coverage=1.00
+10|2026-09-06T16:52:59.425Z|3:supervise|pool|worker-done|task#1 coverage=1.00 tokens=0
+11|2026-09-06T16:52:59.426Z|2:route|router|route|task#2 parse -> B:reuse
+12|2026-09-06T16:52:59.427Z|3:supervise|pool|dispatch|task#2 channel=reuse notice-parser
+13|2026-09-06T16:52:59.436Z|3:supervise|supervisor|review|task#2 parse verdict=Accept coverage=1.00
+14|2026-09-06T16:52:59.441Z|3:supervise|pool|worker-done|task#2 coverage=1.00 tokens=480
+15|2026-09-06T16:52:59.442Z|2:route|router|route|task#3 validate -> B:reuse
+16|2026-09-06T16:52:59.443Z|3:supervise|pool|dispatch|task#3 channel=reuse record-validator
+17|2026-09-06T16:52:59.511Z|3:supervise|supervisor|review|task#3 validate verdict=Accept coverage=1.00
+18|2026-09-06T16:52:59.512Z|3:supervise|pool|worker-done|task#3 coverage=1.00 tokens=0
