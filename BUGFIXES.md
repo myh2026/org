@@ -50,3 +50,30 @@
    必须分离——真实派单首轮低覆盖是合法的 Revise 语义，只有工厂 Exam/smoke 才施加覆盖率线。
 5. **补丁文本必须过 S7**：替换行导致原变量未使用会被严格性检查拒绝——补丁提案要保留
    被替换表达式的变量引用（`|| true` 幂等化）。
+
+
+## B-4（vendored 修复，随 v0.4.0 上游同步）`version.ts` 在嵌入执行下读取 package.json 失败
+
+- **现象**：dhv-ts 被静态打包进宿主二进制（ORG 单文件分发）后，`import.meta.dir` 指向
+  打包器虚拟 FS（`/$bunfs/...`），`readFileSync(join(import.meta.dir, '..', 'package.json'))`
+  抛 ENOENT，解释器 import 即崩。
+- **权衡**：package.json 单一来源纪律必须保留（这正是该文件的设计动机）；虚拟 FS 又不可写。
+  判定：保留主路径，加两层降级——`DHV_VERSION` 环境变量（宿主解包运行时资源后注入）→
+  `0.0.0`。崩溃变成可诊断的版本号占位，纪律与稳健性兼得。
+- **修复**（`dhv-ts/src/version.ts`）：`readVersion()` try/catch 包裹 + 环境变量回退。
+
+## B-5（vendored 修复，随 v0.4.0 上游同步）CLI 顶层执行式入口无法被宿主进程内复用
+
+- **现象**：`main.ts` 顶层读 `process.argv` 并 `process.exit`——宿主进程（ORG TUI 引擎桥 /
+  `$host.dhv.*`）无法在不爆模块缓存（`?v=N` query 再 import 的 hack 在 bun compile 的
+  打包产物里直接失效：动态计算 specifier 不进 bundle）的前提下重复调用解释器。
+- **权衡**：也可保持 CLI 形态、由宿主 spawn 自身二进制 + 隐藏命令转发——但那样 HSL 侧
+  工厂闸门的 `$host.shell.run` 首词白名单、带空格路径的 shell 分词都要跟着改，扰动更大。
+  判定：把 main.ts 重构为 `export async function cliMain(argv): Promise<number>` +
+  `import.meta.main` 守卫——CLI 行为零变化，嵌入场景获得可编程入口（重复调用状态隔离由
+  `loadProgram` 的 fresh Map 保证，无模块级缓存）。
+- **修复**（`dhv-ts/src/main.ts` + `host.ts`）：`cliMain` 导出；宿主新增
+  `$host.dhv.check(file)` / `$host.dhv.run(args)` 进程内兜底（懒加载 cliMain 规避
+  main↔host 静态循环；stdout/stderr 捕获后恢复）。ORG 侧配套：`hsl/factory/pipeline.hsl`
+  工厂闸门双车道（bun 在场走嵌套子进程——蓝绿语义不变；缺席走进程内——路径基准显式
+  对齐 `$host.config.workspace`）。

@@ -1,0 +1,261 @@
+// ============================================================================
+// org/lib/events.ts — 引擎事件流：原始解析 → 归一化 → 合并去重（v0.4.0）
+// ----------------------------------------------------------------------------
+// 引擎产物两路：
+//   events.jsonl  每行 {seq, ts, name, data}（结构化事件，含 name="journal" 的期刊镜像）
+//   journal.jsonl 每行 `seq|ts|phase|actor|action|detail` 管道分隔（人读期刊）
+// 卡片模型 = 两路合并（按 ts 排序，journal 权威、events 内的 journal 镜像去重）。
+// 仅用 node:fs / node:path —— Windows 兼容，零原生依赖。
+// ============================================================================
+
+import * as fs from "node:fs";
+
+// ---------- 原始行类型 ----------
+
+export interface RawEventLine {
+  seq?: number;
+  ts: string;
+  name: string;
+  data: Record<string, unknown>;
+}
+
+export interface RawJournalLine {
+  seq: number;
+  ts: string;
+  phase: string;
+  actor: string;
+  action: string;
+  detail: string;
+}
+
+export function parseEventsLine(line: string): RawEventLine | null {
+  const s = line.trim();
+  if (s.length === 0) return null;
+  try {
+    const o = JSON.parse(s) as Record<string, unknown>;
+    if (typeof o.name !== "string") return null;
+    return {
+      seq: typeof o.seq === "number" ? o.seq : undefined,
+      ts: typeof o.ts === "string" ? o.ts : "",
+      name: o.name,
+      data: (o.data ?? {}) as Record<string, unknown>,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** journal.jsonl：`seq|ts|phase|actor|action|detail`（detail 可含 `|`，取末段余量）。 */
+export function parseJournalLine(line: string): RawJournalLine | null {
+  const s = line.trim();
+  if (s.length === 0) return null;
+  const parts = s.split("|");
+  if (parts.length < 6) return null;
+  const seq = Number(parts[0]);
+  if (!Number.isFinite(seq)) return null; // 首段非数字 → 不认识的行序，弃
+  return {
+    seq,
+    ts: parts[1] ?? "",
+    phase: parts[2] ?? "",
+    actor: parts[3] ?? "",
+    action: parts[4] ?? "",
+    detail: parts.slice(5).join("|"),
+  };
+}
+
+// ---------- 归一化事件（卡片模型直接消费） ----------
+
+export type EngineEvent =
+  | { kind: "run_start"; seq: number; ts: string; entry: string; model: string; task: string; mission?: string }
+  | { kind: "journal"; seq: number; ts: string; phase: string; actor: string; action: string; detail: string }
+  | { kind: "node"; seq: number; ts: string; graph: string; node: string }
+  | { kind: "capability_granted"; seq: number; ts: string; capability: string; mode: string }
+  | { kind: "score_evidence"; seq: number; ts: string; model: string; axis: string; kind2: string; value: number }
+  | { kind: "crystallize_frozen"; seq: number; ts: string; node: string; input: string }
+  | { kind: "crystallize_hit"; seq: number; ts: string; node: string; input: string }
+  | { kind: "shadow_compare"; seq: number; ts: string; expert: string; candidate: string; baseline: string; agree: boolean }
+  | { kind: "canary_confirmed"; seq: number; ts: string; expert: string; version: string }
+  | { kind: "fixtures_mined"; seq: number; ts: string; entries: number; tracks: number }
+  | { kind: "run_end"; seq: number; ts: string; ok: boolean; elapsed_ms: number }
+  | { kind: "unknown"; seq: number; ts: string; name: string; data: Record<string, unknown> }
+  // 引擎桥合成事件（不在磁盘产物中，wait() 完成前注入流尾）
+  | {
+      kind: "run_result"; seq: number; ts: string;
+      ok: boolean; canceled: boolean; outDir: string;
+      elapsed_ms: number; error?: string;
+      runJson: Record<string, unknown> | null;
+      metrics: RunMetrics | null;
+    };
+
+export interface RunMetrics {
+  accepted?: number;
+  subtasks?: number;
+  deliverables?: number;
+  assets?: number;
+  asset_labels?: string[];
+  tokens_total?: number;
+  revises_total?: number;
+  model_calls_total?: number;
+  mined_entries?: number;
+  drift_alerts?: number;
+}
+
+const num = (v: unknown): number => (typeof v === "number" ? v : Number(v) || 0);
+const str = (v: unknown): string => (typeof v === "string" ? v : "");
+
+/** events.jsonl 单行 → EngineEvent（name="journal" 走期刊通道，与 journal.jsonl 同构）。 */
+export function normalizeEventLine(raw: RawEventLine): EngineEvent {
+  const seq = raw.seq ?? -1;
+  const ts = raw.ts ?? "";
+  const d = raw.data ?? {};
+  switch (raw.name) {
+    case "journal":
+      return {
+        kind: "journal", seq, ts,
+        phase: "?", actor: "?",
+        action: str(d.name), detail: str(d.detail),
+      };
+    case "run_start":
+      return {
+        kind: "run_start", seq, ts,
+        entry: str(d.entry), model: str(d.model), task: str(d.task),
+        mission: d.mission !== undefined ? str(d.mission) : undefined,
+      };
+    case "node":
+      return { kind: "node", seq, ts, graph: str(d.graph), node: str(d.node) };
+    case "capability_granted":
+      return { kind: "capability_granted", seq, ts, capability: str(d.capability), mode: str(d.mode) };
+    case "score_evidence":
+      return {
+        kind: "score_evidence", seq, ts, model: str(d.model),
+        axis: str(d.axis), kind2: str(d.kind), value: num(d.value),
+      };
+    case "crystallize_frozen":
+      return { kind: "crystallize_frozen", seq, ts, node: str(d.node), input: str(d.input) };
+    case "crystallize_hit":
+      return { kind: "crystallize_hit", seq, ts, node: str(d.node), input: str(d.input) };
+    case "shadow_compare":
+      return {
+        kind: "shadow_compare", seq, ts,
+        expert: str(d.expert), candidate: str(d.candidate_version),
+        baseline: str(d.baseline_version), agree: d.agree === true,
+      };
+    case "canary_confirmed":
+      return { kind: "canary_confirmed", seq, ts, expert: str(d.expert), version: str(d.version) };
+    case "fixtures_mined":
+      return { kind: "fixtures_mined", seq, ts, entries: num(d.entries), tracks: num(d.tracks) };
+    case "run_end":
+      return { kind: "run_end", seq, ts, ok: d.ok === true, elapsed_ms: num(d.elapsed_ms) };
+    default:
+      return { kind: "unknown", seq, ts, name: raw.name, data: d };
+  }
+}
+
+export function normalizeJournalLine(raw: RawJournalLine): EngineEvent {
+  return {
+    kind: "journal", seq: raw.seq, ts: raw.ts,
+    phase: raw.phase, actor: raw.actor, action: raw.action, detail: raw.detail,
+  };
+}
+
+// ---------- 合并去重与排序 ----------
+
+const journalSig = (ev: EngineEvent): string =>
+  ev.kind === "journal" ? `${ev.action}|${ev.detail}` : "";
+
+/**
+ * 合并两路事件：journal.jsonl 权威（events 内的 journal 镜像按签名去重），
+ * 按 ts 稳定排序（来源行序为并列时的次序）。
+ */
+export function mergeStreams(
+  fromEvents: EngineEvent[],
+  fromJournal: EngineEvent[],
+): EngineEvent[] {
+  const hasJournalFile = fromJournal.length > 0;
+  const seen = new Set<string>();
+  const out: EngineEvent[] = [];
+  const order: EngineEvent[] = [];
+  const push = (ev: EngineEvent): void => {
+    if (ev.kind === "journal") {
+      const sig = journalSig(ev);
+      if (sig.length > 0) {
+        if (seen.has(sig)) return;
+        seen.add(sig);
+      }
+    }
+    out.push(ev);
+    order.push(ev);
+  };
+  if (hasJournalFile) {
+    for (const ev of fromEvents) if (ev.kind !== "journal") push(ev);
+  } else {
+    for (const ev of fromEvents) push(ev);
+  }
+  for (const ev of fromJournal) push(ev);
+  const orderIdx = new Map<EngineEvent, number>();
+  order.forEach((ev, i) => orderIdx.set(ev, i));
+  out.sort((a, b) => {
+    const ta = a.ts || "9999";
+    const tb = b.ts || "9999";
+    if (ta !== tb) return ta < tb ? -1 : 1;
+    return (orderIdx.get(a) ?? 0) - (orderIdx.get(b) ?? 0);
+  });
+  return out;
+}
+
+// ---------- 文件读取（全量 + 增量 tail） ----------
+
+export function readLines(file: string): string[] {
+  try {
+    return fs.readFileSync(file, "utf-8").split("\n");
+  } catch {
+    return [];
+  }
+}
+
+export function readEventStream(eventsFile: string, journalFile: string): EngineEvent[] {
+  const fromEvents = readLines(eventsFile)
+    .map(parseEventsLine)
+    .filter((r): r is RawEventLine => r !== null)
+    .map(normalizeEventLine);
+  const fromJournal = readLines(journalFile)
+    .map(parseJournalLine)
+    .filter((r): r is RawJournalLine => r !== null)
+    .map(normalizeJournalLine);
+  return mergeStreams(fromEvents, fromJournal);
+}
+
+/** 增量 tail：从 byteOffset 起读新整行（半行留待下次）。 */
+export function tailLines(
+  file: string,
+  offset: number,
+): { lines: string[]; next: number } {
+  let size = 0;
+  try {
+    size = fs.statSync(file).size;
+  } catch {
+    return { lines: [], next: offset };
+  }
+  if (size <= offset) return { lines: [], next: Math.min(offset, size) };
+  let fd: number;
+  try {
+    fd = fs.openSync(file, "r");
+  } catch {
+    return { lines: [], next: offset };
+  }
+  let text: string;
+  try {
+    const buf = Buffer.alloc(size - offset);
+    fs.readSync(fd, buf, 0, buf.length, offset);
+    text = buf.toString("utf-8");
+  } catch {
+    return { lines: [], next: offset };
+  } finally {
+    fs.closeSync(fd);
+  }
+  const nl = text.lastIndexOf("\n");
+  if (nl < 0) return { lines: [], next: offset };
+  const complete = text.slice(0, nl);
+  const next = offset + Buffer.byteLength(complete, "utf-8") + 1;
+  return { lines: complete.split("\n").filter((l) => l.length > 0), next };
+}

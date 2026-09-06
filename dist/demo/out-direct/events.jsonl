@@ -1,8 +1,8 @@
-{"seq":0,"ts":"2026-09-06T13:09:49.426Z","name":"run_start","data":{"entry":"/home/runner/work/org/org/hsl/pool/direct.hsl","model":"scripted","task":"(direct) multi-turn","scale":"microkernel"}}
-{"seq":1,"ts":"2026-09-06T13:09:49.434Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
-{"seq":2,"ts":"2026-09-06T13:09:49.434Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
-{"seq":3,"ts":"2026-09-06T13:09:49.438Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
-{"seq":4,"ts":"2026-09-06T13:09:49.446Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
-{"seq":5,"ts":"2026-09-06T13:09:49.446Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
-{"seq":6,"ts":"2026-09-06T13:09:49.450Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
-{"seq":7,"ts":"2026-09-06T13:09:49.450Z","name":"run_end","data":{"elapsed_ms":24,"ok":true}}
+{"seq":0,"ts":"2026-09-06T14:49:44.527Z","name":"run_start","data":{"entry":"/home/z/org/hsl/pool/direct.hsl","model":"scripted","task":"(direct) multi-turn","scale":"microkernel"}}
+{"seq":1,"ts":"2026-09-06T14:49:44.537Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
+{"seq":2,"ts":"2026-09-06T14:49:44.537Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
+{"seq":3,"ts":"2026-09-06T14:49:44.544Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
+{"seq":4,"ts":"2026-09-06T14:49:44.547Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
+{"seq":5,"ts":"2026-09-06T14:49:44.547Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
+{"seq":6,"ts":"2026-09-06T14:49:44.550Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
+{"seq":7,"ts":"2026-09-06T14:49:44.550Z","name":"run_end","data":{"elapsed_ms":23,"ok":true}}

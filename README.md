@@ -5,7 +5,8 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.3.0_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Status](https://img.shields.io/badge/status-v0.4.0_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-快速开始v040-实测可用)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
 [![Tests](https://img.shields.io/badge/tests-69_passing-brightgreen.svg)](#-测试)
@@ -18,7 +19,7 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **当前状态**：v0.3.0 可运行实现。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 69 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
+> **当前状态**：v0.4.0 可运行实现。新增 **OpenCode 级终端前端（`org tui`）** 与 **Windows/macOS/Linux 五目标单二进制分发**（无 bun 环境全功能）。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 69 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
 
 ## ✨ 为什么是 ORG
 
@@ -125,6 +126,56 @@ flowchart TB
 8. **第三次同类任务**（run C）：判定节点 5/5 全命中（**零模型调用**）；补丁版专家首验即收（**零返工**）——蓝绿发布生效，系统单位成本随使用递减。
 
 实测数据（scripted 模式，约 2s 全叙事）：model_calls 衰减 **5 → 1 → 0**，返工 **1 → 1 → 0**，git 注册表三个提交（template → mint → patch）即资产层的增长率账本；另有多轮直连（2 轮问答、记账、会话账本）与暖移交（移交摘要 + 专家代答）两个通道产物。
+
+## 🖥️ 组织驾驶舱（TUI）——OpenCode 级终端前端
+
+`org tui` 打开三区布局的产品级终端界面（零依赖自研渲染器，规格见 [docs/tui-spec.md](docs/tui-spec.md)）：
+
+```
+╭ ORG — Organization Harness ──────────────────────────────── v0.4.0 ╮
+│  ▾ 会话 (5)          │  org 任务分解 → 3 子任务                       │
+│    ● 抓取某站点近…    │     ├ task#1 fetch   [A 内联] ✓               │
+│    ○ (direct) 多轮…  │     ├ task#2 parse   [B 复用] notice-parser ✓  │
+│  ▾ 专家库 (2)        │     └ task#3 validate [C 生成]                 │
+│    ◆ notice-parser   │                                               │
+│    ◆ record-valida…  │  ⚙ 工厂  规格 → 生成 → ✓check → ✓验收 → 登记git │
+│  ▾ 池与固化          │                                               │
+│    池    idle 2      │  ◆ review [Revise] · 覆盖率 0.80 < 0.95        │
+│    固化  冻结0·命中5  │  ◆ review [Accept] · coverage 1.00            │
+│    memo 3 条冻结映射  │  ✓ 汇总  交付物 3 · model_calls 5→1→0          │
+├─ › 输入任务或 :命令…          团队模式 · scripted · idle ─────────────┤
+╰──────────────────────────────────────────────────────────────────────╯
+```
+
+- **事件卡片流**：任务分解（A/B/C/D 路由徽标四色）· 工厂五步 stepper · 四态裁决徽标
+  （Accept 绿 / Revise 琥珀 / Reject 红 / Escalate 紫）· 固化（❄冻结 ⚡命中）· 补丁
+  （版本 bump + git sha + 金丝雀确认）· 直连 · 完成卡（成本衰减 5→1→0）· 系统卡；
+- **输入协议**：任务回车派单（团队模式）· `?专家 问题?` 直连 · `:demo` 全叙事演示 ·
+  `:replay out-…` 历史会话秒开重演（不重跑引擎）· `:score :theme :status :clear :help :quit`；
+- **三主题**（org-dark / org-light / paper）· 窄终端降级 · 帮助浮层（`?`）· 运行取消（Esc）；
+- **键盘**：Tab 切换分区 · j/k 移动 · g/G 回顶回底 · Ctrl+L 清屏 · Ctrl+C 退出；
+- 实现与规格：`tui/`（零依赖 Line/Span 渲染器 + useReducer 单 store），
+  冒烟测试 `bun run tui:smoke`（离屏 20 断言，CI 无 TTY 可跑）。
+
+## 📦 三平台单二进制分发（Windows / macOS / Linux）
+
+```bash
+# 下载对应平台产物（GitHub Release）解压，放入 PATH：
+org            # 打开组织驾驶舱（TUI）
+org demo       # 全叙事演示（无 bun 环境同样可跑）
+org check      # 结构闸门全量校验
+```
+
+- **5 目标交叉编译**：`bun-linux-x64 / bun-linux-arm64 / bun-darwin-x64 / bun-darwin-arm64 /
+  bun-windows-x64`（`bun build --compile`，GitHub Actions 矩阵产出，见 release.yml）；
+- **运行时资源内嵌**：hsl 源码 + vendored dhv-ts 解释器 + 工作区模板 + fixture 剧本打包为
+  `build/payload.json`（55 文件 / 934KB）随二进制分发，运行期按内容指纹解包到
+  `~/.org/runtime-<sha1>/`（升级自动换新目录，`ORG_RUNTIME` 可重定向）；
+- **无 bun 环境全功能**：vendored dhv-ts 暴露 `cliMain` 可编程入口，宿主新增
+  `$host.dhv.{check,run}` 进程内兜底——工厂闸门在无 bun 机器上自动切换进程内车道
+  （bun 在场仍走嵌套子进程，蓝绿语义不变）；实测无 bun 单二进制 `check 30/30` +
+  全叙事 `demo` 完整通过；
+- 默认工作区：二进制 `~/.org/workspace`（源码模式仍为仓库内 `demo-run/`）。
 
 ## 🏗️ 架构总览（六大部件）
 
@@ -320,22 +371,35 @@ org/
 │   ├── types/                    #   state.hsl · errors.hsl
 │   └── probe/                    #   HSL 语言探针（含上游 bug 复现）
 ├── cli/
-│   └── org.ts                    # org CLI：run / demo / ask / handoff / status / score / replay / check
+│   └── org.ts                    # org CLI：run / demo / ask / handoff / status / score / replay / check / tui
+├── tui/                          # ✦ 组织驾驶舱（OpenCode 级终端前端，零依赖）
+│   ├── main.tsx / entry.ts       #   入口（org tui 进程内复用同一入口）
+│   ├── app.tsx / store.ts        #   主应用（键盘路由 + 引擎接线）/ useReducer 单 store
+│   ├── frame.ts / renderer.ts    #   帧组合（纯函数）/ 零依赖 ANSI 渲染器
+│   ├── theme.ts / text.ts        #   三主题 token 表 / CJK 宽度度量与折行
+│   ├── components/               #   rail / thread / cards / input（纯函数渲染）
+│   └── smoke.ts                  #   离屏冒烟（20 断言，CI 无 TTY 可跑）
+├── lib/
+│   ├── engine.ts                 #   引擎桥（CLI/TUI 共用）：dhvRun / startRun / 工作区扫描
+│   └── root.ts                   #   运行时根解析（源码模式 / 单二进制解包）
 ├── tests/                        # 69 个机制级测试（结构闸门 / README 走读 / 动力学点火）
 ├── demo-ws/                      # 演示工作区模板（raw 公告 + 注册表模板）
 ├── fixtures/
 │   └── run-notices.json          # 三连跑剧本（make-fixture.ts 产出）
 ├── scripts/
 │   ├── make-fixture.ts           # 剧本生成器（轨道消费序列的工程化设计）
-│   └── setup-hsl.ts              # 工具链自动安装（vendored 优先，幂等）
+│   ├── setup-hsl.ts              # 工具链自动安装（vendored 优先，幂等）
+│   └── build-bin.ts              # ✦ 三平台单二进制构建（payload 打包 + 5 目标交叉编译）
+├── build/
+│   └── payload.json              # ✦ 运行时资源包（构建期再生，随二进制内嵌）
 ├── toolchain/
 │   └── dhv-ts/                   # ✦ 内嵌解释器（vendored；克隆即跑，零环境依赖）
 ├── dist/                         # ✦ 编译产物（提交入库）
 │   └── demo/                     #   全叙事快照：out-{a,b,c,direct,handoff} / registry / runtime
 │       └── git-chain.json        #   资产层 git 历史（嵌套 .git 不入库，链条以数据保存）
 ├── .github/workflows/
-│   ├── ci.yml                    # CI：dhv check + bun test + 三连跑冒烟 + dist 产物回写
-│   └── release.yml               # CD：tag → 校验 → 打包（源码+产物）→ GitHub Release
+│   ├── ci.yml                    # CI：dhv check + bun test + tui:smoke + 三连跑冒烟 + dist 回写
+│   └── release.yml               # CD：tag → 校验 → 5 平台二进制矩阵 → GitHub Release
 ├── docs/                         # 设计文档 / 走读
 └── demo-run/                     # 本地构建目录（git 忽略；运行时工作区）
 ```
@@ -345,11 +409,20 @@ org/
 > 注册表，不入库）；`toolchain/dhv-ts` 内嵌解释器 vendored 入库——克隆即得可校验完整状态：
 > `bun cli/org.ts check` 直接全量模块过，无需任何环境准备。
 
-## ⚡ 快速开始（v0.3.0 实测可用）
+## ⚡ 快速开始（v0.4.0 实测可用）
+
+**终端用户（免环境）**：到 [Releases](https://github.com/myh2026/org/releases/latest) 下载
+对应平台产物（`org-windows-x64.exe` / `org-darwin-arm64.zip` / `org-linux-x64.zip` …），
+解压放入 PATH 后直接 `org`——无需安装 bun。
+
+**开发者（源码模式）**：
 
 ```bash
 # 前置：只需 bun（≥1.1）；解释器已 vendored 入库，无需额外安装
 # （可选）export DHV_TS=/path/to/dhv-ts/src/main.ts 覆盖内嵌工具链
+
+# 0) 打开组织驾驶舱（TUI；`bun run tui` 同效）
+bun cli/org.ts tui
 
 # 1) 校验 ORG 全部 HSL 源码（hsl/ 源码 + 语言探针 + dist/ 铸出专家）
 bun cli/org.ts check

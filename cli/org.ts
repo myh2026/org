@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // ============================================================================
-// org/cli/org.ts — ORG 命令行（v0.3.0）
+// org/cli/org.ts — ORG 命令行（v0.4.0）
 // ----------------------------------------------------------------------------
 //   org run --task "..."          团队模式派单（监督回路全流程）
 //   org demo                      全叙事演示：铸专家 → 复用+补丁+金丝雀 → 蓝绿
@@ -20,9 +20,10 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { ROOT, DEFAULT_WORKSPACE } from "../lib/root.ts";
+import { dhvRun } from "../lib/engine.ts";
 
-const VERSION = "0.3.0";
-const ROOT = path.resolve(import.meta.dir, "..");
+const VERSION = "0.4.0";
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const HANDOFF_ENTRY = path.join(ROOT, "hsl/pool/handoff.hsl");
@@ -76,7 +77,7 @@ function parseArgs(argv: string[]): Args {
   const a: Args = {
     cmd: argv[0] ?? "help",
     task: "",
-    workspace: path.join(ROOT, "demo-run"),
+    workspace: DEFAULT_WORKSPACE,
     fixture: STOCK_FIXTURE,
     model: "scripted",
     out: "",
@@ -106,16 +107,11 @@ function parseArgs(argv: string[]): Args {
   return a;
 }
 
-// ---- 基础执行 ----
+// ---- 基础执行（dhvRun：bun 子进程优先，无 bun 环境进程内 fallback） ----
 async function runHsl(entry: string, opts: {
   workspace: string; task: string; model: string; fixture: string; out: string;
   env?: Record<string, string>;
 }): Promise<{ ok: boolean; out: string }> {
-  const env = {
-    ...process.env,
-    DHV_TS: shPath(DHV),
-    ...(opts.env ?? {}),
-  };
   const args = [
     "run", entry,
     "--workspace", opts.workspace,
@@ -125,17 +121,13 @@ async function runHsl(entry: string, opts: {
     "--out", opts.out,
     "--allow", "bun,node,ls,cat,grep,diff,git",
   ];
-  const proc = Bun.spawnSync([process.execPath, DHV, ...args], { env, stdout: "pipe", stderr: "pipe" });
-  const out = proc.stdout.toString() + proc.stderr.toString();
-  return { ok: proc.exitCode === 0, out };
+  return dhvRun(args, opts.env);
 }
 
-function checkFile(file: string): boolean {
-  const proc = Bun.spawnSync([process.execPath, DHV, "check", file], {
-    env: { ...process.env, DHV_TS: shPath(DHV) }, stdout: "pipe", stderr: "pipe",
-  });
-  const text = proc.stdout.toString() + proc.stderr.toString();
-  const ok = proc.exitCode === 0;
+async function checkFile(file: string): Promise<boolean> {
+  const r = await dhvRun(["check", file]);
+  const ok = r.ok;
+  const text = r.out;
   const tag = ok ? "✓" : "✗";
   const rel = path.relative(ROOT, file);
   console.log(`  ${tag} ${rel}${ok ? "" : "\n" + text.split("\n").slice(-8).join("\n")}`);
@@ -563,11 +555,22 @@ async function cmdCheck(): Promise<number> {
   });
   let failed = 0;
   for (const f of files) {
-    const ok = checkFile(f);
+    const ok = await checkFile(f);
     if (!ok) failed += 1;
   }
   console.log(`\n${failed === 0 ? "✓" : "✗"} ${files.length} 个 HSL 模块（${failed} 失败）`);
   return failed === 0 ? 0 : 1;
+}
+
+// ---- TUI（OpenCode 级终端前端；实现见 tui/，规格见 docs/tui-spec.md） ----
+// 进程内加载（源码与编译二进制同路径；bun compile 会把 tui/ 静态打进单文件）
+async function cmdTui(a: Args): Promise<number> {
+  const { tuiMain } = await import("../tui/entry.ts");
+  const args: string[] = [];
+  if (a.workspace) args.push("--workspace", a.workspace);
+  if (a.model && a.model !== "scripted") args.push("--model", a.model);
+  args.push(...a.rest);
+  return tuiMain(args);
 }
 
 async function main(): Promise<number> {
@@ -582,6 +585,7 @@ async function main(): Promise<number> {
     case "score": return cmdScore(a);
     case "replay": return cmdReplay(a);
     case "check": return cmdCheck();
+    case "tui": return cmdTui(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -603,6 +607,8 @@ async function main(): Promise<number> {
       确定性重放（journal 时间线重演）
   org check
       dhv check 全部 HSL 源码（hsl/ 源码 + dist/ 产物中的铸出专家）
+  org tui [--workspace DIR] [":demo"|":replay out-…"]
+      组织驾驶舱（OpenCode 级终端前端）：三区布局 · 事件卡片流 · 四态裁决徽标
 
 仓库布局：hsl/ = HSL 源码；toolchain/dhv-ts = 内嵌解释器（vendored）；
           demo-run/ = 本地构建目录（git 忽略）；dist/ = 编译产物（入库）

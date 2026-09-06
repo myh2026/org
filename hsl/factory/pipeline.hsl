@@ -122,8 +122,7 @@ export graph Factory(goal: String, skills: Vec<String>) -> Result<ExpertManifest
             },
             MintStage::StructuralCheck => {
                 let written = write_source(spec.name.clone(), source.clone())?;
-                let cmd = format!("bun {} check {}", dhv_path(), written);
-                let out = shell_exec(cmd);
+                let out = dhv_check_gate(written);
                 gate.check_ok = out.ok;
                 gate.check_log = out.output;
                 if out.ok {
@@ -236,8 +235,7 @@ export fn merge_patch(registry: Registry, proposal: PatchProposal) -> Result<Exp
     }
 
     // 3) 结构闸门：dhv check（补丁后源码必须仍然合法）
-    let cmd = format!("bun {} check {}", dhv_path(), path);
-    let check_out = shell_exec(cmd);
+    let check_out = dhv_check_gate(path);
     if check_out.ok == false {
         rollback(path, proposal.new_text.clone(), proposal.old_text.clone());
         return Err(OrgError::factory(format!("补丁未过 dhv check（已回滚）：\n{}", check_out.output)));
@@ -330,11 +328,7 @@ export fn run_expert_at(entry: String, fixture: String, spec: TaskSpec, out_dir:
     let fixture_cmd = fixture.clone();
     let goal_cmd = spec.goal.clone();
     let out_cmd = out_dir.clone();
-    let cmd = format!(
-        "bun {} run {} --workspace . --task \"{}\" --model scripted --fixture {} --out {} --quiet",
-        dhv_path(), entry_cmd, goal_cmd, fixture_cmd, out_cmd
-    );
-    let out = shell_exec(cmd);
+    let out = dhv_run_gate(entry_cmd, goal_cmd, fixture_cmd, out_cmd);
     // 执行判定（确定性）：run.json ok —— 覆盖率裁决归监督回路 / 验收调用点，
     // 此处不越权（真实派单首轮低覆盖是合法的 Revise 语义）
     let verdict = read_run_ok(out_dir.clone());
@@ -380,18 +374,73 @@ fn shell_exec(command: String) -> ShellFlat {
         const out = await $host.shell.run(cmd, { timeoutMs: 90000 });
         return { ok: out.ok, code: out.code, stdout: out.stdout, stderr: out.stderr };
     };
+    return flat_from(r.ok, r.code, r.stdout, r.stderr);
+}
+
+/// ShellFlat 组装（stdout/stderr 合并，与 shell 输出形态一致）。
+fn flat_from(ok: bool, code: u32, stdout: String, stderr: String) -> ShellFlat {
     let mut combined = String::new();
-    if r.stdout.len() > 0 {
-        combined.push_str(r.stdout.as_str());
+    if stdout.len() > 0 {
+        combined.push_str(stdout.as_str());
     }
-    if r.stderr.len() > 0 {
+    if stderr.len() > 0 {
         combined.push_str("\n[stderr]\n");
-        combined.push_str(r.stderr.as_str());
+        combined.push_str(stderr.as_str());
     }
     if combined.len() == 0 {
-        combined.push_str(format!("(no output, exit {})", r.code).as_str());
+        combined.push_str(format!("(no output, exit {})", code).as_str());
     }
-    ShellFlat { ok: r.ok, code: r.code, output: combined }
+    ShellFlat { ok: ok, code: code, output: combined }
+}
+
+/// bun 可用性探测（嵌入分发场景：单二进制 + 无 bun 的终端用户机）。
+fn has_bun() -> bool {
+    let r: String = native typescript {
+        try {
+            return (typeof Bun !== "undefined" && typeof Bun.which === "function" && Bun.which("bun")) ? "1" : "";
+        } catch (e) {
+            return "";
+        }
+    };
+    return r.len() > 0;
+}
+
+/// 结构闸门（dhv check）：bun 在场走嵌套子进程（蓝绿语义）；缺席时
+/// 进程内兜底（$host.dhv.check，fresh loadProgram 状态隔离）。语义等价。
+fn dhv_check_gate(file: String) -> ShellFlat {
+    if has_bun() {
+        return shell_exec(format!("bun {} check {}", dhv_path(), file));
+    }
+    let r = native typescript {
+        const out = await $host.dhv.check(file);
+        return { ok: out.ok, code: out.ok ? 0 : 1, stdout: out.output, stderr: "" };
+    };
+    return flat_from(r.ok, r.code, r.stdout, r.stderr);
+}
+
+/// 嵌套专家执行（fixture 验收 / 磁盘车道）：同 dhv_check_gate 的双车道策略。
+fn dhv_run_gate(entry: String, task: String, fixture: String, out_dir: String) -> ShellFlat {
+    if has_bun() {
+        let cmd = format!(
+            "bun {} run {} --workspace . --task \"{}\" --model scripted --fixture {} --out {} --quiet",
+            dhv_path(), entry, task, fixture, out_dir
+        );
+        return shell_exec(cmd);
+    }
+    let r = native typescript {
+        // 进程内基准对齐：子进程模式的 bash cwd = workspace，这里把相对路径
+        // 显式解析到 workspace（$host.config.workspace），语义逐项等价。
+        const ws = $host.config.workspace;
+        const isAbs = (p) => /^([A-Za-z]:[\\/]|\/)/.test(p);
+        const joinWs = (p) => isAbs(p) ? p : (ws.endsWith("/") ? ws + p : ws + "/" + p);
+        const out = await $host.dhv.run([
+            "run", joinWs(entry), "--workspace", ws, "--task", task,
+            "--model", "scripted", "--fixture", joinWs(fixture),
+            "--out", joinWs(out_dir), "--quiet",
+        ]);
+        return { ok: out.ok, code: out.code, stdout: out.stdout, stderr: out.stderr };
+    };
+    return flat_from(r.ok, r.code, r.stdout, r.stderr);
 }
 
 /// 规格解析（mint_spec 轨道输出 → ExpertSpec）。

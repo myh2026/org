@@ -8,7 +8,8 @@ permissions:
   contents: write # 创建 Release 需要
 
 jobs:
-  release:
+  # ── 校验（与 CI 同套门槛，全绿才进构建） ──────────────────────────────
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,14 +21,94 @@ jobs:
       - name: HSL 工具链就位（vendored 优先）
         run: bun scripts/setup-hsl.ts
 
-      - name: 发布前校验（check + test + demo 冒烟）
+      - name: 发布前校验（check + test + tui:smoke + demo 冒烟）
         run: |
           bun cli/org.ts check
           bun test tests/
+          bun tui/smoke.ts
           bun cli/org.ts demo
 
-      # 发布说明：取 CHANGELOG 中与 tag 对应版本段落（## vX.Y.Z 至下一个 ## 或文件尾）
-      - name: 提取发布说明
+  # ── 五平台二进制矩阵（Windows / macOS Intel+Apple / Linux x64+arm64） ──
+  binaries:
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: bun-linux-x64
+            artifact: org-linux-x64.zip
+          - target: bun-linux-arm64
+            artifact: org-linux-arm64.zip
+          - target: bun-darwin-x64
+            artifact: org-darwin-x64.zip
+          - target: bun-darwin-arm64
+            artifact: org-darwin-arm64.zip
+          - target: bun-windows-x64
+            artifact: org-windows-x64.zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: 编译 ${{ matrix.target }}
+        run: |
+          NAME="org"
+          [[ "${{ matrix.target }}" == bun-windows-x64 ]] && NAME="org.exe"
+          bun build --compile --target=${{ matrix.target }} \
+            --external z-ai-web-dev-sdk \
+            --outfile "dist-bin/${NAME}" cli/org.ts
+          ls -lh dist-bin/
+
+      - name: 打包（zip：单文件 + 一行说明）
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          mkdir -p pkg
+          cp dist-bin/org* pkg/
+          cat > pkg/README.txt <<'EOF'
+ORG — Organization Harness（单二进制）
+
+  解压后把 org（或 org.exe）放入 PATH，然后：
+
+    org            打开组织驾驶舱（TUI）
+    org demo       全叙事演示（无需 bun / 无外联）
+    org run --task "..."   团队模式派单
+    org check      结构闸门全量校验
+
+  工作区默认 ~/.org/workspace · 运行时资源自动解包 ~/.org/runtime-<hash>
+  主页：https://github.com/myh2026/org
+EOF
+          (cd pkg && zip -qr "../${{ matrix.artifact }}" .)
+          mv "${{ matrix.artifact }}" /tmp/
+          ls -lh /tmp/${{ matrix.artifact }}
+
+      - name: 上传构建产物（供 release 汇总）
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: /tmp/${{ matrix.artifact }}
+          retention-days: 3
+
+  # ── 发布（源码包 + dist 快照 + 5 平台二进制） ─────────────────────────
+  publish:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: 下载全部平台产物
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: 发布说明（取 CHANGELOG 对应版本段落）
         run: |
           VERSION="${GITHUB_REF_NAME}"
           awk -v sec="## ${VERSION}" '
@@ -39,21 +120,20 @@ jobs:
             echo "（未找到 ${VERSION} 的 CHANGELOG 段落，参见 CHANGELOG.md）" > /tmp/release-notes.md
           fi
 
-      # 打包先写 /tmp 再移回，规避 tar 自读自写冲突
-      - name: 打包（源码 tar.gz + dist zip）
+      - name: 源码与 dist 快照打包（先写 /tmp 再移回，规避 tar 自读自写）
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          mkdir -p /tmp/pkg
           tar --exclude='.git' --exclude='demo-run' --exclude='.hsl-runs' \
-              --exclude='node_modules' --exclude='*.tgz' --exclude='*.zip' \
-              -czf "/tmp/pkg/org-${VERSION}-src.tar.gz" .
-          cd dist && zip -qr "/tmp/pkg/org-${VERSION}-dist.zip" . && cd -
-          mv /tmp/pkg/*.tar.gz /tmp/pkg/*.zip .
+              --exclude='node_modules' --exclude='dist-bin' --exclude='*.tgz' --exclude='*.zip' \
+              -czf "/tmp/org-${VERSION}-src.tar.gz" .
+          cd dist && zip -qr "/tmp/org-${VERSION}-dist.zip" . && cd -
+          ls -lh /tmp/org-*.tar.gz /tmp/org-*.zip
 
-      - name: 创建 GitHub Release
+      - name: 创建 GitHub Release（5 平台二进制 + 源码 + dist 快照）
         uses: softprops/action-gh-release@v2
         with:
           body_path: /tmp/release-notes.md
           files: |
-            org-${{ github.ref_name }}-src.tar.gz
-            org-${{ github.ref_name }}-dist.zip
+            release-assets/org-*.zip
+            /tmp/org-*.tar.gz
+            /tmp/org-*-dist.zip

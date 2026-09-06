@@ -28,6 +28,31 @@ jobs:
       - name: 机制级测试（结构闸门 / README 走读 / 动力学点火）
         run: bun test tests/
 
+      # TUI：离屏冒烟（纯渲染 + 事件管线 + 进程内桥真实执行），无 TTY 可跑
+      - name: TUI 冒烟（离屏 20 断言 + 进程内引擎桥）
+        run: bun tui/smoke.ts
+
+      # 单二进制分发前置：payload 必须与 hsl/toolchain/demo-ws/fixtures 逐字节同步
+      - name: payload 新鲜度（build-bin 再生后不允许有 diff）
+        run: |
+          bun scripts/build-bin.ts --payload-only
+          if [[ -n "$(git status --porcelain build/payload.json)" ]]; then
+            echo "::error::build/payload.json 过期——运行 bun scripts/build-bin.ts --payload-only 后提交"
+            git diff -- build/payload.json | head -40
+            exit 1
+          fi
+
+      # 单二进制冒烟：当前平台产物 + 无 bun 环境（进程内兜底车道）双验证
+      - name: 单二进制冒烟（含无 bun 环境）
+        run: |
+          bun scripts/build-bin.ts
+          ./build/org check | tail -1
+          ./build/org tui --print > /tmp/frame.txt && head -3 /tmp/frame.txt
+          # 无 bun 环境：进程内兜底车道全链路（check / demo / TUI 帧）
+          env -i HOME="$HOME" PATH="/usr/bin:/bin" ./build/org check | tail -1
+          env -i HOME="$HOME" PATH="/usr/bin:/bin" ./build/org demo | tail -3
+          env -i HOME="$HOME" PATH="/usr/bin:/bin" ./build/org tui --print --demo > /tmp/frame2.txt && head -3 /tmp/frame2.txt
+
       - name: 全叙事冒烟（三连跑 + 直连 + 暖移交，自动导出 dist/demo）
         run: bun cli/org.ts demo
 

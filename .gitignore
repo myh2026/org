@@ -8,6 +8,13 @@ out-ask/
 
 # 依赖与构建
 node_modules/
+dist-bin/
+build/org
+build/org.exe
+build/org-linux-*
+build/org-darwin-*
+build/org-windows-*
+*.tmp-
 dist/pkg/
 *.tgz
 *.zip

@@ -1,16 +1,15 @@
 {
   "name": "org-harness",
-  "version": "0.3.0",
-  "type": "module",
-  "description": "ORG — Organization Harness：基于 HSL 的组织化多智能体系统（子智能体可生成、可验收、可复用、可演进）。",
-  "license": "MIT",
+  "version": "0.4.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/myh2026/org"
   },
+  "description": "ORG — Organization Harness：基于 HSL 的组织化多智能体系统（子智能体可生成、可验收、可复用、可演进；OpenCode 级 TUI · Windows/macOS/Linux 单二进制）。",
   "engines": {
     "bun": ">=1.1.0"
   },
+  "license": "MIT",
   "scripts": {
     "check": "bun cli/org.ts check",
     "demo": "bun cli/org.ts demo",
@@ -18,6 +17,12 @@
     "fixture": "bun scripts/make-fixture.ts",
     "status": "bun cli/org.ts status",
     "score": "bun cli/org.ts score",
-    "handoff": "bun cli/org.ts handoff"
+    "handoff": "bun cli/org.ts handoff",
+    "tui": "bun tui/main.tsx",
+    "tui:smoke": "bun tui/smoke.ts"
+  },
+  "type": "module",
+  "devDependencies": {
+    "@types/bun": "^1.4.1"
   }
 }

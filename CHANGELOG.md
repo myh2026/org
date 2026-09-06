@@ -1,6 +1,62 @@
 # CHANGELOG
 
+## v0.4.0（2026-09-06）
+
+**OpenCode 级终端前端（TUI）+ Windows/macOS/Linux 三平台单二进制分发**。
+产品形态从「开发者克隆仓库跑 CLI」升级为「终端用户下载即用」。
+
+### 新增
+
+- **组织驾驶舱 TUI**（`tui/`，零依赖自研渲染器，规格见 `docs/tui-spec.md`）：
+  - 三区布局：左栏（会话 / 专家库 / 池与固化，Tab 切换 · j/k 移动 · Enter 打开）+
+    主区事件流 + 底栏输入与状态；
+  - 八类事件卡片：任务分解（A/B/C/D 路由徽标四色）、工厂五步 stepper、四态裁决徽标
+    （Accept 绿 / Revise 琥珀 / Reject 红 / Escalate 紫）、固化（❄冻结 ⚡命中）、补丁
+    （版本 bump + git sha + 金丝雀确认）、直连（多轮 + 记账）、完成卡（成本衰减 5→1→0）、
+    系统卡；
+  - 输入协议：任务回车派单 / `?专家 问题?` 直连 / `:demo :replay :score :theme :status
+    :clear :help :quit`；
+  - 三主题（org-dark emerald 系 / org-light / paper 打印友好）、窄终端降级（<100 列隐左栏）、
+    帮助浮层（`?`）、运行取消（Esc）、历史会话秒开重演（`:replay`，不重跑引擎）；
+  - `lib/engine.ts` 引擎桥：CLI 与 TUI 共用——子进程优先（保留嵌套解释器蓝绿语义）、
+    事件流 150ms 增量 tail（events.jsonl + journal.jsonl 权威去重）、SIGTERM 取消；
+  - `tui/smoke.ts` 离屏冒烟（20 断言，含进程内桥路径），CI 无 TTY 可跑。
+- **三平台单二进制分发**（`scripts/build-bin.ts` + `.github/workflows/release.yml` 矩阵）：
+  - 5 目标交叉编译：`bun-linux-x64 / bun-linux-arm64 / bun-darwin-x64 / bun-darwin-arm64 /
+    bun-windows-x64`；
+  - 运行时资源打包（`build/payload.json`：hsl 源码 + vendored dhv-ts + 工作区模板 +
+    fixture 剧本，55 文件 / 934KB）→ 二进制按内容指纹解包到 `~/.org/runtime-<sha1>/`；
+  - **无 bun 环境全功能**：vendored dhv-ts 重构出 `cliMain` 可编程入口 +
+    `$host.dhv.{check,run}` 进程内兜底 API + HSL 工厂闸门双车道（bun 在场走嵌套子进程
+    ——蓝绿语义不变；缺席走进程内——路径基准显式对齐 workspace）。实测无 bun 单二进制
+    `check 30/30`、全叙事 `demo`（mint→patch→蓝绿→直连→暖移交）完整通过。
+
+### 变更
+
+- `cli/org.ts`：`tui` 子命令（进程内加载 `tui/entry.ts`）；引擎执行统一走 `lib/engine.ts
+  dhvRun`（bun 子进程优先 → 进程内 fallback）；默认工作区解析收敛到 `lib/root.ts`。
+- `cli/org.ts check` 的逐文件检查改为异步批量（进程内兜底路径下不再逐个冷启动）。
+
+### 工具链回馈（vendored dhv-ts 与上游同步）
+
+- `version.ts`：嵌入执行（打包进宿主二进制）时 `import.meta.dir` 指向虚拟 FS，读不到
+  package.json —— 回退 `DHV_VERSION` 环境变量，最终回退 `0.0.0`（单一来源纪律不变，
+  只增稳健性）。
+- `main.ts`：顶层执行重构为 `export async function cliMain(argv): Promise<number>` +
+  `import.meta.main` 守卫——CLI 行为零变化，嵌入场景获得无缓存泄漏的重复调用能力。
+- `host.ts`：新增 `$host.dhv.check(file)` / `$host.dhv.run(args)`——进程内嵌套执行面
+  （懒加载 cliMain 规避 main↔host 循环；stdout/stderr 捕获后恢复）。
+
+### 兼容性
+
+- 源码模式（`bun cli/org.ts …`）行为零变化：69/69 测试与 50 模块 check 全绿；
+- 二进制默认工作区 `~/.org/workspace`（源码模式仍为仓库内 `demo-run/`）；
+- 二进制运行 `--model deepseek` 需要 `z-ai-web-dev-sdk` 可达（scripted 默认模式无外联）。
+
+---
+
 ## v0.3.0（2026-09-06）
+
 
 运行时动力学收官：**影子晋升 / 静默更新检测 / N 版本冗余 / 三档补丁 / 多轮直连 / 暖移交**，
 外加 69 个机制级测试与工具链 vendored 入库。
