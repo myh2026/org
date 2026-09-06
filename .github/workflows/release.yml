@@ -67,19 +67,19 @@ jobs:
           VERSION="${GITHUB_REF_NAME}"
           mkdir -p pkg
           cp dist-bin/org* pkg/
-          cat > pkg/README.txt <<'EOF'
-ORG — Organization Harness（单二进制）
-
-  解压后把 org（或 org.exe）放入 PATH，然后：
-
-    org            打开组织驾驶舱（TUI）
-    org demo       全叙事演示（无需 bun / 无外联）
-    org run --task "..."   团队模式派单
-    org check      结构闸门全量校验
-
-  工作区默认 ~/.org/workspace · 运行时资源自动解包 ~/.org/runtime-<hash>
-  主页：https://github.com/myh2026/org
-EOF
+          {
+            echo "ORG — Organization Harness（单二进制）"
+            echo ""
+            echo "  解压后把 org（或 org.exe）放入 PATH，然后："
+            echo ""
+            echo "    org            打开组织驾驶舱（TUI）"
+            echo "    org demo       全叙事演示（无需 bun / 无外联）"
+            echo "    org run --task \"...\"   团队模式派单"
+            echo "    org check      结构闸门全量校验"
+            echo ""
+            echo "  工作区默认 ~/.org/workspace · 运行时资源自动解包 ~/.org/runtime-<hash>"
+            echo "  主页：https://github.com/myh2026/org"
+          } > pkg/README.txt
           (cd pkg && zip -qr "../${{ matrix.artifact }}" .)
           mv "${{ matrix.artifact }}" /tmp/
           ls -lh /tmp/${{ matrix.artifact }}
