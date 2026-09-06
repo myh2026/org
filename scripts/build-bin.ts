@@ -58,6 +58,9 @@ function collectFiles(): PayloadFile[] {
     };
     walk(absBase);
   }
+  // 字典序规范化：readdirSync 顺序跨文件系统不稳定（ext4 hash 序 vs runner 序），
+  // 不排序则 JSON 键序随环境漂移 —— CI 与本地的 payload 永远对不上。
+  out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
   return out;
 }
 
