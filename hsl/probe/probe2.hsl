@@ -1,0 +1,101 @@
+// ============================================================================
+// probe2.hsl — 运行时探针：验证解释器对 ORG 运行时所需特性的真实行为
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq)]
+export enum Verdict {
+    Accept,
+    Revise { note: String, count: u32 },
+    Reject { reason: String },
+    Escalate { question: String },
+}
+
+#[derive(Debug, Clone)]
+export struct Worker {
+    name: String,
+    revises: u32,
+    max_revises: u32,
+}
+
+impl Worker {
+    fn new(name: String) -> Worker {
+        Worker { name: name, revises: 0, max_revises: 2 }
+    }
+}
+
+export fn main() -> Result<(), String> {
+    // 1) HashMap 运行时行为
+    let mut scores: HashMap<String, u32> = HashMap::new();
+    scores.insert(String::from("parse"), 3);
+    scores.insert(String::from("crawl"), 5);
+    let total = scores.len();
+    println!("[probe] hashmap len = {}", total);
+
+    // 2) for 循环 + 元组解构 + 索引
+    let pairs = vec![String::from("a"), String::from("bb"), String::from("ccc")];
+    let mut lens: u32 = 0;
+    for p in pairs.iter() {
+        lens += p.len() as u32;
+    }
+    println!("[probe] total chars = {}", lens);
+
+    // 3) f64 算术 + as 显式转换
+    let ratio = lens as f64 / 10.0;
+    if ratio > 0.5 {
+        println!("[probe] ratio = {}", ratio);
+    }
+
+    // 4) 嵌套 match + Option 组合
+    let maybe: Option<Verdict> = Some(Verdict::Revise { note: String::from("fields"), count: 1 });
+    match maybe {
+        Some(Verdict::Revise { note: n, count: c }) => {
+            println!("[probe] revise note={} count={}", n, c);
+        },
+        Some(Verdict::Accept) => {
+            println!("[probe] accept");
+        },
+        Some(Verdict::Reject { reason: _ }) => {},
+        Some(Verdict::Escalate { question: _ }) => {},
+        None => {
+            println!("[probe] none");
+        },
+    }
+
+    // 5) struct 更新（mut self 方法风格）
+    let mut w = Worker::new(String::from("parser"));
+    w.revises += 1;
+    println!("[probe] worker {} revises={}", w.name, w.revises);
+
+    // 6) native 逃生舱（$host.events + 时间）
+    let stamp: String = native typescript {
+        return String(Date.now());
+    };
+    println!("[probe] native stamp len = {}", stamp.len());
+
+    Ok(())
+}
+
+enum Signal {
+    TaskReady,
+    ReportReady,
+}
+
+graph Supervisor -> Result<u32, String> {
+    node mut tally: Vec<u32> = Vec::new();
+    node counter: Worker = Worker::new(String::from("sup"));
+
+    edge tally -> counter on Signal::TaskReady;
+    edge counter -> tally on Signal::ReportReady;
+
+    let mut rounds: u32 = 0;
+
+    loop {
+        tally.push(rounds);
+        rounds += 1;
+        if rounds >= 3 {
+            break;
+        }
+    }
+
+    Ok(rounds)
+}

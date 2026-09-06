@@ -1,0 +1,24 @@
+// ============================================================================
+// probe4.hsl — Registry::load 最小复现
+// ============================================================================
+import { Registry } from "../registry/manifest.hsl";
+
+export fn main() -> Result<(), String> {
+    println!("[probe4] loading registry...");
+    let reg = Registry::load(String::from("registry"));
+    match reg {
+        Ok(r) => {
+            println!("[probe4] loaded {} experts", r.experts.len());
+            let found = r.find(String::from("结构化解析公告"), &vec![String::from("parse")]);
+            match found {
+                Some(m) => println!("[probe4] found: {}", m.name),
+                None => println!("[probe4] no match"),
+            }
+            Ok(())
+        },
+        Err(e) => {
+            println!("[probe4] error: {}", e.render());
+            Err(String::from("load failed"))
+        },
+    }
+}

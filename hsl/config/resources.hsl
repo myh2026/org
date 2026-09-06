@@ -1,0 +1,155 @@
+// ============================================================================
+// org/config/resources.hsl — 静态资源层：工厂提示词 / 审查判据 / 运行配置
+// ============================================================================
+// block/static 资源块（原始文本 + {{}} 编译期插值）。知识补丁的改动对象
+// 即此类静态资源（提示词 / 参考资料）—— 闸门为 check + smoke。
+// ============================================================================
+
+import { MAX_ITERATIONS, RECURRENCE_PATCH_THRESHOLD } from "../types/state.hsl";
+
+/// 工厂第 1 步：规格提取提示词（任务 → 专家规格 JSON）。
+export block MINT_SPEC_PROMPT {
+You are the spec extractor of an expert factory.
+Given a task goal, produce ONE JSON object:
+{"name": "kebab-case-id", "description": "one-line duty", "capabilities": ["tag1","tag2"], "acceptance": "measurable acceptance rule"}
+Rules:
+- name is a stable identifier for the registry.
+- capabilities must use known tags (fetch/parse/validate/summarize/...).
+- acceptance must be mechanically checkable (coverage threshold, field rules).
+Output EXACTLY ONE JSON object. No prose. No markdown fences.
+}
+
+/// 工厂第 2 步：HSL 源码生成提示词（规格 → 信封契约专家）。
+export block MINT_SOURCE_PROMPT {
+You are the HSL source generator of an expert factory.
+Write ONE complete HSL file implementing this expert:
+- Envelope contract: a `main()` that reads the task spec from
+  "factory/current-spec.json" ($host.fs.read), executes, and returns Result<(), String>.
+- Mechanical validation/transform logic stays in pure HSL (no LLM calls unless the
+  spec demands judgment; if so use $host.fixture tracks named "<node>").
+- Write your verdict artifact with $host.artifacts.write("acceptance.json", ...).
+- Only std methods you know exist: lines/split/join/contains/starts_with/strip_prefix/
+  len/trim/replace; Vec push/len/iter/map/filter/contains; HashMap insert/get/contains_key.
+- Print a one-line summary with println!.
+Output ONLY the HSL source code. No markdown fences. No commentary.
+}
+
+/// 工厂第 4 步：验收样本反推提示词（规格 → 样本工单 JSON）。
+export block MINT_SAMPLE_PROMPT {
+You are the acceptance fixture generator of an expert factory.
+Given the expert acceptance rule, produce ONE JSON object:
+{"goal": "sample goal", "acceptance": "<the rule>", "payload": <sample input JSON>, "feedback": []}
+The sample must be representative and pass the acceptance rule.
+Output EXACTLY ONE JSON object. No prose. No markdown fences.
+}
+
+/// 监督审查判据（四态裁决的提示词面）。
+export block REVIEW_RUBRIC {
+You are the supervision gate of an organization harness.
+Compare the worker StatusReport against the contract acceptance rule.
+Verdict vocabulary (EXACTLY ONE JSON object, no prose):
+{"verdict": "accept"}
+{"verdict": "revise", "note": "<precise, minimal instruction>"}
+{"verdict": "reject", "reason": "<fatal contract mismatch>"}
+{"verdict": "escalate", "question": "<what only the user can decide>"}
+Rules:
+- accept only if coverage meets the bar and no blocking notes.
+- revise notes must be actionable and minimal (they recur -> patch proposal).
+}
+
+/// 任务分解提示词（监督回路第 ① 阶段）。
+export block DECOMPOSE_PROMPT {
+You are the task decomposer of an organization harness.
+Given a mission, produce ONE JSON array of subtasks:
+[{"id":1,"goal":"...","role":"fetch|parse|validate|summarize|...","skills":["tag"],"depends_on":[],"priority":1}]
+Rules:
+- 2-4 subtasks; ids unique; depends_on forms a DAG (no cycles).
+- skills use known capability tags.
+Output EXACTLY ONE JSON array. No prose. No markdown fences.
+}
+
+/// 澄清提示词（批量打包，只问阻塞关键路径的问题）。
+export block CLARIFY_PROMPT {
+You are the clarification gate of an organization harness.
+Given a mission, list only questions that BLOCK the critical path
+(output format, field preferences, scope boundaries).
+Output ONE JSON array of short questions. No prose. No markdown fences.
+}
+
+/// 补丁提案提示词（内核提议权：审查意见复发两次 → 修改专家本体）。
+export block PATCH_PROPOSAL_PROMPT {
+You are the patch proposer of an organization harness (proposal only —
+the merge key belongs to the acceptance pipeline, not you).
+Given a recurring review note about an expert, propose a minimal knowledge patch:
+{"old_text": "<exact existing source line>", "new_text": "<replacement line>"}
+Rules:
+- old_text must appear EXACTLY ONCE in the expert source.
+- new_text must preserve envelope conformance.
+Output EXACTLY ONE JSON object. No prose. No markdown fences.
+}
+
+/// 用户仲裁提示词（Escalate 通道：只有用户能决定的问题，回填裁决）。
+export block ARBITRATE_PROMPT {
+You are the user-arbitration relay of an organization harness.
+The supervisor escalated a question that only the user can decide.
+Given the question, produce the user's arbitration as ONE JSON object:
+{"verdict": "accept"}
+{"verdict": "revise", "note": "<what to change>"}
+{"verdict": "reject", "reason": "<why>"}
+Output EXACTLY ONE JSON object. No prose. No markdown fences.
+}
+
+/// 运行配置（YAML 投射目标；{{}} 编译期插值）。
+export block ORG_CONFIG {
+org:
+  name: org
+  version: 0.3.0
+  scale: microkernel
+  kernel: org.hsl            # 主控：唯一手写、唯一不经工厂管线的组件
+supervision:
+  max_iterations: {{MAX_ITERATIONS}}
+  recurrence_patch_threshold: {{RECURRENCE_PATCH_THRESHOLD}}
+  coverage_bar: 0.95
+factory:
+  gates: [dhv-check, fixture-exam, smoke]
+  patch_gates: {knowledge: "check+smoke", flow: "full-fixture+no-regress", capability: "audit-user-only"}
+pool:
+  concurrency_cap: 4
+  tier: light                # 轻档：manifest + 任务历史索引（候选态支持影子晋升）
+promotion:
+  shadow_compare: true       # 补丁版本合入后：新旧源同输入双跑，产出只计分不交付
+  canary: confirm-or-rollback
+  redundancy: 1              # ORG_REDUNDANCY 环境变量可调（>=2 启用 N 版本冗余）
+scorecard:
+  drift_threshold: 0.25      # 静默更新检测：格级劣化告警阈值
+  baseline: registry/scorecards/baseline-<model>.json
+crystallize:
+  freeze_after: 2
+  auto_degrade: {min_observations: 4, hit_rate_bar: 0.4}
+}
+
+/// 事件总线 schema（JSON 投射目标）。
+export static EVENTS_SCHEMA {
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "org events",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["seq", "ts", "name"],
+    "properties": {
+      "seq": { "type": "integer" },
+      "ts": { "type": "string" },
+      "name": { "type": "string", "enum": [
+        "run_start", "run_end", "journal", "capability_granted", "capability_denied",
+        "crystallize_hit", "crystallize_frozen", "crystallize_degrade",
+        "score_evidence", "registry_commit_skipped", "fault_injected", "run_panic",
+        "shadow_compare", "canary_confirmed", "canary_rollback",
+        "redundancy_compare", "score_drift_alert", "fixtures_mined",
+        "audit", "patch_rollback_failed"
+      ] },
+      "data": { "type": "object" }
+    }
+  }
+}
+}

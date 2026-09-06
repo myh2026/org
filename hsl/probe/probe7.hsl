@@ -1,0 +1,34 @@
+// ============================================================================
+// probe7.hsl — HSL bug 复现：Vec::iter_mut 缺失于解释器内建方法面
+// ============================================================================
+// 现象：checker 接受 `.iter_mut()`（nova/types/state.hsl 的 accept/complete_task
+// 就在用它），但解释器 builtins.ts 的 VEC_METHODS 未注册 iter_mut →
+// 运行期 "Vec 没有方法 iter_mut"。
+// 语义要点：解释器对 struct（JS 对象引用）透明共享 —— iter_mut 返回数组本体
+// 即可让 `for t in v.iter_mut() { t.field = ... }` 的字段写透传（引用语义）。
+// ============================================================================
+#[derive(Debug, Clone)]
+struct Row {
+    id: u32,
+    done: bool,
+}
+
+export fn main() -> Result<(), String> {
+    let mut rows: Vec<Row> = vec![
+        Row { id: 1, done: false },
+        Row { id: 2, done: false },
+    ];
+    for r in rows.iter_mut() {
+        if r.id == 1 {
+            r.done = true;
+        }
+    }
+    let first = rows[0].clone();
+    println!("[probe7] id={} done={}（期望 id=1 done=true）", first.id, first.done);
+    if first.done {
+        println!("[probe7] iter_mut 字段写透传 ✓");
+        Ok(())
+    } else {
+        Err(String::from("iter_mut 字段写未透传（失败）"))
+    }
+}

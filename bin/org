@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# org — POSIX 启动器（Linux / macOS）
+# 用法：bin/org <command> [args]     等价于 bun cli/org.ts <command> [args]
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec bun "$DIR/cli/org.ts" "$@"

@@ -1,0 +1,130 @@
+// ============================================================================
+// org/runtime/fixture-miner.hsl — journal → fixture 沉淀（生产即出题）
+// ============================================================================
+// README「事件溯源」第四回报的落地：真实运行的审查裁决（行为证据）自动沉淀
+// 为验收基准题 —— 评测基准的来源从「自动生长 vs 人工种子」的二选一，变为
+// 「生产即出题」的结构性解。
+//
+// v1 挖掘面：监督回路的 review 期刊条目（verdict 行为信号，客观档）。
+//   journal 条目（org.hsl）：detail = "task#<id> <role> verdict=<V> coverage=<C>"
+//   挖掘产物：registry/fixtures-mined/reviews.json
+//     {"source":"journal","run_id":"...","tracks":{"review:<role>":["{verdict...}"]}}
+//   去重：同轨道内 verdict 重复只保留一条（人工抽查兜底之外的机械去重；
+//   README 诚实边界：抽检比例是开放问题）。
+// ============================================================================
+
+import { JournalEntry } from "./journal.hsl";
+
+/// 挖掘结果（事件与 metrics 的原料）。
+#[derive(Debug, Clone)]
+export struct MinedFixtures {
+    /// 挖掘出的基准题条数（去重后）。
+    entries: u32,
+    /// 触及的轨道数（review:<role>）。
+    tracks: u32,
+    /// 产物路径。
+    path: String,
+}
+
+/// 从本期 journal 条目挖掘审查基准题并落盘（sink 阶段调用）。
+export fn mine_reviews(entries: Vec<JournalEntry>, run_id: String) -> MinedFixtures {
+    // 逐条归类：track 名 → verdict JSON 去重集（条目形态 "<track>|||<body>"）
+    let mut track_names: Vec<String> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    let mut mined_items: Vec<String> = Vec::new();
+    for e in entries.iter() {
+        if e.action != String::from("review") {
+            continue;
+        }
+        let role = review_role(e.detail.clone());
+        if role.len() == 0 {
+            continue;
+        }
+        let track = format!("review:{}", role);
+        let verdict_json = verdict_of_detail(e.detail.clone());
+        match verdict_json {
+            Some(body) => {
+                let dedup_key = format!("{}::{}", track, body);
+                if seen.contains(dedup_key.clone()) == false {
+                    seen.push(dedup_key);
+                    mined_items.push(format!("{}|||{}", track, body));
+                    if track_names.contains(track.clone()) == false {
+                        track_names.push(track);
+                    }
+                }
+            },
+            None => {},
+        }
+    }
+
+    // 组装 tracks JSON（join 序列化，无尾逗号；基准题本体已是合法 JSON，直接嵌入）
+    let mut track_items: Vec<String> = Vec::new();
+    for t in track_names.iter() {
+        let mut bodies: Vec<String> = Vec::new();
+        for item in mined_items.iter() {
+            let parts = item.split("|||");
+            let segs: Vec<String> = parts.collect();
+            if segs.len() == 2 && segs[0].clone() == t.clone() {
+                bodies.push(segs[1].clone());
+            }
+        }
+        if bodies.len() > 0 {
+            track_items.push(format!("\"{}\":[{}]", t.clone(), bodies.join(",")));
+        }
+    }
+    let tracks_json = track_items.join(",");
+    let body = format!(
+        "{{\"source\":\"journal\",\"run_id\":\"{}\",\"tracks\":{{{}}}}}",
+        run_id, tracks_json
+    );
+    let path = String::from("registry/fixtures-mined/reviews.json");
+    let mined = mined_items.len() as u32;
+    if mined > 0 {
+        let out_body = body.clone();
+        let out_path = path.clone();
+        let _ = native typescript {
+            $host.fs.write(out_path, out_body);
+            return true;
+        };
+    }
+    let track_count = track_names.len() as u32;
+    let path_out = path.clone();
+    let _ = native typescript {
+        $host.events.emit("fixtures_mined", { entries: mined, tracks: track_count, path: path_out });
+        return true;
+    };
+    MinedFixtures { entries: mined, tracks: track_count, path: path }
+}
+
+/// review 条目 → 角色（detail = "task#<id> <role> verdict=..."）。
+fn review_role(detail: String) -> String {
+    let words = detail.split(" ");
+    let mut role: String = String::new();
+    for w in words.iter() {
+        if w.starts_with("task#") {
+            continue;
+        }
+        if w.starts_with("verdict=") || w.starts_with("coverage=") {
+            continue;
+        }
+        if w.len() > 0 {
+            role = w.clone();
+        }
+    }
+    role
+}
+
+/// review 条目 → 基准题 JSON（None = 非裁决行 / 不可判读）。
+fn verdict_of_detail(detail: String) -> Option<String> {
+    if detail.contains("verdict=Accept") {
+        Some(String::from("{\"verdict\":\"accept\"}"))
+    } else if detail.contains("verdict=Revise") {
+        Some(String::from("{\"verdict\":\"revise\",\"note\":\"(mined from journal; see run record)\"}"))
+    } else if detail.contains("verdict=Reject") {
+        Some(String::from("{\"verdict\":\"reject\",\"reason\":\"(mined from journal; see run record)\"}"))
+    } else if detail.contains("verdict=Escalate") {
+        Some(String::from("{\"verdict\":\"escalate\",\"question\":\"(mined from journal; see run record)\"}"))
+    } else {
+        None
+    }
+}

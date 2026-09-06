@@ -1,0 +1,217 @@
+// ============================================================================
+// org/models/scorecard.hsl — 模型能力评分卡：能力轴 × 任务类矩阵 + 证据归因
+// ============================================================================
+// 每个模型版本一张卡：维度 = 能力轴 × 任务类，每格 = 分数 + 置信度（样本量）+
+// 更新时间。评分卡是注册表中的一等资产（有 manifest / git 历史 / 版本）。
+//
+// 证据分级纪律（设计铁律 #6）：客观行为信号结构性优先于裁判打分——
+//   客观档（权重 1.0）：fixture 通过率 / Revise 率 / 预算遵守率 / 固化命中率
+//                        / 直连接受度
+//   裁判档（权重 0.5）：影子对比得分（v0.3.0 起采集：金丝雀双跑镜像对比）
+// ============================================================================
+
+/// 证据种类（来源 + 客观度分级）。
+#[derive(Debug, Clone)]
+export enum EvidenceKind {
+    /// fixture 考试通过率（工厂验收；确定性判分 —— 客观档）。
+    FixturePass,
+    /// 监督四态裁决中的 Revise / Reject / Escalate 率（纯行为计数 —— 客观档）。
+    VerdictRate,
+    /// 契约预算遵守率（预算水位 —— 客观档）。
+    BudgetAdherence,
+    /// 固化命中率（固化管线观测 —— 客观档）。
+    CrystallizeHit,
+    /// 直连会话用户接受度（用户行为即判分 —— 客观档）。
+    DirectAccept,
+    /// 影子对比得分（候选 vs 在岗同输入镜像 —— 裁判档，权重 0.5）。
+    ShadowCompare,
+    /// 金丝雀确认（验收样本上新旧版本产出一致 —— 客观档）。
+    CanaryConfirm,
+}
+
+impl EvidenceKind {
+    /// 证据权重（客观 1.0；裁判 0.5 —— 设计铁律 #6：客观信号结构性优先）。
+    fn weight(self) -> f64 {
+        match self {
+            EvidenceKind::ShadowCompare => 0.5,
+            _ => 1.0,
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            EvidenceKind::FixturePass => String::from("fixture_pass"),
+            EvidenceKind::VerdictRate => String::from("verdict_rate"),
+            EvidenceKind::BudgetAdherence => String::from("budget_adherence"),
+            EvidenceKind::CrystallizeHit => String::from("crystallize_hit"),
+            EvidenceKind::DirectAccept => String::from("direct_accept"),
+            EvidenceKind::ShadowCompare => String::from("shadow_compare"),
+            EvidenceKind::CanaryConfirm => String::from("canary_confirm"),
+        }
+    }
+}
+
+/// 能力轴标签（固定核心枚举的字符串形态；治理面审批扩展）。
+export const AXES: Vec<String> = vec![
+    String::from("structured_output"),
+    String::from("instruction_following"),
+    String::from("tool_reliability"),
+    String::from("long_context"),
+    String::from("codegen"),
+    String::from("judgment"),
+    String::from("cost_efficiency"),
+    String::from("latency"),
+];
+
+/// 任务类标签（同构：固定核心 + 治理扩展）。
+export const TASK_CLASSES: Vec<String> = vec![
+    String::from("code"),
+    String::from("long_doc"),
+    String::from("structured_extract"),
+    String::from("multi_turn"),
+];
+
+/// 一条行为证据（归因原料：model × 轴 × 任务类 → 观测值）。
+#[derive(Debug, Clone)]
+export struct Evidence {
+    kind: EvidenceKind,
+    model: String,
+    axis: String,
+    task_class: String,
+    /// 观测值 0.0–1.0（通过率 / 遵守率 / 命中率 / 接受率）。
+    value: f64,
+}
+
+impl Evidence {
+    fn new(kind: EvidenceKind, model: String, axis: String, task_class: String, value: f64) -> Evidence {
+        Evidence { kind: kind, model: model, axis: axis, task_class: task_class, value: value }
+    }
+}
+
+/// 评分卡（运行内聚合体；落盘为 artifacts/scorecard.json）。
+#[derive(Debug, Clone)]
+export struct Scorecard {
+    model: String,
+    /// 格键 "axis|task_class" → (加权分累计, 权重累计)。
+    cells: HashMap<String, (f64, f64)>,
+    evidence_count: u32,
+}
+
+impl Scorecard {
+    fn new(model: String) -> Scorecard {
+        Scorecard { model: model, cells: HashMap::new(), evidence_count: 0 }
+    }
+
+    /// 织入跨运行累计证据数（评分卡作为增长账本：cells 分数始终是当期窗口
+    /// 聚合，evidence_count 是累计归因条数 —— 静默更新检测的证据基础随
+    /// 运行单调增长，由调用方从 evidence-ledger 读取上一期累计值传入）。
+    fn carried(mut self, prev: u32) -> Scorecard {
+        self.evidence_count = self.evidence_count + prev;
+        self
+    }
+
+    /// 当期归因条数（evidence-ledger 累计的加数）。
+    fn evidence_count(self) -> u32 {
+        self.evidence_count
+    }
+
+    /// 归因一条证据（行为信号加权聚合；客观档权重结构性优先）。
+    fn attribute(mut self, e: Evidence) -> Scorecard {
+        let key = format!("{}|{}", e.axis, e.task_class);
+        let weight = e.kind.clone().weight();
+        let prev = self.cells.get(key.clone()).cloned();
+        let (acc, wacc) = match prev {
+            Some((a, w)) => (a + e.value * weight, w + weight),
+            None => (e.value * weight, weight),
+        };
+        self.cells.insert(key, (acc, wacc));
+        self.evidence_count += 1;
+        let model = self.model.clone();
+        let axis = e.axis.clone();
+        let task_class = e.task_class.clone();
+        let kind_label = e.kind.clone().label();
+        let value = e.value;
+        let _ = native typescript {
+            $host.events.emit("score_evidence", { model, axis, task_class, kind: kind_label, value });
+            return true;
+        };
+        self
+    }
+
+    /// 取一格的分数（无证据 → None）。
+    fn cell_score(self, axis: String, task_class: String) -> Option<f64> {
+        let key = format!("{}|{}", axis, task_class);
+        match self.cells.get(key) {
+            Some((acc, w)) => {
+                if w > 0.0 {
+                    Some(acc / w)
+                } else {
+                    None
+                }
+            },
+            None => None,
+        }
+    }
+
+    /// JSON 序列化（artifacts 落盘 + org score 的原料）。
+    fn to_json(self) -> String {
+        let mut items: Vec<String> = Vec::new();
+        for (k, v) in self.cells {
+            let (acc, w) = v;
+            let score = if w > 0.0 { acc / w } else { 0.0 };
+            items.push(format!(
+                "{{\"cell\":\"{}\",\"score\":{},\"confidence\":{}}}",
+                k, score, w
+            ));
+        }
+        let joined = items.join(",");
+        format!(
+            "{{\"model\":\"{}\",\"evidence_count\":{},\"cells\":[{}]}}",
+            self.model, self.evidence_count, joined
+        )
+    }
+
+    /// 人类可读快照。
+    fn snapshot(self) -> String {
+        let mut out = format!("scorecard[{}] evidence={} cells={}\n", self.model, self.evidence_count, self.cells.len());
+        for (k, v) in self.cells {
+            let (acc, w) = v;
+            let score = if w > 0.0 { acc / w } else { 0.0 };
+            out.push_str(format!("  {} -> {:.3} (n={})\n", k, score, w).as_str());
+        }
+        out
+    }
+}
+
+/// 证据值计算辅助：裁决序列 → Revise 率（客观行为计数）。
+export fn revise_rate(accepts: u32, revises: u32, rejects: u32, escalates: u32) -> f64 {
+    let total = accepts + revises + rejects + escalates;
+    if total == 0 {
+        1.0
+    } else {
+        let good = accepts;
+        good as f64 / total as f64
+    }
+}
+
+/// 证据值计算辅助：预算遵守率（未超支占比）。
+export fn budget_adherence(used: u32, cap: u32) -> f64 {
+    if cap == 0 {
+        return 0.0;
+    }
+    if used <= cap {
+        1.0
+    } else {
+        cap as f64 / used as f64
+    }
+}
+
+/// 证据值计算辅助：固化命中率（命中 / (命中 + 未命中)）。
+export fn crystallize_hit_rate(hits: u32, misses: u32) -> f64 {
+    let total = hits + misses;
+    if total == 0 {
+        0.0
+    } else {
+        hits as f64 / total as f64
+    }
+}

@@ -1,0 +1,20 @@
+{
+  "captured_at": "2026-09-06T13:07:44.090Z",
+  "commits": [
+    {
+      "sha": "3a5c6cf",
+      "subject": "patch record-validator -> 1.0.1 (remedy: count date_status=unparsed as valid (flagged, not excluded))",
+      "date": "2026-09-06 13:07:43 +0000"
+    },
+    {
+      "sha": "8bc5ac0",
+      "subject": "mint record-validator@1.0.0 (factory)",
+      "date": "2026-09-06 13:07:42 +0000"
+    },
+    {
+      "sha": "4da2a3a",
+      "subject": "registry template (notice-parser@1.0.0)",
+      "date": "2026-09-06 13:07:42 +0000"
+    }
+  ]
+}

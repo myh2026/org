@@ -1,0 +1,174 @@
+// ============================================================================
+// org/contracts/contract.hsl — 信封契约：任务规格 / 状态报告 / 四态裁决
+// ============================================================================
+// ORG 的接口基石。任何专家（无论人工手写 / 工厂生成 / 外部导入）对主控只暴露
+// 同一个外层签名：
+//
+//     fn run(spec: TaskSpec) -> Result<StatusReport, ExpertError>
+//
+// payload 按领域自定义（String 承载 JSON / 文本 / 摘要），外层类型统一保证
+// 主控可无差别组合任意专家 —— 这就是「信封模式」：
+// 全强类型互相卡死，全自由文本退化黑盒，信封是平衡点。
+// ============================================================================
+
+import { ExpertError } from "../types/errors.hsl";
+
+/// 任务规格（派单工单）：契约先行的物化。
+///
+/// 一份工单在派发前必须写明：交付物规格、验收标准、预算水位、返工上限。
+/// 审查因此成为「对照验收标准的有限动作」而非全程盯守。
+#[derive(Debug, Clone)]
+export struct TaskSpec {
+    task_id: u32,
+    goal: String,
+    /// 交付物规格：产出什么形态（表格字段 / 报告章节…）。
+    deliverable: String,
+    /// 验收标准：四态裁决的对照物。
+    acceptance: String,
+    /// 领域负载：专家自定义输入（原始材料、上下文、前序交付物）。
+    payload: String,
+    /// 预算水位（token 上限；模型调用前检查）。
+    budget_tokens: u32,
+    /// 返工上限（G7 精神：Revise 环必须有界）。
+    max_revises: u32,
+    /// 审查意见历史（返工时携带，S6 之外的第二重反馈通道）。
+    feedback: Vec<String>,
+}
+
+impl TaskSpec {
+    /// 从子任务 + 用户澄清答案组装契约。
+    fn forge(task_id: u32, goal: String, deliverable: String, acceptance: String,
+             payload: String, budget_tokens: u32, max_revises: u32) -> TaskSpec {
+        TaskSpec {
+            task_id: task_id,
+            goal: goal,
+            deliverable: deliverable,
+            acceptance: acceptance,
+            payload: payload,
+            budget_tokens: budget_tokens,
+            max_revises: max_revises,
+            feedback: Vec::new(),
+        }
+    }
+
+    /// 返工派单：携带审查意见（复制 + 追加，不可变风格）。
+    fn with_feedback(self, note: String) -> TaskSpec {
+        let mut next = self.clone();
+        next.feedback.push(note);
+        next
+    }
+
+    /// 预算检查：剩余预算是否够一次判定调用（以 1 次 512 token 为下界估计）。
+    fn can_afford(self, estimate: u32) -> bool {
+        self.budget_tokens >= estimate
+    }
+}
+
+/// 状态报告（信封 Ok 侧）：执行方对主控的结构化汇报。
+///
+/// 类型系统本身在强制摘要：执行方无法把原始流水账塞进 StatusReport。
+#[derive(Debug, Clone)]
+export struct StatusReport {
+    task_id: u32,
+    /// 实际交付物（摘要形态；完整产物写工作区文件，此处载引用）。
+    deliverable: String,
+    /// 契约覆盖率 0.0–1.0（对照 acceptance 的自评估，由审查复核）。
+    coverage: f64,
+    /// 结构化备注（发现的边界情况、被排除的记录及原因…）。
+    notes: Vec<String>,
+    /// token 消耗（成本谱系的叶子节点）。
+    tokens_used: u32,
+    /// 判定节点轨迹（固化管线的观测来源）。
+    node_trace: Vec<String>,
+    /// 判定节点模型调用量（固化命中后应下降）。
+    model_calls: u32,
+}
+
+impl StatusReport {
+    fn new(task_id: u32, deliverable: String, coverage: f64) -> StatusReport {
+        StatusReport {
+            task_id: task_id,
+            deliverable: deliverable,
+            coverage: coverage,
+            notes: Vec::new(),
+            tokens_used: 0,
+            node_trace: Vec::new(),
+            model_calls: 0,
+        }
+    }
+
+    /// 覆盖率是否达到验收线（默认 0.95：审查 Accept 的必要条件之一）。
+    fn meets_bar(self, bar: f64) -> bool {
+        self.coverage >= bar
+    }
+}
+
+/// 四态裁决（监督回路的核心词汇）。
+///
+///     Accept               收货
+///     Revise{note}         返工（计一次，受 max_revises 约束）
+///     Reject{reason}       重派（路由重选）
+///     Escalate{question}   提交用户仲裁
+///
+/// S6：对 Verdict 的 match 必须穷尽四个变体 —— 新增裁决态是编译期事件，
+/// 不是运行期惊喜。
+#[derive(Debug, Clone, PartialEq)]
+export enum Verdict {
+    Accept,
+    Revise { note: String },
+    Reject { reason: String },
+    Escalate { question: String },
+}
+
+impl Verdict {
+    /// 裁决名（事件与期刊的短标签）。
+    fn label(self) -> String {
+        match self.clone() {
+            Verdict::Accept => String::from("Accept"),
+            Verdict::Revise { note: _ } => String::from("Revise"),
+            Verdict::Reject { reason: _ } => String::from("Reject"),
+            Verdict::Escalate { question: _ } => String::from("Escalate"),
+        }
+    }
+
+    /// Revise 的意见键（复发计数的 key：同一意见第二次出现 → 补丁提案）。
+    fn recurrence_key(self) -> Option<String> {
+        match self.clone() {
+            Verdict::Revise { note } => Some(note),
+            Verdict::Accept => None,
+            Verdict::Reject { reason: _ } => None,
+            Verdict::Escalate { question: _ } => None,
+        }
+    }
+}
+
+/// 审查意见的规范化（复发比对前先折叠空白与大小写）。
+export fn normalize_note(note: String) -> String {
+    // 机械折叠：逐字符压缩连续空白 —— 判定在 HSL 侧（N3：native 只做 IO）
+    let mut out = String::new();
+    let mut prev_space = false;
+    for ch in note.chars() {
+        if ch == ' ' || ch == '\t' || ch == '\n' {
+            if prev_space == false {
+                out.push(' ');
+            }
+            prev_space = true;
+        } else {
+            out.push(ch);
+            prev_space = false;
+        }
+    }
+    out
+}
+
+/// 信封签名串（manifest.interface 的取值；工厂生成的专家必须同构）。
+export const ENVELOPE_SIGNATURE: String = String::from("fn(TaskSpec) -> Result<StatusReport, ExpertError>");
+
+/// 契约默认预算水位（token）：单子任务单次执行的合理上界。
+export const DEFAULT_BUDGET_TOKENS: u32 = 8_192;
+
+/// 契约默认返工上限（G7：Revise 环必须有界）。
+export const DEFAULT_MAX_REVISES: u32 = 2;
+
+/// 验收线：覆盖率低于此值时审查不应 Accept。
+export const COVERAGE_BAR: f64 = 0.95;

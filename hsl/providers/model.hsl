@@ -1,0 +1,86 @@
+// ============================================================================
+// org/providers/model.hsl — 模型网关：scripted（剧本）/ deepseek（真实 LLM）
+// ============================================================================
+// ORG 的所有判定调用（分解 / 澄清 / 生成 / 审查 / 直连）经同一网关：
+//   - scripted 模式：确定性剧本轨道（fixture.next(track)），CI 可复现零外联
+//   - deepseek 模式：真实 LLM（$host.llm 网关）
+// 轨道名即观测面：transcript 里每个判定调用可追溯到一个轨道 / 一次真实调用。
+// N1 纪律：prompt 组装在 HSL 侧；native 只做调用与平凡类型捕获。
+// ============================================================================
+
+import { ExpertError } from "../types/errors.hsl";
+
+/// 判定调用：轨道名 + 系统提示 + 用户输入 → 模型原始输出。
+///
+/// 轨道名约定（剧本 JSON 的 tracks 键）：
+///   decompose / clarify / answers / mint_spec / mint_hsl / mint_fixture
+///   review:<role> / direct:<expert> / <expert>:<node>
+export async fn ask(track: String, system: String, user: String) -> Result<String, ExpertError> {
+    let model: String = native typescript {
+        return $host.config.model || "scripted";
+    };
+    if model == String::from("deepseek") {
+        let raw: String = native typescript {
+            const r = await $host.llm.complete({
+                messages: [
+                    { role: "system", content: system },
+                    { role: "user", content: user },
+                ],
+                temperature: 0.1,
+                maxTokens: 2048,
+            });
+            if (r === undefined || r === null) return "";
+            return String(r);
+        };
+        if raw.len() == 0 {
+            Err(ExpertError::new(
+                String::from("model-gateway"),
+                String::from("provider"),
+                String::from("empty completion"),
+            ))
+        } else {
+            Ok(raw)
+        }
+    } else {
+        let raw: String = native typescript {
+            try {
+                return await $host.fixture.next(track);
+            } catch (e) {
+                return "FIXTURE_EXHAUSTED::" + track + "::" + String(e && e.message || e);
+            }
+        };
+        if raw.len() == 0 {
+            Err(ExpertError::new(
+                String::from("model-gateway"),
+                String::from("fixture"),
+                format!("剧本轨道 {} 耗尽（scripted 模式需要与调用次数匹配的剧本）", track),
+            ))
+        } else {
+            if raw.contains("FIXTURE_EXHAUSTED::") {
+                Err(ExpertError::new(
+                    String::from("model-gateway"),
+                    String::from("fixture"),
+                    raw,
+                ))
+            } else {
+                Ok(raw)
+            }
+        }
+    }
+}
+
+/// 轨道余量（判定节点的可观测预算面）。
+export fn track_left(track: String) -> u32 {
+    let left: u32 = native typescript {
+        return $host.fixture ? $host.fixture.left(track) : 0;
+    };
+    left
+}
+
+/// 当前模式名（报告与评分卡的 model_id 维度）。
+export fn model_id() -> String {
+    let name: String = native typescript {
+        return $host.config.model || "scripted";
+    };
+    name
+}

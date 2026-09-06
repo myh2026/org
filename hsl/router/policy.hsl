@@ -1,0 +1,114 @@
+// ============================================================================
+// org/router/policy.hsl — 路由器：每个子任务四选一
+// ============================================================================
+// A 内联处理   琐碎任务、强依赖主控上下文        最低成本，无派单开销
+// B 复用现有   库中有类型兼容、语义匹配的专家    摊销成本，随复用递减
+// C 现场生成   库中无匹配且任务具备复用价值      一次性成本，完成后转资产
+// D 暖移交     请求落在既有专家职责内且规模小    一份移交摘要的成本
+//
+// 专家立库判据：流程可复用，且与通用执行循环存在结构差异。
+// B 判定 = 能力标签交集（类型兼容静态可查）+ 语义适配粗排（描述词面重合）。
+// ============================================================================
+
+import { RoutePath, SubTask } from "../types/state.hsl";
+import { ExpertManifest, Registry } from "../registry/manifest.hsl";
+import { OrgError } from "../types/errors.hsl";
+
+/// 路由决策输入（池侧视角：在岗实例影响 D 路径可用性）。
+#[derive(Debug, Clone)]
+export struct RouteContext {
+    registry: Registry,
+    /// 在岗专家名集合（D 路径：用户新请求落在既有专家职责内）。
+    on_duty: Vec<String>,
+}
+
+impl RouteContext {
+    fn new(registry: Registry) -> RouteContext {
+        RouteContext { registry: registry, on_duty: Vec::new() }
+    }
+
+    fn with_on_duty(self, names: Vec<String>) -> RouteContext {
+        let mut next = self.clone();
+        next.on_duty = names;
+        next
+    }
+}
+
+/// 路由判定（纯函数：无 IO、无判定节点 —— 路由是制度不是模型）。
+///
+/// 判定序（成本升序，静态优先）：
+///   1. D 暖移交：在岗实例的职责域命中且规模小（goal 短）
+///   2. A 内联：琐碎（无技能标签 或 强主控上下文标记）
+///   3. B 复用：注册表命中（能力交集 + 语义粗排）
+///   4. C 生成：无命中 —— 仅当任务具备复用价值（有明确技能标签）
+export fn route(subtask: SubTask, ctx: RouteContext) -> Result<RoutePath, OrgError> {
+    // D 暖移交：在岗专家职责命中 + 小规模
+    if subtask.goal.len() <= WARM_HANDOFF_SIZE && subtask.skills.len() > 0 {
+        let hit = warm_duty_hit(subtask.clone(), ctx.clone());
+        match hit {
+            Some(expert) => {
+                return Ok(RoutePath::WarmHandoff { expert: expert });
+            },
+            None => {},
+        }
+    }
+
+    // A 内联：琐碎任务（无技能标签 = 无立库价值）
+    if subtask.skills.len() == 0 {
+        return Ok(RoutePath::Inline);
+    }
+
+    // B 复用：注册表命中
+    let found = ctx.registry.find(subtask.goal.clone(), &subtask.skills);
+    match found {
+        Some(manifest) => {
+            return Ok(RoutePath::Reuse { expert: manifest.name });
+        },
+        None => {},
+    }
+
+    // C 生成：无命中但有技能标签（立库判据：流程可复用）
+    if subtask.skills.len() > 0 {
+        return Ok(RoutePath::Generate);
+    }
+
+    Err(OrgError::route(format!("子任务 {} 无法路由（无可用路径）", subtask.id)))
+}
+
+/// D 路径判定辅助：在岗专家职责命中（描述词面重合）。
+fn warm_duty_hit(subtask: SubTask, ctx: RouteContext) -> Option<String> {
+    let mut best: Option<String> = None;
+    let mut best_score: u32 = 0;
+    for name in ctx.on_duty.iter() {
+        let manifest = ctx.registry.find_by_name(name.clone());
+        match manifest {
+            Some(m) => {
+                let score = duty_affinity(m.clone(), subtask.goal.clone());
+                if score > best_score && score >= WARM_DUTY_BAR {
+                    best_score = score;
+                    best = Some(m.name);
+                }
+            },
+            None => {},
+        }
+    }
+    best
+}
+
+/// 职责域重合度（goal 与描述的词面重合计数）。
+fn duty_affinity(manifest: ExpertManifest, goal: String) -> u32 {
+    let words = goal.split(" ");
+    let mut score: u32 = 0;
+    for w in words {
+        if w.len() >= 2 && manifest.description.contains(w.as_str()) {
+            score += 1;
+        }
+    }
+    score
+}
+
+/// 暖移交规模线（goal 字符数）：小请求才值得 D 路径。
+export const WARM_HANDOFF_SIZE: usize = 120;
+
+/// 职责域重合门槛。
+export const WARM_DUTY_BAR: u32 = 1;

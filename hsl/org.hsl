@@ -1,0 +1,1203 @@
+// ============================================================================
+// org/org.hsl — 主控（内核）：监督回路 graph + main 入口
+// ============================================================================
+// 主控是全系统唯一手写、唯一不经工厂管线的组件 —— 它是内核。
+// 监督回路四阶段：
+//   ① 任务分解（+ 批量澄清：人类思考时间与机器执行时间重叠）
+//   ② 路由决策（A 内联 / B 复用 / C 生成 / D 暖移交）
+//   ③ 过程审查（契约对照 · 四态裁决 · 有界返工 · 意见复发 → 补丁提案）
+//   ④ 汇总输出（资产沉淀：新专家 / fixture / 记忆 / 补丁 / 冻结节点）
+//
+// 事件拓扑（microkernel：每条 edge = 一次总线订阅，G6）：
+//   registry → pool → policy → pool → journal → {pool（返工环）, scorecard}
+// 环上全部带 on Guard（G3）。
+// ============================================================================
+
+import { TaskSpec, StatusReport, Verdict, COVERAGE_BAR, DEFAULT_BUDGET_TOKENS, DEFAULT_MAX_REVISES, normalize_note } from "./contracts/contract.hsl";
+import { OrgError } from "./types/errors.hsl";
+import { SubTask, OrgState, OrgReport, RoutePath, Asset, RECURRENCE_PATCH_THRESHOLD } from "./types/state.hsl";
+import { ExpertManifest, Registry } from "./registry/manifest.hsl";
+import { NoticeParser } from "./registry/experts/notice-parser.hsl";
+import { Pool, POOL_CONCURRENCY_CAP } from "./pool/lifecycle.hsl";
+import { Factory, PatchProposal, run_expert, merge_patch } from "./factory/pipeline.hsl";
+import { route, RouteContext } from "./router/policy.hsl";
+import { Journal } from "./runtime/journal.hsl";
+import { canary_check, CanaryVerdict, redundant_dispatch, drift_check, DRIFT_THRESHOLD } from "./runtime/promotion.hsl";
+import { mine_reviews } from "./runtime/fixture-miner.hsl";
+import { Evidence, EvidenceKind, Scorecard, revise_rate, budget_adherence, crystallize_hit_rate } from "./models/scorecard.hsl";
+import { CapabilityPolicy, AccessMode } from "./policy/capability.hsl";
+import { ask, model_id } from "./providers/model.hsl";
+import { DECOMPOSE_PROMPT, CLARIFY_PROMPT, REVIEW_RUBRIC, PATCH_PROPOSAL_PROMPT, ARBITRATE_PROMPT, ORG_CONFIG, EVENTS_SCHEMA } from "./config/resources.hsl";
+
+/// 监督回路边事件（G5：枚举变体 guard）。
+enum OrgEdge {
+    ExpertReady,
+    CapabilityCheck,
+    CapabilityCleared,
+    WorkerDone,
+    ReDispatch,
+    ReportReady,
+}
+
+/// 内核入口（org run 的执行体）。
+export fn main() -> Result<(), OrgError> {
+    let mission: String = native typescript {
+        return $host.config.task || "";
+    };
+    if mission.len() == 0 {
+        return Err(OrgError::new(String::from("kernel"), String::from("任务为空（--task 必填）")));
+    }
+    let report = Org::run(mission.clone())?;
+    let summary = render_summary(report.clone());
+    let _ = native typescript {
+        $host.artifacts.write("report.md", summary);
+        return true;
+    };
+    // 机器可读指标（测试与外部观测面：model_calls 衰减曲线的稳定数据源）
+    let metrics = render_metrics(report.clone());
+    let _ = native typescript {
+        $host.artifacts.write("metrics.json", metrics);
+        return true;
+    };
+    println!("[org] 任务完成：{}", report.clone().summary);
+    println!("[org] 交付物 {} 项 · 资产 {} 项 · model_calls {} · revises {}",
+        report.clone().deliverables.len(), report.clone().assets.len(),
+        report.clone().model_calls_total, report.clone().revises_total);
+    Ok(())
+}
+
+/// 主控 graph：监督回路（唯一手写内核）。
+export graph Org(mission: String) -> Result<OrgReport, OrgError> {
+    // node 声明：内核的物理依赖（六大部件的运行时投影）
+    node mut journal: Journal = Journal::open(mission.clone());
+    node mut registry: Registry = Registry::load(String::from("registry"))?;
+    node mut pool: Pool = Pool::new(POOL_CONCURRENCY_CAP);
+    node mut policy: CapabilityPolicy = CapabilityPolicy::default();
+    node mut scorecard: Scorecard = Scorecard::new(model_id());
+
+    // 事件拓扑（G3：返工环与能力环全部带 guard）
+    edge registry -> pool on OrgEdge::ExpertReady;
+    edge pool -> policy on OrgEdge::CapabilityCheck;
+    edge policy -> pool on OrgEdge::CapabilityCleared;
+    edge pool -> journal on OrgEdge::WorkerDone;
+    edge journal -> pool on OrgEdge::ReDispatch;
+    edge journal -> scorecard on OrgEdge::ReportReady;
+
+    let mut state = OrgState::new(mission.clone());
+
+    // ---- ① 任务分解 + 批量澄清（早发：重叠人类思考时间） ----
+    journal.log(String::from("kernel"), String::from("decompose"), mission.clone());
+    let subtasks = decompose(mission.clone()).await?;
+    for t in subtasks.iter() {
+        state.subtasks.push(t.clone());
+    }
+    let questions = clarify(mission.clone()).await?;
+    for q in questions.iter() {
+        state.questions.push(q.clone());
+        journal.log(String::from("kernel"), String::from("clarify"), q.clone());
+    }
+    let answers = consume_answers().await?;
+    for a in answers.iter() {
+        state.answers.push(a.clone());
+        journal.log(String::from("kernel"), String::from("answer"), a.clone());
+    }
+
+    // 复发计数跨运行持久化（run A 的意见在 run B 复发 → 补丁提案）
+    let mut recurrence = load_recurrence();
+
+    // ---- ②③ 路由 + 派单 + 过程审查（AgentLoop，G1） ----
+    loop {
+        let next = state.clone().next_ready();
+        match next {
+            Some(subtask) => {
+                let ctx = RouteContext::new(registry.clone()).with_on_duty(pool.clone().on_duty());
+                let mut decision = route(subtask.clone(), ctx)?;
+                journal.log(String::from("router"), String::from("route"),
+                    format!("task#{} {} -> {}", subtask.id, subtask.role, decision.clone().label()));
+
+                // 契约先行（交付物规格 / 验收标准 / 预算水位 / 返工上限）
+                let mut spec = forge_contract(subtask.clone(), state.answers.clone());
+                let mut expert_name = expert_of(decision.clone(), subtask.clone());
+
+                // C 路径记忆化判据：执行前该专家是否已在注册表
+                // （执行后由无变有 = 本轮工厂新铸 → NewExpert 资产）
+                let known_before = match decision.clone() {
+                    RoutePath::Inline => None,
+                    RoutePath::Reuse { expert: _ } => None,
+                    RoutePath::WarmHandoff { expert: _ } => None,
+                    RoutePath::Generate => registry.find(subtask.goal.clone(), &subtask.skills),
+                };
+
+                // 派单-审查有界循环（G7：Revise 环有界）
+                // 节点按引用传递（journal/registry/pool/policy 的登记与留痕
+                // 必须写回内核节点 —— 克隆传递会静默丢失注册事实与期刊条目）
+                let mut report = execute(decision.clone(), spec.clone(), subtask.clone(),
+                                         journal, registry, pool, policy, String::new()).await?;
+                // 解析实际专家名（minted 专家名由工厂决定，供复发计数与补丁寻址）
+                let resolved = resolve_expert_name(decision.clone(), registry.clone(), subtask.clone());
+                match resolved {
+                    Some(name) => { expert_name = name; },
+                    None => {},
+                }
+
+                // 仲裁回填通道：Escalate 经用户裁决后，下一轮以此 verdict 进入
+                // 同一套 match（仲裁的 Revise/Reject 复用返工/重派全逻辑）
+                let mut pending: Option<Verdict> = None;
+
+                let supervise = loop {
+                    let verdict = match pending.clone() {
+                        Some(v) => {
+                            pending = None;
+                            v
+                        },
+                        None => review(spec.clone(), report.clone(), subtask.clone()).await?,
+                    };
+                    journal.log(String::from("supervisor"), String::from("review"),
+                        format!("task#{} {} verdict={} coverage={:.2}", subtask.id, subtask.role, verdict.clone().label(), report.coverage));
+
+                    match verdict {
+                        Verdict::Accept => {
+                            break Some(report.clone());
+                        },
+                        Verdict::Revise { note } => {
+                            let norm = normalize_note(note.clone());
+                            let (next_state, _in_run) = state.clone().record_recurrence(
+                                expert_name.clone(), norm.clone());
+                            state = next_state;
+                            bump_recurrence(&mut recurrence, expert_name.clone(), norm.clone());
+                            // 升级判据看跨运行持久计数（run A 记 1 次、run B 复发即 2）
+                            let recurrence_key = format!("{}::{}", expert_name, norm);
+                            let persisted = match recurrence.get(recurrence_key.clone()) {
+                                Some(n) => n.clone(),
+                                None => 0,
+                            };
+                            let escalate = persisted >= RECURRENCE_PATCH_THRESHOLD;
+
+                            // 设计铁律 #4：同一意见第二次出现 → 修专家本体
+                            if escalate {
+                                journal.log(String::from("supervisor"), String::from("patch"),
+                                    format!("意见复发两次，升级补丁提案：{}", norm));
+                                let merged = propose_and_merge(registry.clone(), expert_name.clone(), norm.clone()).await;
+                                match merged {
+                                    Ok(patched_manifest) => {
+                                        state = state.clone().add_asset(Asset::Patch {
+                                            expert: expert_name.clone(),
+                                            note: norm.clone(),
+                                        });
+                                        // 影子晋升：旧版已归档 —— 同输入双跑（产出只计分不交付），
+                                        // 一致 → 金丝雀确认；分歧 → 回滚（蓝绿的另一面）
+                                        let from_v = last_from_version(patched_manifest.clone());
+                                        let canary = canary_check(
+                                            registry.clone(), patched_manifest.clone(), from_v.clone()).await?;
+                                        match canary {
+                                            CanaryVerdict::Confirm => {
+                                                journal.log(String::from("supervisor"), String::from("canary"),
+                                                    format!("影子对比一致 → 金丝雀确认 {}@{}（蓝绿生效）",
+                                                        patched_manifest.name, patched_manifest.version));
+                                                scorecard = scorecard.clone().attribute(Evidence::new(
+                                                    EvidenceKind::CanaryConfirm, model_id(),
+                                                    String::from("tool_reliability"),
+                                                    String::from("structured_extract"), 1.0));
+                                                scorecard = scorecard.clone().attribute(Evidence::new(
+                                                    EvidenceKind::ShadowCompare, model_id(),
+                                                    String::from("judgment"),
+                                                    String::from("structured_extract"), 1.0));
+                                            },
+                                            CanaryVerdict::Rollback => {
+                                                journal.log(String::from("supervisor"), String::from("canary"),
+                                                    format!("影子对比分歧 → 回滚 {}@{}",
+                                                        patched_manifest.name, from_v));
+                                                scorecard = scorecard.clone().attribute(Evidence::new(
+                                                    EvidenceKind::ShadowCompare, model_id(),
+                                                    String::from("judgment"),
+                                                    String::from("structured_extract"), 0.0));
+                                            },
+                                        }
+                                    },
+                                    Err(e) => {
+                                        journal.log(String::from("supervisor"), String::from("patch"),
+                                            format!("补丁未合入（管线拒绝）：{}", e.message));
+                                    },
+                                }
+                            }
+
+                            // 返工预算（新鲜读取 —— 派单快照上的计数会过期）
+                            let fresh_revises = state.clone().revises_of(subtask.id);
+                            let budget_ok = fresh_revises < DEFAULT_MAX_REVISES;
+                            if budget_ok {
+                                state = state.clone().bump_revise(subtask.id);
+                                journal.log(String::from("supervisor"), String::from("re-dispatch"),
+                                    format!("task#{} revise #{}: {}", subtask.id, fresh_revises + 1, norm));
+                                spec = spec.with_feedback(norm);
+                                report = execute(decision.clone(), spec.clone(), subtask.clone(),
+                                                 journal, registry, pool, policy, String::new()).await?;
+                                let resolved_again = resolve_expert_name(decision.clone(), registry.clone(), subtask.clone());
+                                match resolved_again {
+                                    Some(name) => { expert_name = name; },
+                                    None => {},
+                                }
+                                continue;
+                            } else {
+                                // 返工上限耗尽：强制收货并标注（不静默丢弃）
+                                let mut flagged = report.clone();
+                                flagged.notes.push(String::from("rework budget exhausted; accepted with flags"));
+                                break Some(flagged);
+                            }
+                        },
+                        Verdict::Reject { reason } => {
+                            // 拒绝 → 真重派：路由重选，排除失败执行体（重派预算与 Revise 共池）
+                            journal.log(String::from("supervisor"), String::from("review"),
+                                format!("task#{} rejected: {}", subtask.id, reason));
+                            let fresh_revises = state.clone().revises_of(subtask.id);
+                            if fresh_revises < DEFAULT_MAX_REVISES {
+                                state = state.clone().bump_revise(subtask.id);
+                                journal.log(String::from("supervisor"), String::from("re-route"),
+                                    format!("task#{} reject 重派（排除 {}）", subtask.id, expert_name));
+                                let reg2 = registry.clone().without(expert_name.clone());
+                                let ctx2 = RouteContext::new(reg2).with_on_duty(pool.clone().on_duty());
+                                decision = route(subtask.clone(), ctx2)?;
+                                journal.log(String::from("router"), String::from("route"),
+                                    format!("task#{} {} -> {}", subtask.id, subtask.role, decision.clone().label()));
+                                spec = spec.with_feedback(format!("rejected: {}", reason));
+                                report = execute(decision.clone(), spec.clone(), subtask.clone(),
+                                                 journal, registry, pool, policy, expert_name.clone()).await?;
+                                let resolved_re = resolve_expert_name(decision.clone(), registry.clone(), subtask.clone());
+                                match resolved_re {
+                                    Some(name) => { expert_name = name; },
+                                    None => {},
+                                }
+                                continue;
+                            } else {
+                                let mut flagged = report.clone();
+                                flagged.notes.push(format!("rejected ({}); accepted with flags", reason));
+                                break Some(flagged);
+                            }
+                        },
+                        Verdict::Escalate { question } => {
+                            // 提交用户仲裁：arbitrate:<role> 通道回填用户裁决
+                            // （scripted = 剧本轨道；真实模式 = 用户回填）。
+                            // 仲裁结果经 pending 进入同一套 match —— 仲裁的
+                            // Revise/Reject 复用返工/重派全逻辑，不另造第二套裁决。
+                            journal.log(String::from("supervisor"), String::from("review"),
+                                format!("task#{} escalate: {}", subtask.id, question));
+                            let arb_raw = ask(format!("arbitrate:{}", subtask.role),
+                                ARBITRATE_PROMPT.clone(), question.clone()).await?;
+                            let arb = parse_arbitration(arb_raw)?;
+                            journal.log(String::from("supervisor"), String::from("arbitrate"),
+                                format!("task#{} 用户仲裁 verdict={}", subtask.id, arb.clone().label()));
+                            match arb.clone() {
+                                Verdict::Escalate { question: _ } => {
+                                    // 仲裁回声不得再升级（防活锁）：按强制收货处理
+                                    let mut flagged = report.clone();
+                                    flagged.notes.push(format!("escalated ({}); accepted with flags", question));
+                                    break Some(flagged);
+                                },
+                                Verdict::Accept => {
+                                    pending = Some(arb);
+                                    continue;
+                                },
+                                Verdict::Revise { note: _ } => {
+                                    pending = Some(arb);
+                                    continue;
+                                },
+                                Verdict::Reject { reason: _ } => {
+                                    pending = Some(arb);
+                                    continue;
+                                },
+                            }
+                        },
+                    }
+                };
+
+                match supervise {
+                    Some(final_report) => {
+                        state = state.clone().accept(subtask.id, final_report.clone());
+                        pool.settle(expert_name.clone());
+                        // 上游交付物落盘（下游嵌套执行的输入契约）
+                        if subtask.role == String::from("parse") {
+                            let deliverable = final_report.clone().deliverable;
+                            let _ = native typescript {
+                                $host.fs.write("work/parse-output.json", deliverable);
+                                return true;
+                            };
+                        }
+                        // ---- 资产记账（任务结束是资产沉淀的开始） ----
+                        // C 路径新铸专家 → NewExpert 资产 + 工厂验收证据归因
+                        let minted_fresh = match decision.clone() {
+                            RoutePath::Generate => known_before.is_none(),
+                            RoutePath::Inline => false,
+                            RoutePath::Reuse { expert: _ } => false,
+                            RoutePath::WarmHandoff { expert: _ } => false,
+                        };
+                        if minted_fresh {
+                            match registry.find(subtask.goal.clone(), &subtask.skills) {
+                                Some(m) => {
+                                    if m.source == String::from("factory") {
+                                        state = state.clone().add_asset(Asset::NewExpert {
+                                            name: m.name.clone(),
+                                            version: m.version.clone(),
+                                        });
+                                        scorecard = scorecard.clone().attribute(Evidence::new(
+                                            EvidenceKind::FixturePass, model_id(),
+                                            String::from("structured_output"),
+                                            String::from("structured_extract"),
+                                            m.eval_score,
+                                        ));
+                                    }
+                                },
+                                None => {},
+                            }
+                        }
+                        // 固化冻结 → FrozenNode 资产（memo 非空增长即冻结事实）
+                        match frozen_node_of(final_report.clone()) {
+                            Some(node_name) => {
+                                state = state.clone().add_asset(Asset::FrozenNode {
+                                    expert: expert_name.clone(),
+                                    node: node_name,
+                                });
+                            },
+                            None => {},
+                        }
+                        // 任务记忆（轻档池化：任务历史索引的原料）
+                        state = state.clone().remember(format!(
+                            "task#{} {} :: {} (coverage {:.2})",
+                            subtask.id, subtask.role,
+                            final_report.clone().deliverable, final_report.coverage));
+                        // 证据归因（客观行为信号 → 评分卡）
+                        scorecard = scorecard.clone().attribute(Evidence::new(
+                            EvidenceKind::VerdictRate, model_id(),
+                            String::from("instruction_following"),
+                            String::from("structured_extract"),
+                            run_verdict_evidence(state.clone()),
+                        ));
+                        scorecard = scorecard.clone().attribute(Evidence::new(
+                            EvidenceKind::BudgetAdherence, model_id(),
+                            String::from("cost_efficiency"),
+                            String::from("structured_extract"),
+                            budget_adherence(final_report.tokens_used, spec.budget_tokens),
+                        ));
+                        // 固化命中证据（从结构化 node_trace 机械解析）
+                        let hit_evidence = crystallize_evidence(final_report.clone());
+                        match hit_evidence {
+                            Some(v) => {
+                                scorecard = scorecard.clone().attribute(Evidence::new(
+                                    EvidenceKind::CrystallizeHit, model_id(),
+                                    String::from("judgment"),
+                                    String::from("structured_extract"),
+                                    v,
+                                ));
+                            },
+                            None => {},
+                        }
+                        journal.log(String::from("pool"), String::from("worker-done"),
+                            format!("task#{} coverage={:.2} tokens={}", subtask.id, final_report.coverage, final_report.tokens_used));
+                    },
+                    None => {
+                        return Err(OrgError::supervision(format!("task#{} 无产出（执行通道异常）", subtask.id)));
+                    },
+                }
+
+                state.iterations += 1;
+                if state.iterations >= state.max_iterations {
+                    return Err(OrgError::supervision(String::from("迭代预算耗尽（活锁兜底）")));
+                }
+            },
+            None => {
+                // ---- ④ 汇总输出 + 资产沉淀 ----
+                break;
+            },
+        }
+    }
+
+    // 任务记忆索引（Memory 资产：一行索引代表本期全部记忆沉淀）
+    if state.memories.len() > 0 {
+        state = state.add_asset(Asset::Memory {
+            note: format!("task memory index: {} entries", state.memories.len()),
+        });
+    }
+
+    // 资产沉淀（新专家 / fixture / 记忆 / 补丁 / 冻结节点 → 工作区与期刊）
+    // 返回值 = 静默更新检测的漂移告警数（评分卡 vs 基线）
+    let drift_alerts = sink_assets(state.clone(), journal.clone(), registry.clone(), scorecard.clone(), model_id())?;
+    save_recurrence(recurrence.clone());
+    let run_id = journal.clone().flush();
+
+    // 生产即出题：本期审查裁决沉淀为验收基准题（journal → fixture）
+    let mined = mine_reviews(journal.clone().entries, run_id.clone());
+
+    let report = aggregate(state.clone(), run_id.clone(), mined.entries, drift_alerts);
+    Ok(report)
+}
+
+// ----------------------------------------------------------------------------
+// 阶段实现
+// ----------------------------------------------------------------------------
+
+/// ① 分解（判定节点：模型调用；解析在 HSL 侧重建类型）。
+async fn decompose(mission: String) -> Result<Vec<SubTask>, OrgError> {
+    let raw = ask(String::from("decompose"), DECOMPOSE_PROMPT.clone(), mission.clone()).await?;
+    let rows: Vec<HashMap<String, String>> = native typescript {
+        try {
+            const arr = JSON.parse(raw);
+            if (Array.isArray(arr) === false) return [];
+            return arr.map((t) => {
+                const m = new Map();
+                for (const [k, v] of Object.entries(t)) {
+                    m.set(k, v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
+                }
+                return m;
+            });
+        } catch (e) {
+            return [];
+        }
+    };
+    if rows.len() == 0 {
+        return Err(OrgError::new(String::from("decompose"), String::from("分解输出为空或非法")));
+    }
+    let mut out: Vec<SubTask> = Vec::new();
+    for row in rows.iter() {
+        let id = parse_u32_field(row.clone(), String::from("id"));
+        let row_id = id.to_string();
+        let goal = row.get(String::from("goal")).unwrap_or(String::new());
+        let role = row.get(String::from("role")).unwrap_or(String::from("worker"));
+        let priority_raw = row.get(String::from("priority")).unwrap_or(String::from("5"));
+        let skills: Vec<String> = native typescript {
+            const obj = JSON.parse(raw);
+            const target = obj.find((t) => String(t.id) === row_id) || {};
+            const list = target.skills ?? [];
+            if (Array.isArray(list) === false) return [];
+            return list.map((s) => String(s));
+        };
+        let deps: Vec<u32> = native typescript {
+            const obj = JSON.parse(raw);
+            const target = obj.find((t) => String(t.id) === row_id) || {};
+            const list = target.depends_on ?? [];
+            if (Array.isArray(list) === false) return [];
+            return list.map((d) => Math.floor(Number(d)));
+        };
+        let priority = native typescript {
+            const n = parseInt(priority_raw, 10);
+            return Number.isFinite(n) ? Math.max(0, Math.min(255, n)) : 5;
+        };
+        out.push(SubTask::new(id, goal, role, skills, deps, priority));
+    }
+    Ok(out)
+}
+
+/// ① 澄清（批量打包：只问阻塞关键路径的问题）。
+async fn clarify(mission: String) -> Result<Vec<String>, OrgError> {
+    let raw = ask(String::from("clarify"), CLARIFY_PROMPT.clone(), mission.clone()).await?;
+    let questions: Vec<String> = native typescript {
+        try {
+            const arr = JSON.parse(raw);
+            if (Array.isArray(arr) === false) return [];
+            return arr.map((q) => String(q));
+        } catch (e) {
+            return [];
+        }
+    };
+    Ok(questions)
+}
+
+/// ① 用户回答（scripted：剧本轨道；real：直连通道回填）。
+async fn consume_answers() -> Result<Vec<String>, OrgError> {
+    let raw = ask(String::from("answers"), String::from("[]"), String::from("(batched answers)")).await?;
+    let answers: Vec<String> = native typescript {
+        try {
+            const arr = JSON.parse(raw);
+            if (Array.isArray(arr) === false) return [];
+            return arr.map((a) => String(a));
+        } catch (e) {
+            return [];
+        }
+    };
+    Ok(answers)
+}
+
+/// 契约组装（answers 织入验收标准）。
+fn forge_contract(subtask: SubTask, answers: Vec<String>) -> TaskSpec {
+    let mut acceptance = format!("{}；字段齐全、日期 ISO 8601、可机械校验", subtask.goal.clone());
+    if answers.len() > 0 {
+        acceptance.push_str("；用户澄清：");
+        acceptance.push_str(answers.join(" / ").as_str());
+    }
+    TaskSpec::forge(
+        subtask.id,
+        subtask.goal.clone(),
+        String::from("结构化交付物（见 deliverable 字段）"),
+        acceptance,
+        String::new(),
+        DEFAULT_BUDGET_TOKENS,
+        DEFAULT_MAX_REVISES,
+    )
+}
+
+/// ② 派单执行（四通道 + 双执行车道；journal/registry/pool/policy 按引用共享）。
+///
+/// 执行车道（v1 诚实分表）：
+///   - 进程内车道：静态专家（随 ORG 发行，经 import 编入，如 notice-parser）
+///   - 嵌套解释器车道：磁盘专家（工厂 minted / 补丁后版本）—— 每次从磁盘
+///     加载最新版，即蓝绿发布语义（在岗会话继续旧版，新派单自动加载新版）
+async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
+                 mut journal: Journal, mut registry: Registry, mut pool: Pool,
+                 mut policy: CapabilityPolicy, exclude: String) -> Result<StatusReport, OrgError> {
+    // 能力核对（编排模式：缺席授权，天花板管缺席）
+    let _ = policy.decide(String::from("llm_call"), AccessMode::Orchestrated)?;
+    journal.log(String::from("pool"), String::from("dispatch"),
+        format!("task#{} channel={}", subtask.id, decision.clone().detail()));
+
+    match decision.clone() {
+        RoutePath::Inline => {
+            // A 内联：机械读取（强依赖主控上下文的琐碎任务）
+            let raw: String = native typescript {
+                try {
+                    return $host.fs.read("raw/notices.txt");
+                } catch (e) {
+                    return "";
+                }
+            };
+            if raw.len() == 0 {
+                return Err(OrgError::route(String::from("内联通道：raw/notices.txt 缺失")));
+            }
+            let mut report = StatusReport::new(subtask.id, String::from("(fetched raw notices)"), 1.0);
+            report.notes.push(String::from("inline channel: workspace raw material"));
+            Ok(report)
+        },
+        RoutePath::Reuse { expert } => {
+            // B 复用：注册表命中 → 按车道分表
+            let manifest = registry.find_by_name_or(expert.clone(), subtask.goal.clone(), &subtask.skills);
+            let m = match manifest {
+                Some(found) => found,
+                None => {
+                    return Err(OrgError::route(format!("复用通道失效：{} 不在注册表", expert)));
+                },
+            };
+            if m.entry_path.ends_with(String::from(".hsl")) {
+                // 嵌套解释器车道（磁盘专家：蓝绿加载最新版）
+                let mut full = spec.clone();
+                full.payload = prepare_payload(subtask.clone());
+                // N 版本冗余（ORG_REDUNDANCY >= 2 启用）：向实现来源多样的专家对
+                // 镜像派单 —— 产出一致置信度加成，分歧记健康度事件（产出只计分）
+                redundancy_check(registry.clone(), subtask.clone(), full.clone(), journal).await?;
+                let out = run_expert(m.name.clone(), full.clone(), String::from("work-out"));
+                if out.ok == false {
+                    return Err(OrgError::factory(format!("专家执行失败：\n{}", out.output)));
+                }
+                let report = read_report_artifact(full.task_id);
+                Ok(report)
+            } else {
+                // 进程内车道（静态专家：池装配 + 信封调用）
+                let mut full = spec.clone();
+                full.payload = prepare_payload(subtask.clone());
+                let report = pool.dispatch(m.clone(), full.clone()).await?;
+                Ok(report)
+            }
+        },
+        RoutePath::Generate => {
+            // C 现场生成 —— 但工厂只在注册表无此专家时启动（返工重派 / 预热命中
+            // 直接走磁盘车道：mint 的一次性成本由注册事实记忆）。
+            // exclude = Reject 重派时被否决的执行体（路由重选不得再选它）
+            let mut existing = registry.find(subtask.goal.clone(), &subtask.skills);
+            match existing.clone() {
+                Some(m) => {
+                    if exclude.len() > 0 && m.name == exclude {
+                        existing = None;
+                    }
+                },
+                None => {},
+            }
+            let minted = match existing {
+                Some(m) => m,
+                None => {
+                    let fresh = Factory::run(subtask.goal.clone(), subtask.skills.clone()).await?;
+                    journal.log(String::from("factory"), String::from("mint-register"),
+                        format!("{}@{} eval={}", fresh.name, fresh.version, fresh.eval_score));
+                    registry.register(fresh.clone())?;
+                    fresh
+                },
+            };
+            // 派单：嵌套解释器执行（磁盘专家从磁盘加载 = 蓝绿）
+            let mut full = spec.clone();
+            full.payload = prepare_payload(subtask.clone());
+            let out = run_expert(minted.name.clone(), full.clone(), String::from("work-out"));
+            if out.ok == false {
+                return Err(OrgError::factory(format!("minted 专家执行失败：\n{}", out.output)));
+            }
+            // 工厂验收证据归因（fixture 通过率：客观档）
+            let report = read_report_artifact(full.task_id);
+            Ok(report)
+        },
+        RoutePath::WarmHandoff { expert } => {
+            // D 暖移交：既有专家职责域内的小请求（移交摘要 = 上游产物引用）
+            let manifest = registry.find_by_name_or(expert.clone(), subtask.goal.clone(), &subtask.skills);
+            match manifest {
+                Some(m) => {
+                    if m.entry_path.ends_with(String::from(".hsl")) {
+                        let mut full = spec.clone();
+                        full.payload = prepare_payload(subtask.clone());
+                        let out = run_expert(m.name.clone(), full.clone(), String::from("work-out"));
+                        if out.ok == false {
+                            return Err(OrgError::factory(format!("暖移交执行失败：\n{}", out.output)));
+                        }
+                        Ok(read_report_artifact(full.task_id))
+                    } else {
+                        let mut full = spec.clone();
+                        full.payload = prepare_payload(subtask.clone());
+                        let report = pool.dispatch(m, full).await?;
+                        Ok(report)
+                    }
+                },
+                None => Err(OrgError::route(format!("暖移交目标不存在：{}", expert))),
+            }
+        },
+    }
+}
+
+/// N 版本冗余钩子（ORG_REDUNDANCY >= 2 启用；产出只计分不交付）。
+/// 一致 → 置信度加成事件；分歧 → 冗余分歧健康度事件（仲裁升级由监督回路裁定）。
+async fn redundancy_check(registry: Registry, subtask: SubTask, spec: TaskSpec, mut journal: Journal) -> Result<(), OrgError> {
+    let level = read_redundancy();
+    if level < 2 {
+        return Ok(());
+    }
+    let pair = registry.diverse_pair(&subtask.skills);
+    match pair {
+        Some((a, b)) => {
+            journal.log(String::from("pool"), String::from("dispatch"),
+                format!("task#{} N 版本冗余（{}）：{} vs {}", subtask.id, level, a.name, b.name));
+            let rv = redundant_dispatch(a.clone(), b.clone(), spec).await?;
+            journal.log(String::from("pool"), String::from("dispatch"),
+                format!("task#{} 冗余对比 agree={} ({} vs {})", subtask.id, rv.agree, rv.coverage_a, rv.coverage_b));
+            Ok(())
+        },
+        None => {
+            journal.log(String::from("pool"), String::from("dispatch"),
+                format!("task#{} 冗余启停：注册表无实现来源多样的候选对", subtask.id));
+            Ok(())
+        },
+    }
+}
+
+/// 冗余档位读取（环境变量 ORG_REDUNDANCY；缺省 1 = 单实现派单）。
+fn read_redundancy() -> u32 {
+    let raw: u32 = native typescript {
+        const v = $host.env.get("ORG_REDUNDANCY");
+        const n = parseInt(v || "1", 10);
+        return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
+    };
+    raw
+}
+
+/// 载荷准备（上游交付物 → 下游工单 payload；机械编接）。
+fn prepare_payload(subtask: SubTask) -> String {
+    if subtask.role == String::from("validate") {
+        let upstream: String = native typescript {
+            try {
+                return $host.fs.read("work/parse-output.json");
+            } catch (e) {
+                return "[]";
+            }
+        };
+        upstream
+    } else {
+        let raw: String = native typescript {
+            try {
+                return $host.fs.read("raw/notices.txt");
+            } catch (e) {
+                return "";
+            }
+        };
+        raw
+    }
+}
+
+/// 实际专家名解析（minted 名由工厂决定；复发计数与补丁寻址的稳定 key）。
+fn resolve_expert_name(decision: RoutePath, registry: Registry, subtask: SubTask) -> Option<String> {
+    match decision {
+        RoutePath::Reuse { expert } => Some(expert),
+        RoutePath::WarmHandoff { expert } => Some(expert),
+        RoutePath::Generate => {
+            match registry.find(subtask.goal.clone(), &subtask.skills) {
+                Some(m) => Some(m.name),
+                None => None,
+            }
+        },
+        RoutePath::Inline => None,
+    }
+}
+
+/// ③ 过程审查（客观闸门先行 → 语义裁决）。
+async fn review(spec: TaskSpec, report: StatusReport, subtask: SubTask) -> Result<Verdict, OrgError> {
+    // 客观闸门 1：预算遵守（结构性优先于裁判）
+    if report.tokens_used > spec.budget_tokens {
+        return Ok(Verdict::Reject {
+            reason: format!("预算超支：{} > {}", report.tokens_used, spec.budget_tokens),
+        });
+    }
+    // 客观闸门 2：覆盖率线（低于线 → Revise；意见取 worker 自报的 remedy 提示）
+    if report.clone().meets_bar(COVERAGE_BAR) == false {
+        let note = remedy_of(report.clone());
+        return Ok(Verdict::Revise { note: note });
+    }
+    // 语义裁决（判定节点：模型对照验收标准）
+    let brief = format!(
+        "contract: {}\nreport: coverage {:.2}, notes {:?}",
+        spec.acceptance, report.coverage, report.notes
+    );
+    let role = subtask.role.clone();
+    let raw = ask(format!("review:{}", role), REVIEW_RUBRIC.clone(), brief).await?;
+    let fields: HashMap<String, String> = native typescript {
+        try {
+            return $host.json.fields(raw);
+        } catch (e) {
+            const m = new Map();
+            m.set("error", String(e && e.message || e));
+            return m;
+        }
+    };
+    if fields.contains_key(String::from("error")) {
+        return Err(OrgError::supervision(format!(
+            "审查输出不是合法 JSON：{}", fields.get(String::from("error")).unwrap_or(String::from("?"))
+        )));
+    }
+    let verdict = fields.get(String::from("verdict")).unwrap_or(String::from("accept"));
+    if verdict == String::from("revise") {
+        Ok(Verdict::Revise { note: fields.get(String::from("note")).unwrap_or(String::from("coverage 不足")) })
+    } else if verdict == String::from("reject") {
+        Ok(Verdict::Reject { reason: fields.get(String::from("reason")).unwrap_or(String::from("契约不符")) })
+    } else if verdict == String::from("escalate") {
+        Ok(Verdict::Escalate { question: fields.get(String::from("question")).unwrap_or(String::from("需用户仲裁")) })
+    } else {
+        Ok(Verdict::Accept)
+    }
+}
+
+/// worker 自报 remedy 提示（类型化报告强制摘要的收益：意见即数据）。
+fn remedy_of(report: StatusReport) -> String {
+    for n in report.notes.iter() {
+        if n.starts_with("remedy:") {
+            return n.clone();
+        }
+    }
+    format!("coverage {:.2} below bar {:.2}（补齐覆盖后重报）", report.coverage, COVERAGE_BAR)
+}
+
+/// 补丁提案 + 合入（提议权在内核，合并键在工厂管线）。
+/// 返回合入后的 manifest（供影子晋升的金丝雀双跑取新旧版本与版本号）。
+async fn propose_and_merge(registry: Registry, expert: String, trigger: String)
+    -> Result<ExpertManifest, OrgError> {
+    let proposal_raw = ask(String::from("patch_diff"), PATCH_PROPOSAL_PROMPT.clone(), trigger.clone()).await?;
+    let fields: HashMap<String, String> = native typescript {
+        try {
+            return $host.json.fields(proposal_raw);
+        } catch (e) {
+            return new Map();
+        }
+    };
+    let old_text = fields.get(String::from("old_text")).unwrap_or(String::new());
+    let new_text = fields.get(String::from("new_text")).unwrap_or(String::new());
+    if old_text.len() == 0 || new_text.len() == 0 {
+        return Err(OrgError::factory(String::from("补丁提案缺 old_text / new_text")));
+    }
+    let proposal = PatchProposal {
+        expert: expert,
+        trigger: trigger,
+        old_text: old_text,
+        new_text: new_text,
+    };
+    let merged = merge_patch(registry, proposal)?;
+    Ok(merged)
+}
+
+/// ④ 汇总（交付物 + 谱系 + 动力学计数）。
+fn aggregate(state: OrgState, run_id: String, mined_entries: u32, drift_alerts: u32) -> OrgReport {
+    let mut deliverables: Vec<String> = Vec::new();
+    let mut tokens: u32 = 0;
+    let mut model_calls: u32 = 0;
+    let mut revises: u32 = 0;
+    for a in state.accepted.iter() {
+        deliverables.push(a.report.clone().deliverable);
+        tokens += a.report.clone().tokens_used;
+        model_calls += a.report.clone().model_calls;
+    }
+    for t in state.subtasks.iter() {
+        revises += t.revises;
+    }
+    let mut assets: Vec<String> = Vec::new();
+    for asset in state.assets.iter() {
+        assets.push(asset.clone().label());
+    }
+    let mut summary = format!("mission: {}\nrun_id: {}\naccepted {} / {} subtasks",
+        state.mission, run_id, state.accepted.len(), state.subtasks.len());
+    for m in state.memories.iter() {
+        summary.push_str(format!("\n- {}", m).as_str());
+    }
+    OrgReport {
+        mission: state.mission.clone(),
+        summary: summary,
+        deliverables: deliverables,
+        assets: assets,
+        tokens_total: tokens,
+        revises_total: revises,
+        model_calls_total: model_calls,
+        accepted_total: state.accepted.len() as u32,
+        subtasks_total: state.subtasks.len() as u32,
+        mined_entries: mined_entries,
+        drift_alerts: drift_alerts,
+    }
+}
+
+/// ④ 资产沉淀（新专家 / fixture / 记忆 / 补丁 / 冻结节点 → 工作区与期刊）。
+/// 同时执行静默更新检测（评分卡 vs 基线）并写当期基线；返回漂移告警数。
+fn sink_assets(state: OrgState, journal: Journal, registry: Registry, scorecard: Scorecard, model: String) -> Result<u32, OrgError> {
+    for a in state.assets.iter() {
+        journal.log(String::from("registry"), String::from("asset"), a.clone().label());
+    }
+    // 记忆沉淀（轻档池化：任务历史索引的原料）
+    let memories = state.memories.join("\n");
+    let _ = native typescript {
+        $host.artifacts.write("memory.md", memories);
+        return true;
+    };
+    // 评分卡落盘（一等资产：有版本有历史）。
+    // evidence_count = 当期归因 + 跨运行累计（registry/scorecards/evidence-ledger.json
+    // 是增长账本；cells 分数始终是当期窗口聚合，两者语义分表）。
+    let baseline_path = format!("registry/scorecards/baseline-{}.json", model);
+    let prev_evidence = read_evidence_ledger();
+    let card = scorecard.clone().carried(prev_evidence).to_json();
+    let _ = native typescript {
+        $host.artifacts.write("scorecard.json", card);
+        return true;
+    };
+    save_evidence_ledger(prev_evidence + scorecard.clone().evidence_count());
+    // 静默更新检测：当期评分卡 vs 基线逐格对比（劣化超阈值 → 审计事件）
+    let alerts = drift_check(model.clone(), card.clone(), baseline_path.clone(), DRIFT_THRESHOLD);
+    journal.log(String::from("scorecard"), String::from("drift"),
+        format!("静默更新检测：alerts={} baseline={}", alerts, baseline_path));
+    let _ = registry;
+    Ok(alerts)
+}
+
+// ----------------------------------------------------------------------------
+// 辅助（复发持久化 / 证据计算 / 工单产物读取）
+// ----------------------------------------------------------------------------
+
+/// 复发计数持久化（跨运行：registry 层的运行时状态）。
+fn load_recurrence() -> HashMap<String, u32> {
+    let raw: String = native typescript {
+        try {
+            return $host.fs.read("runtime/recurrence.json");
+        } catch (e) {
+            return "";
+        }
+    };
+    let mut out: HashMap<String, u32> = HashMap::new();
+    if raw.len() > 0 {
+        let pairs: Vec<Vec<String>> = native typescript {
+            const obj = JSON.parse(raw);
+            const out = [];
+            for (const [k, v] of Object.entries(obj)) out.push([String(k), String(v)]);
+            return out;
+        };
+        for p in pairs.iter() {
+            let val_raw = p[1].clone();
+            let n = native typescript {
+                const x = parseInt(val_raw, 10);
+                return Number.isFinite(x) ? x : 0;
+            };
+            out.insert(p[0].clone(), n);
+        }
+    }
+    out
+}
+
+fn save_recurrence(map: HashMap<String, u32>) {
+    let mut items: Vec<String> = Vec::new();
+    for (k, v) in map {
+        items.push(format!("\"{}\":{}", k, v));
+    }
+    let body = format!("{{{}}}", items.join(","));
+    let _ = native typescript {
+        $host.fs.write("runtime/recurrence.json", body);
+        return true;
+    };
+}
+
+fn bump_recurrence(map: &mut HashMap<String, u32>, expert: String, note: String) {
+    let key = format!("{}::{}", expert, note);
+    let seen = match map.get(key.clone()) {
+        Some(n) => n.clone(),
+        None => 0,
+    };
+    map.insert(key, seen + 1);
+}
+
+/// 证据账本读取（跨运行的累计归因条数；文件缺失 = 首运行 0）。
+fn read_evidence_ledger() -> u32 {
+    let raw: String = native typescript {
+        try {
+            return $host.fs.read("registry/scorecards/evidence-ledger.json");
+        } catch (e) {
+            return "";
+        }
+    };
+    if raw.len() == 0 {
+        return 0;
+    }
+    let ledger_text = raw.clone();
+    let carried: f64 = native typescript {
+        try {
+            const parsed = parseFloat(JSON.parse(ledger_text).evidence_count);
+            return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+        } catch (e) {
+            return 0;
+        }
+    };
+    return carried as u32;
+}
+
+/// 证据账本回写（评分卡落盘后调用；累计语义见 sink_assets 注释）。
+fn save_evidence_ledger(total: u32) {
+    let body = format!("{{\"evidence_count\":{}}}", total);
+    let _ = native typescript {
+        $host.fs.write("registry/scorecards/evidence-ledger.json", body);
+        return true;
+    };
+}
+
+/// 单轮运行的裁决证据值（accept 占比：纯行为计数）。
+fn run_verdict_evidence(state: OrgState) -> f64 {
+    let mut accepts = 0;
+    let mut revises = 0;
+    for t in state.subtasks.iter() {
+        if t.done {
+            accepts += 1;
+        }
+        revises += t.revises;
+    }
+    revise_rate(accepts, revises, 0, 0)
+}
+
+/// 固化命中率证据（从 node_trace 的 "hits=N misses=N" 机械解析）。
+fn crystallize_evidence(report: StatusReport) -> Option<f64> {
+    for line in report.node_trace.iter() {
+        if line.contains("hits=") && line.contains("misses=") {
+            let hits = parse_marker(line.clone(), String::from("hits="));
+            let misses = parse_marker(line.clone(), String::from("misses="));
+            return Some(crystallize_hit_rate(hits, misses));
+        }
+    }
+    None
+}
+
+/// "key=N" 标记解析（机械）。
+fn parse_marker(line: String, key: String) -> u32 {
+    let parts = line.split(" ");
+    for p in parts.iter() {
+        if p.starts_with(key.as_str()) {
+            let stripped = p.strip_prefix(key.clone());
+            match stripped {
+                Some(v) => {
+                    let n = native typescript {
+                        const x = parseInt(v, 10);
+                        return Number.isFinite(x) ? x : 0;
+                    };
+                    return n;
+                },
+                None => {},
+            }
+        }
+    }
+    0
+}
+
+/// 嵌套执行产物读取（work-out/acceptance.json → StatusReport）。
+fn read_report_artifact(task_id: u32) -> StatusReport {
+    let raw: String = native typescript {
+        try {
+            return $host.fs.read("work-out/acceptance.json");
+        } catch (e) {
+            return "";
+        }
+    };
+    if raw.len() == 0 {
+        let mut fallback = StatusReport::new(task_id, String::from("(nested run artifact missing)"), 0.0);
+        fallback.notes.push(String::from("acceptance.json missing"));
+        return fallback;
+    }
+    let fields: HashMap<String, String> = native typescript {
+        try {
+            return $host.json.fields(raw);
+        } catch (e) {
+            return new Map();
+        }
+    };
+    let coverage_raw = fields.get(String::from("coverage")).unwrap_or(String::from("0"));
+    let coverage = native typescript {
+        const x = parseFloat(coverage_raw);
+        return Number.isFinite(x) ? x : 0.0;
+    };
+    let mut report = StatusReport::new(task_id, String::from("(validation verdict artifact)"), coverage);
+    report.notes.push(fields.get(String::from("summary")).unwrap_or(String::new()));
+    report.notes.push(fields.get(String::from("note")).unwrap_or(String::new()));
+    report
+}
+
+/// 摘要渲染（report.md）。
+fn render_summary(report: OrgReport) -> String {
+    let mut out = String::from("# ORG Run Report\n\n");
+    out.push_str(format!("## 交付物（{}）\n", report.deliverables.len()).as_str());
+    for d in report.deliverables.iter() {
+        out.push_str(format!("- {}\n", d).as_str());
+    }
+    out.push_str(format!("\n## 资产（{}）\n", report.assets.len()).as_str());
+    for a in report.assets.iter() {
+        out.push_str(format!("- {}\n", a).as_str());
+    }
+    out.push_str(format!(
+        "\n## 成本谱系\ntokens={} revises={} model_calls={}\n",
+        report.tokens_total, report.revises_total, report.model_calls_total
+    ).as_str());
+    out.push_str(format!(
+        "\n## 运行时动力学\njournal→fixture 基准题 {} 条（生产即出题）\n评分卡漂移告警 {} 条（静默更新检测）\n",
+        report.mined_entries, report.drift_alerts
+    ).as_str());
+    out.push_str("\n");
+    out.push_str(report.summary.clone().as_str());
+    out.push_str("\n");
+    out
+}
+
+/// 机器可读指标（metrics.json：测试与外部观测面的稳定数据源）。
+fn render_metrics(report: OrgReport) -> String {
+    let mut asset_items: Vec<String> = Vec::new();
+    for a in report.assets.iter() {
+        asset_items.push(format!("\"{}\"", a.clone()));
+    }
+    format!(
+        "{{\"accepted\":{},\"subtasks\":{},\"deliverables\":{},\"assets\":{},\"asset_labels\":[{}],\"tokens_total\":{},\"revises_total\":{},\"model_calls_total\":{},\"mined_entries\":{},\"drift_alerts\":{}}}",
+        report.accepted_total,
+        report.subtasks_total,
+        report.deliverables.len(),
+        report.assets.len(),
+        asset_items.join(","),
+        report.tokens_total,
+        report.revises_total,
+        report.model_calls_total,
+        report.mined_entries,
+        report.drift_alerts,
+    )
+}
+
+/// 补丁历史中最近一次变更的来源版本（金丝雀双跑的旧侧版本号）。
+fn last_from_version(manifest: ExpertManifest) -> String {
+    let mut last = String::from("1.0.0");
+    for p in manifest.provenance.iter() {
+        last = p.from_version.clone();
+    }
+    last
+}
+
+/// 固化冻结事实提取（node_trace 的 "memo persisted entries=N" 行，N>0 → 节点名）。
+fn frozen_node_of(report: StatusReport) -> Option<String> {
+    let mut persisted = 0;
+    let mut node_name = String::new();
+    for line in report.node_trace.iter() {
+        if line.contains("memo persisted entries=") {
+            // parse_marker 按 token 前缀匹配 —— "entries=" 才是单 token 前缀
+            persisted = parse_marker(line.clone(), String::from("entries="));
+        }
+        if line.contains("crystallizer.") && line.contains("frozen=") {
+            // 形如 "crystallizer.norm_date frozen=2 hits=0 misses=5 degrades=0"
+            let parts = line.split(" ");
+            for p in parts.iter() {
+                if p.starts_with("crystallizer.") {
+                    let stripped = p.strip_prefix(String::from("crystallizer."));
+                    match stripped {
+                        Some(v) => node_name = v,
+                        None => {},
+                    }
+                }
+            }
+        }
+    }
+    if persisted > 0 && node_name.len() > 0 {
+        Some(node_name)
+    } else {
+        None
+    }
+}
+
+/// 用户仲裁回填解析（ARBITRATE_PROMPT 的 JSON 输出 → Verdict）。
+fn parse_arbitration(raw: String) -> Result<Verdict, OrgError> {
+    let fields: HashMap<String, String> = native typescript {
+        try {
+            return $host.json.fields(raw);
+        } catch (e) {
+            const m = new Map();
+            m.set("error", String(e && e.message || e));
+            return m;
+        }
+    };
+    if fields.contains_key(String::from("error")) {
+        return Err(OrgError::supervision(format!(
+            "仲裁回填不是合法 JSON：{}", fields.get(String::from("error")).unwrap_or(String::from("?"))
+        )));
+    }
+    let verdict = fields.get(String::from("verdict")).unwrap_or(String::from("accept"));
+    if verdict == String::from("revise") {
+        Ok(Verdict::Revise { note: fields.get(String::from("note")).unwrap_or(String::from("用户要求修改")) })
+    } else if verdict == String::from("reject") {
+        Ok(Verdict::Reject { reason: fields.get(String::from("reason")).unwrap_or(String::from("用户否决")) })
+    } else if verdict == String::from("escalate") {
+        Ok(Verdict::Escalate { question: fields.get(String::from("question")).unwrap_or(String::from("需再次仲裁")) })
+    } else {
+        Ok(Verdict::Accept)
+    }
+}
+
+/// 路由 → 专家名（复发计数与池归位的 key）。
+fn expert_of(decision: RoutePath, subtask: SubTask) -> String {
+    match decision {
+        RoutePath::Reuse { expert } => expert,
+        RoutePath::WarmHandoff { expert } => expert,
+        RoutePath::Generate => format!("minted:{}", subtask.role),
+        RoutePath::Inline => format!("inline:{}", subtask.role),
+    }
+}
+
+/// HashMap 字段 → u32。
+fn parse_u32_field(row: HashMap<String, String>, key: String) -> u32 {
+    let raw = row.get(key).unwrap_or(String::from("0"));
+    let n = native typescript {
+        const x = parseInt(raw, 10);
+        return Number.isFinite(x) ? x : 0;
+    };
+    n
+}
+
+impl Registry {
+    /// 按名检索，名缺失时按能力回退（复用通道的健壮性）。
+    fn find_by_name_or(self, name: String, goal: String, skills: &Vec<String>) -> Option<ExpertManifest> {
+        match self.find_by_name(name) {
+            Some(m) => Some(m),
+            None => self.find(goal, skills),
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 投射层（入口文件持有唯一的 scale 与 project）
+// ----------------------------------------------------------------------------
+
+/// 尺度：微内核 —— 每条 edge 编译为事件总线订阅（G6）。
+scale = microkernel;
+
+/// 物理投射（P2 路径唯一 / P4 类型合法 / block 只进静态后端）。
+project {
+    Org                       -> "src/main.rs"                    : rust,
+    Factory                   -> "src/factory.rs"                  : rust,
+    NoticeParser              -> "src/experts/notice_parser.rs"    : rust,
+    ORG_CONFIG                -> "config/org.yml"                  : yaml,
+    EVENTS_SCHEMA             -> "docs/events.schema.json"         : json,
+}

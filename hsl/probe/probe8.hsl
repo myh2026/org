@@ -1,0 +1,43 @@
+// ============================================================================
+// probe8.hsl — graph node 上 &mut self 方法调用的状态保持验证
+// ============================================================================
+import { Crystallizer } from "../runtime/crystallize.hsl";
+
+graph G -> Result<u32, String> {
+    node mut c: Crystallizer = Crystallizer::load(
+        String::from("probe/node"),
+        String::from("probe_track"),
+        String::from("runtime/memos/probe.json"),
+    );
+    edge c -> c on Signal::Ping;
+
+    let mut total = 0;
+    loop {
+        let outcome = c.judge(String::from("sys"), format!("input-{}", total)).await;
+        match outcome {
+            Ok(out) => {
+                println!("[probe8] {} -> {}", total, out);
+            },
+            Err(e) => {
+                println!("[probe8] judge err: {}", e.render());
+            },
+        }
+        total += 1;
+        if total >= 3 {
+            break;
+        }
+    }
+    let stats = c.clone().stats();
+    println!("[probe8] stats: {}", stats);
+    Ok(c.clone().misses)
+}
+
+enum Signal {
+    Ping,
+}
+
+export fn main() -> Result<(), String> {
+    let n = G::run()?;
+    println!("[probe8] misses = {} (期望 3)", n);
+    Ok(())
+}

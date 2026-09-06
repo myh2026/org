@@ -1,0 +1,195 @@
+// ============================================================================
+// org/pool/handoff.hsl — 转接模式：暖移交的用户入口
+// ============================================================================
+// README 三通道访问模型的第二通道：用户 → 主控 →（暖移交）→ 专家。
+// 主控产出上下文移交摘要后代答或转接，避免「用户重述」与「主控全程旁听」
+// 两个极端 —— 一份移交摘要的成本。
+//
+// v0.3.0 落地形态（org handoff <expert> --task "..."）：
+//   1. 能力核对（转接 = 用户委托链：主控代行 → 编排模式语义，缺席授权）
+//   2. 寻址专家（注册表命中）
+//   3. 移交摘要（机械装配：manifest 职责/能力/版本 + 固化 memo 规模 +
+//      最近直连纪要 —— 不重述任务史，只给专家接住请求所需的最小上下文）
+//   4. 专家作答（轨道 handoff:<expert>）
+//   5. 记账 + 纪要回写（与直连同科目：调度可绕、知情/记账不可绕）
+// ============================================================================
+
+import { AccessMode, CapabilityPolicy } from "../policy/capability.hsl";
+import { OrgError } from "../types/errors.hsl";
+import { ExpertManifest, Registry } from "../registry/manifest.hsl";
+import { ask } from "../providers/model.hsl";
+
+/// 移交会话（一次 org handoff = 一份摘要 + 一次代答）。
+#[derive(Debug, Clone)]
+export struct HandoffSession {
+    expert: String,
+    brief: String,
+    task: String,
+    answer: String,
+    tokens: u32,
+}
+
+/// 转接入口（org handoff <expert> --task "<request>"）。
+export fn main() -> Result<(), OrgError> {
+    let expert: String = native typescript {
+        return $host.env.get("ORG_HANDOFF_EXPERT") || "";
+    };
+    let task: String = native typescript {
+        return $host.env.get("ORG_HANDOFF_TASK") || "";
+    };
+    if expert.len() == 0 || task.len() == 0 {
+        return Err(OrgError::new(
+            String::from("handoff"),
+            String::from("org handoff <expert> --task \"<request>\"（专家名与请求必填）"),
+        ));
+    }
+    let s = handoff(expert, task).await?;
+    println!("[handoff] 移交 {} —— 摘要 {} 字 · 回答 {} tokens：", s.expert, s.brief.len(), s.tokens);
+    println!("{}", s.answer);
+    Ok(())
+}
+
+/// 暖移交：摘要装配 → 专家代答 → 记账 → 纪要回写。
+export async fn handoff(expert: String, task: String) -> Result<HandoffSession, OrgError> {
+    let mut policy = CapabilityPolicy::default();
+    let registry = Registry::load(String::from("registry"))?;
+
+    // 能力核对（转接模式 = 主控代行委托 → 编排语义：缺席授权，天花板管缺席）
+    policy.decide(String::from("llm_call"), AccessMode::Orchestrated)?;
+
+    // 事件上总线（知情权不可绕）
+    let expert_evt = expert.clone();
+    let _ = native typescript {
+        $host.events.emit("journal", { name: "handoff_open", detail: expert_evt });
+        return true;
+    };
+
+    // 寻址
+    let mut target: Option<ExpertManifest> = None;
+    for m in registry.experts.iter() {
+        if m.name == expert {
+            target = Some(m.clone());
+        }
+    }
+    let m = match target {
+        Some(found) => found,
+        None => {
+            return Err(OrgError::route(format!("暖移交目标不存在：{}", expert)));
+        },
+    };
+
+    // 移交摘要（机械装配：职责 + 能力 + 版本 + 固化规模 + 最近直连纪要一行）
+    let brief = assemble_brief(m.clone());
+
+    // 专家代答（轨道 handoff:<expert>；摘要注入提示词 = 上下文移交）
+    let track = format!("handoff:{}", expert);
+    let system = format!(
+        "You are the expert: {}. The supervisor hands off a small user request with this context brief:\n{}\nAnswer the request directly and briefly.",
+        m.description,
+        brief,
+    );
+    let answer = ask(track, system, task.clone()).await?;
+
+    // 记账（与直连同科目，channel 标记 handoff）
+    let tokens = ((task.len() + answer.len() + brief.len()) / 3) as u32;
+    let ledger_line = format!(
+        "{{\"expert\":\"{}\",\"channel\":\"handoff\",\"task\":\"{}\",\"tokens\":{},\"accepted\":1}}\n",
+        expert, task, tokens
+    );
+    let _ = native typescript {
+        $host.artifacts.write("direct-ledger.jsonl", ledger_line);
+        return true;
+    };
+
+    // 纪要回写（事后知情）
+    let memo = format!("handoff session with {} :: {} -> {}", expert, task, answer);
+    let _ = native typescript {
+        try {
+            const prev = $host.fs.read("runtime/direct-memos.md");
+            $host.fs.write("runtime/direct-memos.md", prev + memo + "\n");
+        } catch (e) {
+            $host.fs.write("runtime/direct-memos.md", memo + "\n");
+        }
+        return true;
+    };
+    let close_evt = expert.clone();
+    let _ = native typescript {
+        $host.events.emit("journal", { name: "handoff_close", detail: close_evt });
+        return true;
+    };
+
+    Ok(HandoffSession {
+        expert: expert,
+        brief: brief,
+        task: task,
+        answer: answer,
+        tokens: tokens,
+    })
+}
+
+/// 移交摘要装配（机械节点：manifest + memo 规模 + 最近直连纪要，零模型调用）。
+fn assemble_brief(m: ExpertManifest) -> String {
+    let mut caps: Vec<String> = Vec::new();
+    for c in m.capabilities.iter() {
+        caps.push(c.clone());
+    }
+    let memo_count = count_memo_entries();
+    let last_direct = last_direct_memo();
+    let mut brief = format!(
+        "expert: {}@{} (source: {})\ncapabilities: {}\nduty: {}\ncrystallized entries: {}",
+        m.name, m.version, m.source, caps.join(","), m.description, memo_count
+    );
+    match last_direct {
+        Some(line) => {
+            brief.push_str("\nrecent direct memo: ");
+            brief.push_str(line.as_str());
+        },
+        None => {},
+    }
+    brief
+}
+
+/// 固化 memo 条数（摘要素材；缺失 = 0）。
+fn count_memo_entries() -> u32 {
+    let raw: String = native typescript {
+        try {
+            return $host.fs.read("registry/memos/notice-parser.json");
+        } catch (e) {
+            return "";
+        }
+    };
+    if raw.len() == 0 {
+        return 0;
+    }
+    let n: u32 = native typescript {
+        try {
+            const obj = JSON.parse(raw);
+            return Object.keys(obj.memos ?? {}).length;
+        } catch (e) {
+            return 0;
+        }
+    };
+    n
+}
+
+/// 最近一条直连纪要（摘要素材；缺失 = None）。
+fn last_direct_memo() -> Option<String> {
+    let raw: String = native typescript {
+        try {
+            return $host.fs.read("runtime/direct-memos.md");
+        } catch (e) {
+            return "";
+        }
+    };
+    if raw.len() == 0 {
+        return None;
+    }
+    let lines = raw.lines();
+    let mut last: Option<String> = None;
+    for l in lines.iter() {
+        if l.trim().len() > 0 {
+            last = Some(l.clone());
+        }
+    }
+    last
+}

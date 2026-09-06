@@ -1,0 +1,202 @@
+// ============================================================================
+// org/registry/experts/notice-parser.hsl — 专家：公告结构化解析
+// ============================================================================
+// 信封契约（与 ENVELOPE_SIGNATURE 同构）：
+//     fn(spec: TaskSpec) -> Result<StatusReport, ExpertError>
+//
+// 节点分类（固化的前提）：
+//   - 机械节点：块切分 / 行抽取 / 关键词分类 / 记录组装 —— 纯 HSL，零模型
+//   - 判定节点：norm_date（中文日期 → ISO 8601）—— 经 Crystallizer 门面，
+//     输出长期稳定即冻结为 memo（命中后零模型调用）
+//
+// 返工语义：审查意见经 spec.feedback 携带；「无法归一化的日期」在返工轮
+// 保留记录并标注 date_status=unparsed（首轮静默排除，覆盖率先低后补）。
+// ============================================================================
+
+import { StatusReport, TaskSpec } from "../../contracts/contract.hsl";
+import { ExpertError } from "../../types/errors.hsl";
+import { Crystallizer } from "../../runtime/crystallize.hsl";
+
+/// 边事件（G5：枚举变体 guard）。
+enum ParserSignal {
+    NoticeReady,
+    RecordReady,
+}
+
+/// 解析产物（单条公告记录）。
+#[derive(Debug, Clone)]
+export struct NoticeRecord {
+    title: String,
+    date: String,
+    date_status: String,
+    dept: String,
+    category: String,
+}
+
+impl NoticeRecord {
+    fn to_json(self) -> String {
+        format!(
+            "{{\"title\":\"{}\",\"date\":\"{}\",\"date_status\":\"{}\",\"dept\":\"{}\",\"category\":\"{}\"}}",
+            escape(self.title), escape(self.date), escape(self.date_status), escape(self.dept), escape(self.category)
+        )
+    }
+}
+
+/// 判定节点提示词（专家私有静态资源：日期归一化）。
+const NORM_DATE_PROMPT: String = String::from(
+    "你是日期归一化器。输入是一个中文或数字日期串，输出 ISO 8601（YYYY-MM-DD），只输出日期本身。无法解析时输出 unknown。"
+);
+
+/// memo 落盘路径（相对工作区；私有 fixture 资产）。
+const MEMO_PATH: String = String::from("registry/memos/notice-parser.json");
+
+/// 自动降级判据：观测样本下限与命中率水位（保守起步；静默更新检测的固化侧）。
+const AUTO_DEGRADE_MIN_OBS: u32 = 4;
+const AUTO_DEGRADE_BAR: f64 = 0.4;
+
+/// 专家入口 graph（信封契约）。
+export graph NoticeParser(spec: TaskSpec) -> Result<StatusReport, ExpertError> {
+    // node 声明：物理依赖（固化器带 memo 热启动；mut —— 判定观测逐条写回）
+    node mut crystallizer: Crystallizer = Crystallizer::load(
+        String::from("notice-parser/norm_date"),
+        String::from("norm_date"),
+        MEMO_PATH.clone(),
+    );
+    node mut records: Vec<NoticeRecord> = Vec::new();
+    let mut flagged: Vec<String> = Vec::new();
+
+    // 拓扑：crystallizer 产出归一化日期 → 记录组装（G3 环由 on Guard 打破）
+    edge crystallizer -> records on ParserSignal::NoticeReady;
+    edge records -> crystallizer on ParserSignal::RecordReady;
+
+    // 块切分（机械节点）
+    let blocks = split_notices(spec.payload.clone());
+    let total = blocks.len();
+
+    // AgentLoop（G1：逐条处理）
+    // v1.0.0 语义：宽容解析 —— 无法归一化的日期保留原文并标注 date_status=unparsed
+    // （审查意见的返工故事属于 minted 专家；手写专家以成熟度交付）
+    loop {
+        // 游标：records.len()（每块恰产一条记录 —— 宽容解析下无排除分支；
+        // flagged 仅作报告备注，不参与游标，避免双重计数跳块）
+        let head = blocks_head(blocks.clone(), records.len());
+        match head {
+            Some(chunk) => {
+                let title = field_of(chunk.clone(), String::from("标题"));
+                let date_raw = field_of(chunk.clone(), String::from("日期"));
+                let dept = field_of(chunk.clone(), String::from("部门"));
+
+                // 判定节点：日期归一化（经固化门面 —— 命中则零模型调用）
+                let date_iso = crystallizer.judge(NORM_DATE_PROMPT.clone(), date_raw.clone()).await?;
+
+                let rec = NoticeRecord {
+                    title: title.clone(),
+                    date: if date_iso == String::from("unknown") { date_raw } else { date_iso },
+                    date_status: if date_iso == String::from("unknown") {
+                        String::from("unparsed")
+                    } else {
+                        String::from("ok")
+                    },
+                    dept: dept,
+                    category: classify_of_title(title),
+                };
+                if rec.date_status == String::from("unparsed") {
+                    flagged.push(rec.title.clone());
+                }
+                records.push(rec);
+            },
+            None => break,
+        }
+    }
+
+    // 固化统计落盘（资产沉淀：跨运行热启动）
+    // 降级是生命线：命中率漂移（热启动下低命中）时解冻最旧键、回归观测
+    let mut degraded = crystallizer.maybe_degrade(AUTO_DEGRADE_MIN_OBS, AUTO_DEGRADE_BAR);
+    let frozen = crystallizer.clone().persist();
+    let stats = crystallizer.clone().stats();
+
+    // 覆盖率（机械计算：宽容解析 → 全保留，unparsed 以标注交付）
+    let kept = records.len();
+    let coverage = if total == 0 { 0.0 } else { kept as f64 / total as f64 };
+
+    // 报告组装（信封 Ok 侧）
+    let mut report = StatusReport::new(spec.task_id, deliverable_of(records.clone()), coverage);
+    report.tokens_used = 96 * kept as u32;
+    report.node_trace.push(format!("crystallizer.norm_date {}", stats));
+    report.node_trace.push(format!("memo persisted entries={}", frozen));
+    if degraded {
+        report.node_trace.push(String::from("crystallize_degrade auto (hit-rate drift)"));
+    }
+    report.model_calls = crystallizer.clone().misses;
+    for title in flagged.iter() {
+        report.notes.push(format!("flagged (date unparsable): {}", title));
+    }
+    Ok(report)
+}
+
+/// 机械节点：按 "=== NOTICE n ===" 分隔符切块。
+fn split_notices(payload: String) -> Vec<String> {
+    let parts = payload.split("=== NOTICE");
+    let mut out: Vec<String> = Vec::new();
+    for p in parts.iter() {
+        let body = p.trim();
+        if body.len() > 0 {
+            out.push(body.clone());
+        }
+    }
+    out
+}
+
+/// 机械节点：取块内某字段行（"字段: 值" 形态）。
+fn field_of(chunk: String, key: String) -> String {
+    let marker = format!("{}: ", key);
+    let lines = chunk.lines();
+    for line in lines.iter() {
+        if line.starts_with(marker.as_str()) {
+            let stripped = line.strip_prefix(marker.clone());
+            match stripped {
+                Some(v) => return v.trim(),
+                None => return String::new(),
+            }
+        }
+    }
+    let _ = key;
+    String::new()
+}
+
+/// 机械节点：标题关键词分类（公告 / 通知 / 其他）。
+fn classify_of_title(title: String) -> String {
+    if title.contains("公告") {
+        String::from("announcement")
+    } else if title.contains("通知") {
+        String::from("notice")
+    } else {
+        String::from("other")
+    }
+}
+
+/// 机械节点：记录集 → JSON 数组交付物。
+fn deliverable_of(records: Vec<NoticeRecord>) -> String {
+    let mut items: Vec<String> = Vec::new();
+    for r in records.iter() {
+        items.push(r.clone().to_json());
+    }
+    let joined = items.join(",");
+    format!("[{}]", joined)
+}
+
+/// 块游标（机械节点：按已处理数取下一块）。
+fn blocks_head(blocks: Vec<String>, processed: u32) -> Option<String> {
+    let idx = processed as usize;
+    if idx < blocks.len() {
+        Some(blocks[idx].clone())
+    } else {
+        None
+    }
+}
+
+/// JSON 字符串转义（机械节点：交付物卫生）。
+fn escape(text: String) -> String {
+    let out = text.clone().replace(String::from("\""), String::from("\\\""));
+    out.replace(String::from("\n"), String::from("\\n"))
+}

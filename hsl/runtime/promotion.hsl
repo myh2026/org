@@ -1,0 +1,261 @@
+// ============================================================================
+// org/runtime/promotion.hsl — 运行时动力学：影子晋升 · 金丝雀 · N 版本冗余
+//                                                        · 静默更新检测
+// ============================================================================
+// README「运行时动力学」四机制的运行时侧（评分卡侧在 models/scorecard.hsl）：
+//
+//   影子晋升（v1 形态）：补丁版本合入后，旧版本源码已归档（<name>@<from>.hsl）。
+//   候选以影子身份与在岗版本同输入双跑 —— 产出只计分不交付；一致性达标才
+//   金丝雀确认（canary_confirmed），否则回滚到旧版（canary_rollback）。
+//   候选期双跑的双倍算力由验收样本规模兜底（样本小、机械专家零模型调用）。
+//
+//   N 版本冗余：redundancy >= 2 时向实现来源多样的专家（不同 source / 不同
+//   version）重复派单 —— 产出一致置信度加成，分歧触发仲裁（分歧率是健康度）。
+//
+//   静默更新检测：评分卡当期格 vs 基线（registry/scorecards/baseline-<model>.json）
+//   逐格对比，劣化超阈值 → score_drift_alert（审计事件）；告警需人工复核归因
+//   （任务分布漂移同样会触发，已知边界）。
+// ============================================================================
+
+import { TaskSpec } from "../contracts/contract.hsl";
+import { OrgError } from "../types/errors.hsl";
+import { ExpertManifest, Registry } from "../registry/manifest.hsl";
+import { run_expert_at, read_run_ok, read_acceptance_details } from "../factory/pipeline.hsl";
+
+/// 金丝雀裁决（影子对比的出口）。
+#[derive(Debug, Clone, PartialEq)]
+export enum CanaryVerdict {
+    /// 新旧版本在验收样本上产出一致 → 确认新版本。
+    Confirm,
+    /// 产出分歧或任一侧失败 → 回滚到旧版本（审计事件留痕）。
+    Rollback,
+}
+
+/// 影子晋升：补丁版本金丝雀确认（同输入双跑，产出只计分不交付）。
+///
+/// old/new 各自在验收样本上嵌套执行一次（互不覆盖产物目录），对比
+/// acceptance.json 的 (ok, coverage, valid, total)。一致 → Confirm；
+/// 任一指标分歧 → Rollback（当前盘上已是新源码，回滚 = 归档源写回 + manifest 降版）。
+export async fn canary_check(
+    registry: Registry, manifest_new: ExpertManifest, from_version: String,
+) -> Result<CanaryVerdict, OrgError> {
+    // 验收样本（金丝雀的判卷依据 —— 与工厂验收同一道闸门）
+    let sample = load_canary_sample(manifest_new.fixture_path.clone())?;
+    let name = manifest_new.name.clone();
+
+    // 双跑：旧版（归档）与新版（盘上当前），产物目录隔离
+    let old_entry = format!("registry/experts/{}@{}.hsl", name, from_version);
+    let new_entry = manifest_new.entry_path.clone();
+    let fixture = format!("factory/fixtures/{}.fixture.json", name);
+    let old_ok = run_side(old_entry.clone(), fixture.clone(), sample.clone(), String::from("factory/canary-old"));
+    let new_ok = run_side(new_entry.clone(), fixture.clone(), sample.clone(), String::from("factory/canary-new"));
+
+    let old_details = read_acceptance_details(String::from("factory/canary-old"));
+    let new_details = read_acceptance_details(String::from("factory/canary-new"));
+    // 元组元素先解构（native 块内不可访问 .0/.1 —— JS 侧语法断层）
+    let old_cov = old_details.0;
+    let old_valid = old_details.1;
+    let old_total = old_details.2;
+    let new_cov = new_details.0;
+    let new_valid = new_details.1;
+    let new_total = new_details.2;
+
+    // 影子对比计分（事件留痕；裁判证据归因由调用方处理）
+    let agree = old_ok && new_ok
+        && f64_eq(old_cov, new_cov)
+        && old_valid == new_valid
+        && old_total == new_total;
+    let agree_flag = agree;
+    let _ = native typescript {
+        $host.events.emit("shadow_compare", {
+            expert: name, candidate_version: manifest_new.version, baseline_version: from_version,
+            agree: agree_flag, old_coverage: old_cov, new_coverage: new_cov,
+        });
+        return true;
+    };
+
+    if agree {
+        let _ = native typescript {
+            $host.events.emit("canary_confirmed", { expert: name, version: manifest_new.version });
+            return true;
+        };
+        Ok(CanaryVerdict::Confirm)
+    } else {
+        // 回滚：归档旧源写回主路径 + manifest 降版（蓝绿的另一面）
+        let rollback_ok: bool = native typescript {
+            try {
+                const src = $host.fs.read(old_entry);
+                $host.fs.write(new_entry, src);
+                return true;
+            } catch (e) {
+                return false;
+            }
+        };
+        let mut reg = registry;
+        let reverted = manifest_new.revert_version(from_version.clone());
+        let _ = reg.register(reverted)?;
+        let _ = native typescript {
+            $host.events.emit("canary_rollback", { expert: name, version: manifest_new.version, restored: rollback_ok });
+            return true;
+        };
+        Ok(CanaryVerdict::Rollback)
+    }
+}
+
+/// 冗余派单结论（N 版本冗余的出口）。
+#[derive(Debug, Clone)]
+export struct RedundancyVerdict {
+    agree: bool,
+    coverage_a: f64,
+    coverage_b: f64,
+}
+
+/// N 版本冗余：向实现来源多样的专家对重复派单（v1：双实现，同输入对比）。
+///
+/// 分歧率本身是系统健康度指标（redundancy_compare 事件留痕）；
+/// 分歧时调用方应升级仲裁（Escalate 语义），一致时置信度加成。
+export async fn redundant_dispatch(a: ExpertManifest, b: ExpertManifest, spec: TaskSpec)
+    -> Result<RedundancyVerdict, OrgError> {
+    let fixture_a = format!("factory/fixtures/{}.fixture.json", a.name);
+    let fixture_b = format!("factory/fixtures/{}.fixture.json", b.name);
+    let ok_a = run_side(a.entry_path.clone(), fixture_a, spec.clone(), String::from("factory/redundancy-a"));
+    let ok_b = run_side(b.entry_path.clone(), fixture_b, spec.clone(), String::from("factory/redundancy-b"));
+    let da = read_acceptance_details(String::from("factory/redundancy-a"));
+    let db = read_acceptance_details(String::from("factory/redundancy-b"));
+    let cov_a = da.0;
+    let cov_b = db.0;
+    let agree = ok_a && ok_b && f64_eq(cov_a, cov_b) && da.1 == db.1;
+    let agree_flag = agree;
+    let _ = native typescript {
+        $host.events.emit("redundancy_compare", {
+            a: a.name, b: b.name, agree: agree_flag,
+            coverage_a: cov_a, coverage_b: cov_b,
+        });
+        return true;
+    };
+    Ok(RedundancyVerdict { agree: agree, coverage_a: cov_a, coverage_b: cov_b })
+}
+
+/// 静默更新检测：评分卡当期 vs 基线逐格对比（劣化超阈值 → 审计事件）。
+///
+/// 返回告警条数；基线文件缺失时写当期为基线并返回 0（首运行无告警）。
+/// 诚实边界：任务分布自身漂移同样会触发 —— 告警需人工复核归因。
+export fn drift_check(model: String, current_json: String, baseline_path: String, threshold: f64) -> u32 {
+    // 当期格解析（scorecard.to_json 形态：cells:[{cell,score,confidence}]）
+    let current: Vec<(String, f64)> = parse_cells(current_json);
+    let baseline_raw: String = native typescript {
+        try {
+            return $host.fs.read(baseline_path);
+        } catch (e) {
+            return "";
+        }
+    };
+    if baseline_raw.len() == 0 {
+        // 首运行：当期即为基线（下一运行起有对比对象）
+        let body = current_json.clone();
+        let path = baseline_path.clone();
+        let _ = native typescript {
+            $host.fs.write(path, body);
+            return true;
+        };
+        return 0;
+    }
+    let baseline: Vec<(String, f64)> = parse_cells(baseline_raw);
+    let mut alerts: u32 = 0;
+    for cur in current.iter() {
+        let mut prev: f64 = -1.0;
+        for base in baseline.iter() {
+            if base.0 == cur.0 {
+                prev = base.1;
+            }
+        }
+        if prev >= 0.0 && cur.1 < prev - threshold {
+            let cell = cur.0.clone();
+            let score = cur.1;
+            let previous = prev;
+            let _ = native typescript {
+                $host.events.emit("score_drift_alert", { model: model, cell: cell, previous: previous, current: score, threshold: threshold });
+                return true;
+            };
+            alerts += 1;
+        }
+    }
+    alerts
+}
+
+// ----------------------------------------------------------------------------
+// 内部辅助
+// ----------------------------------------------------------------------------
+
+/// 单侧嵌套执行（金丝雀/冗余共用；失败不抛 —— 失败本身就是对比信号）。
+fn run_side(entry: String, fixture: String, spec: TaskSpec, out_dir: String) -> bool {
+    let out = run_expert_at(entry, fixture, spec, out_dir.clone());
+    out.ok && read_run_ok(out_dir)
+}
+
+/// f64 近似相等（同一确定性输入下的机械专家，逐位相等是常态；epsilon 防序列化噪声）。
+fn f64_eq(a: f64, b: f64) -> bool {
+    let diff = if a >= b { a - b } else { b - a };
+    diff < 0.0000001
+}
+
+/// 金丝雀样本读取（与补丁 smoke 同源：factory/samples/<name>.json）。
+/// feedback 一并织入 —— 旧版本（如 v1.0.0 的 feedback 门控语义）与新版本
+/// 必须在同一判卷条件下对比，否则影子对比会误报分歧。
+fn load_canary_sample(sample_path: String) -> Result<TaskSpec, OrgError> {
+    let raw: String = native typescript {
+        try {
+            return $host.fs.read(sample_path);
+        } catch (e) {
+            return "";
+        }
+    };
+    if raw.len() == 0 {
+        return Err(OrgError::factory(String::from("金丝雀样本缺失（factory/samples/<name>.json）")));
+    }
+    let fields: HashMap<String, String> = native typescript {
+        try {
+            return $host.json.fields(raw);
+        } catch (e) {
+            return new Map();
+        }
+    };
+    let goal = fields.get(String::from("goal")).unwrap_or(String::from("canary rehearsal"));
+    let acceptance = fields.get(String::from("acceptance")).unwrap_or(String::from("coverage >= 0.95"));
+    let payload = fields.get(String::from("payload")).unwrap_or(String::from("[]"));
+    let feedback_raw = fields.get(String::from("feedback")).unwrap_or(String::from("[]"));
+    let feedback: Vec<String> = native typescript {
+        try {
+            const arr = JSON.parse(feedback_raw);
+            if (Array.isArray(arr) === false) return [];
+            return arr.map((f) => String(f));
+        } catch (e) {
+            return [];
+        }
+    };
+    let mut spec = TaskSpec::forge(998, goal, String::from("金丝雀影子样本"), acceptance, payload, 4096, 2);
+    for f in feedback.iter() {
+        spec = spec.with_feedback(f.clone());
+    }
+    Ok(spec)
+}
+
+/// scorecard.json → [(cell, score)]（机械解析）。
+fn parse_cells(card_json: String) -> Vec<(String, f64)> {
+    let rows: Vec<(String, f64)> = native typescript {
+        try {
+            const obj = JSON.parse(card_json);
+            const out = [];
+            for (const c of obj.cells ?? []) {
+                out.push([String(c.cell), Number(c.score)]);
+            }
+            return out;
+        } catch (e) {
+            return [];
+        }
+    };
+    rows
+}
+
+/// 漂移告警阈值（默认 0.25：评分卡格级劣化的显著线；按任务类调参是已知边界）。
+export const DRIFT_THRESHOLD: f64 = 0.25;

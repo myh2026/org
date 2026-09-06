@@ -1,0 +1,157 @@
+// ============================================================================
+// org/adapters/bridge.hsl — 外部智能体适配（导入线）
+// ============================================================================
+// 把外部智能体描述文件（MCP / A2A / subagent 文件格式）适配为注册表条目。
+// v1 诚实边界：导入 = 注册表登记（manifest source=import + 能力标签 + 信封
+// 签名核对）；导入体的执行接线（协议翻译）是路线图项 —— 登记不等于在岗。
+// 每次导入是一条审计事件（知情权不可绕）。
+// ============================================================================
+
+import { ENVELOPE_SIGNATURE } from "../contracts/contract.hsl";
+import { OrgError } from "../types/errors.hsl";
+import { ExpertManifest, Registry } from "../registry/manifest.hsl";
+
+/// 支持的导入格式（封闭枚举：新增格式必须显式扩这里 —— S6 精神）。
+#[derive(Debug, Clone, PartialEq)]
+export enum ImportFormat {
+    /// subagent 文件格式（JSON：name / description / tools / model）。
+    SubagentJson,
+    /// MCP server 描述（JSON：name / instructions / tools）。
+    McpManifest,
+    /// A2A agent card（JSON：name / description / skills / url）。
+    A2ACard,
+}
+
+impl ImportFormat {
+    fn label(self) -> String {
+        match self {
+            ImportFormat::SubagentJson => String::from("subagent-json"),
+            ImportFormat::McpManifest => String::from("mcp-manifest"),
+            ImportFormat::A2ACard => String::from("a2a-card"),
+        }
+    }
+
+    /// 格式探测（按字段特征；机械判定）。
+    fn detect(raw: String) -> Result<ImportFormat, OrgError> {
+        if raw.contains("\"tools\"") && raw.contains("\"instructions\"") {
+            Ok(ImportFormat::McpManifest)
+        } else if raw.contains("\"skills\"") && raw.contains("\"url\"") {
+            Ok(ImportFormat::A2ACard)
+        } else if raw.contains("\"tools\"") && raw.contains("\"model\"") {
+            Ok(ImportFormat::SubagentJson)
+        } else {
+            Err(OrgError::new(
+                String::from("adapter"),
+                String::from("无法识别的导入格式（需要 subagent-json / mcp-manifest / a2a-card 之一）"),
+            ))
+        }
+    }
+}
+
+/// 导入描述（探测后的归一形态）。
+#[derive(Debug, Clone)]
+export struct ImportedAgent {
+    name: String,
+    description: String,
+    tools: Vec<String>,
+    format: ImportFormat,
+}
+
+/// 从工作区导入一个外部智能体描述文件。
+///
+/// 登记语义（不等于在岗）：
+///   - manifest.source = "import"；entry 为空（执行接线未完成，派单时
+///     路由器会跳过无 entry 的条目 —— 检索命中但不可执行即降级 C 路径）
+///   - 每次导入发 audit 事件（调度可绕，知情不可绕）
+export fn import_agent(path: String, registry: Registry) -> Result<ExpertManifest, OrgError> {
+    let raw: String = native typescript {
+        try {
+            return $host.fs.read(path);
+        } catch (e) {
+            return "";
+        }
+    };
+    if raw.len() == 0 {
+        return Err(OrgError::new(String::from("adapter"), format!("导入文件不存在或为空：{}", path)));
+    }
+    let format = ImportFormat::detect(raw.clone())?;
+    let agent = parse_agent(raw)?;
+    let fmt_label = format.label();
+
+    // 能力标签：工具名直接作为标签（粗粒度；v1 边界：不尝试语义归类）
+    let mut caps: Vec<String> = Vec::new();
+    for t in agent.tools.iter() {
+        caps.push(t.clone());
+    }
+    if caps.len() == 0 {
+        caps.push(String::from("external"));
+    }
+
+    let manifest = ExpertManifest::forge(
+        agent.name.clone(),
+        String::from("0.1.0"),
+        agent.description.clone(),
+        caps,
+        String::from("import"),
+        0.5,
+        String::from(""),
+        String::from(""),
+    );
+
+    let mut reg = registry;
+    let _ = reg.register(manifest.clone())?;
+    let name = agent.name.clone();
+    let import_path = path.clone();
+    let _ = native typescript {
+        $host.events.emit("audit", { event: "agent_imported", format: fmt_label, name, path: import_path });
+        return true;
+    };
+    Ok(manifest)
+}
+
+/// 描述文件 → ImportedAgent（字段级解析；$host.json.fields 类型纪律通道）。
+fn parse_agent(raw: String) -> Result<ImportedAgent, OrgError> {
+    let fields: HashMap<String, String> = native typescript {
+        try {
+            return $host.json.fields(raw);
+        } catch (e) {
+            const m = new Map();
+            m.set("error", String(e && e.message || e));
+            return m;
+        }
+    };
+    if fields.contains_key(String::from("error")) {
+        return Err(OrgError::new(
+            String::from("adapter"),
+            format!("导入文件不是合法 JSON：{}", fields.get(String::from("error")).unwrap_or(String::from("?"))),
+        ));
+    }
+    let name = fields.get(String::from("name")).unwrap_or(String::from(""));
+    if name.len() == 0 {
+        return Err(OrgError::new(String::from("adapter"), String::from("导入描述缺 name 字段")));
+    }
+    let description = fields.get(String::from("description")).unwrap_or(String::from(""));
+    let tools: Vec<String> = native typescript {
+        const obj = JSON.parse(raw);
+        const list = obj.tools ?? obj.skills ?? [];
+        if (Array.isArray(list) === false) return [];
+        return list.map((x) => String(x.name ?? x));
+    };
+    let format = ImportFormat::detect(raw.clone())?;
+    Ok(ImportedAgent {
+        name: name,
+        description: description,
+        tools: tools,
+        format: format,
+    })
+}
+
+/// 外部条目可执行性检查（entry 为空 = 未接线；路由器据此降级）。
+export fn is_runnable(manifest: ExpertManifest) -> bool {
+    manifest.entry_path.len() > 0
+}
+
+/// 信封签名核对（导入体若声明签名必须与信封同构，否则拒绝登记）。
+export fn envelope_conformant(manifest: ExpertManifest) -> bool {
+    manifest.signature == ENVELOPE_SIGNATURE
+}

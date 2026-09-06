@@ -1,0 +1,288 @@
+// ============================================================================
+// org/pool/direct.hsl — 直连前台：用户可寻址任意池内专家（多轮会话）
+// ============================================================================
+// 治理原则（设计铁律 #1）：调度权可绕，知情权与记账权不可绕。
+//   - 事件上总线（每次直连发 direct_open / direct_close 事件）
+//   - 花销记独立科目（tokens 独立计数，artifact: direct-ledger.jsonl）
+//   - 结束后纪要回写（memo → 工作区 runtime/direct-memos.md，主控可读）
+// 用户在场（Direct 模式）：confirm 态能力就地放行 —— 天花板管缺席，确认管在场。
+//
+// 多轮会话（v0.3.0）：会话语义以「磁盘会话账本」落地（BNF v1.5 无 pool/session
+// 实例语义，内存级多轮是 v1.6 路线图项）：
+//   - 会话账本：runtime/sessions/<expert>/<session>.jsonl（跨 CLI 调用持久）
+//   - 上下文：每轮把账本中的历史问答织入提示词（专家带着会话史作答）
+//   - 一次进程可跑多轮（ORG_ASK_TURNS 传 JSON 问题数组，逐轮消费轨道）
+// ============================================================================
+import { AccessMode, CapabilityPolicy } from "../policy/capability.hsl";
+import { ExpertError } from "../types/errors.hsl";
+import { ExpertManifest, Registry } from "../registry/manifest.hsl";
+import { ask } from "../providers/model.hsl";
+
+/// 直连会话（一次 org ask = 一轮问答；多轮 = 账本上的多行）。
+#[derive(Debug, Clone)]
+export struct DirectSession {
+    expert: String,
+    session: String,
+    question: String,
+    answer: String,
+    tokens: u32,
+    turn: u32,
+}
+
+/// 直连入口（org ask <expert> "<question>" [--session <id>]）。
+export fn main() -> Result<(), ExpertError> {
+    // CLI 经环境变量传参：
+    //   ORG_ASK_EXPERT / ORG_ASK_QUESTION —— 单轮
+    //   ORG_ASK_TURNS —— 多轮（JSON 字符串数组；一次进程消费多条轨道）
+    //   ORG_ASK_SESSION —— 会话 id（缺省 default）
+    let expert: String = native typescript {
+        return $host.env.get("ORG_ASK_EXPERT") || "";
+    };
+    if expert.len() == 0 {
+        return Err(ExpertError::new(
+            String::from("direct"),
+            String::from("usage"),
+            String::from("org ask <expert> \"<question>\"（专家名必填）"),
+        ));
+    }
+    let turns: Vec<String> = read_turns();
+    if turns.len() == 0 {
+        return Err(ExpertError::new(
+            String::from("direct"),
+            String::from("usage"),
+            String::from("org ask <expert> \"<question>\"（问题必填）"),
+        ));
+    }
+    let session_id: String = native typescript {
+        return $host.env.get("ORG_ASK_SESSION") || "default";
+    };
+    let mut i: u32 = 0;
+    let total = turns.len() as u32;
+    loop {
+        let q = turns[i as usize].clone();
+        let s = direct(expert.clone(), session_id.clone(), q)?;
+        if total > 1 {
+            println!("[direct] turn {} —— {}（{} tokens）：", s.turn, s.expert, s.tokens);
+        } else {
+            println!("[direct] {} 回答（{} tokens）：", s.expert, s.tokens);
+        }
+        println!("{}", s.answer);
+        i += 1;
+        if i >= total {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// 读取问题列表（多轮 ORG_ASK_TURNS 优先，单轮 ORG_ASK_QUESTION 兜底）。
+fn read_turns() -> Vec<String> {
+    let raw: String = native typescript {
+        const t = $host.env.get("ORG_ASK_TURNS");
+        if (t && t.length > 0) return t;
+        return "";
+    };
+    if raw.len() > 0 {
+        let list: Vec<String> = native typescript {
+            try {
+                const arr = JSON.parse(raw);
+                if (Array.isArray(arr) === false) return [];
+                return arr.map((x) => String(x));
+            } catch (e) {
+                return [];
+            }
+        };
+        return list;
+    }
+    let single: String = native typescript {
+        return $host.env.get("ORG_ASK_QUESTION") || "";
+    };
+    let mut out: Vec<String> = Vec::new();
+    if single.len() > 0 {
+        out.push(single);
+    }
+    out
+}
+
+/// 直连一轮：能力核对 → 寻址 → 会话史装载 → 问答 → 记账 → 纪要回写。
+export async fn direct(expert: String, session_id: String, question: String) -> Result<DirectSession, ExpertError> {
+    let mut policy = CapabilityPolicy::default();
+    let registry = Registry::load(String::from("registry"))?;
+
+    // 直连模式：用户在场 —— confirm 态能力就地放行（天花板管缺席，确认管在场）
+    policy.decide(String::from("llm_call"), AccessMode::Direct)?;
+
+    // 事件上总线（知情权不可绕）
+    let expert_evt = expert.clone();
+    let _ = native typescript {
+        $host.events.emit("journal", { name: "direct_open", detail: expert_evt });
+        return true;
+    };
+
+    // 专家寻址：注册表命中（在岗才可直连）
+    let manifest = find_direct_target(registry, expert.clone());
+    let m = match manifest {
+        Some(found) => found,
+        None => {
+            return Err(ExpertError::new(
+                String::from("direct"),
+                String::from("not-found"),
+                format!("专家 {} 不在注册表（直连仅可寻址在岗专家）", expert),
+            ));
+        },
+    };
+
+    // 会话史装载（磁盘会话账本：跨 CLI 调用的多轮上下文）
+    let history = load_history(expert.clone(), session_id.clone());
+    let turn = history.len() as u32 + 1;
+
+    // 问题经模型网关（轨道 direct:<expert>；历史织入提示词 —— 会话连续性）
+    let track = format!("direct:{}", expert);
+    let system = format!(
+        "You are the expert: {}. Answer the user directly and briefly.{}",
+        m.description,
+        render_history(history.clone()),
+    );
+    let answer = ask(track, system, question.clone()).await?;
+
+    // 花销记账（独立科目：direct-ledger.jsonl；多轮累加而非覆盖）
+    let tokens = estimate_tokens(question.clone(), answer.clone());
+    let ledger_line = format!(
+        "{{\"expert\":\"{}\",\"session\":\"{}\",\"turn\":{},\"question\":\"{}\",\"tokens\":{},\"accepted\":1}}\n",
+        expert, session_id, turn, question, tokens
+    );
+    let _ = native typescript {
+        let prev = "";
+        try {
+            // 产物目录在工作区内时（org 默认布局），读取既有账本续写
+            const outdir = String($host.config.outdir || "");
+            const ws = String($host.config.workspace || "");
+            if (outdir.startsWith(ws)) {
+                const rel = outdir.slice(ws.length + 1).replace(/\\/g, "/") + "/direct-ledger.jsonl";
+                prev = $host.fs.read(rel);
+            }
+        } catch (e) {
+            prev = "";
+        }
+        $host.artifacts.write("direct-ledger.jsonl", prev + ledger_line);
+        return true;
+    };
+
+    // 会话账本落盘（runtime/sessions/<expert>/<session>.jsonl；多轮连续性载体）
+    append_session(expert.clone(), session_id.clone(), turn, question.clone(), answer.clone(), tokens);
+
+    // 纪要回写（主控编排上下文保持完整 —— 事后知情，不事前审批）
+    let memo = format!("direct session with {} [{}] turn {} :: {} -> {}", expert, session_id, turn, question, answer);
+    let _ = native typescript {
+        try {
+            const prev = $host.fs.read("runtime/direct-memos.md");
+            $host.fs.write("runtime/direct-memos.md", prev + memo + "\n");
+        } catch (e) {
+            $host.fs.write("runtime/direct-memos.md", memo + "\n");
+        }
+        return true;
+    };
+    let close_evt = expert.clone();
+    let _ = native typescript {
+        $host.events.emit("journal", { name: "direct_close", detail: close_evt });
+        return true;
+    };
+
+    Ok(DirectSession {
+        expert: expert,
+        session: session_id,
+        question: question,
+        answer: answer,
+        tokens: tokens,
+        turn: turn,
+    })
+}
+
+/// 直连寻址（v1：注册表在岗检查；池实例忙时排队是路线图项）。
+fn find_direct_target(registry: Registry, name: String) -> Option<ExpertManifest> {
+    for m in registry.experts.iter() {
+        if m.name == name {
+            return Some(m.clone());
+        }
+    }
+    None
+}
+
+/// 会话史条目（轮次问答对）。
+#[derive(Debug, Clone)]
+struct TurnRecord {
+    turn: u32,
+    question: String,
+    answer: String,
+}
+
+/// 装载会话史（runtime/sessions/<expert>/<session>.jsonl；缺失 = 新会话）。
+fn load_history(expert: String, session_id: String) -> Vec<TurnRecord> {
+    let path = format!("runtime/sessions/{}/{}.jsonl", expert, session_id);
+    let raw: String = native typescript {
+        try {
+            return $host.fs.read(path);
+        } catch (e) {
+            return "";
+        }
+    };
+    let mut out: Vec<TurnRecord> = Vec::new();
+    if raw.len() == 0 {
+        return out;
+    }
+    let rows: Vec<(u32, String, String)> = native typescript {
+        try {
+            const out = [];
+            for (const line of raw.split("\n")) {
+                if (line.trim().length === 0) continue;
+                const o = JSON.parse(line);
+                out.push([Math.floor(Number(o.turn ?? 0)), String(o.question ?? ""), String(o.answer ?? "")]);
+            }
+            return out;
+        } catch (e) {
+            return [];
+        }
+    };
+    for r in rows.iter() {
+        out.push(TurnRecord { turn: r.0, question: r.1, answer: r.2 });
+    }
+    out
+}
+
+/// 会话史渲染（提示词注入形态；空会话返回空串）。
+fn render_history(history: Vec<TurnRecord>) -> String {
+    if history.len() == 0 {
+        return String::new();
+    }
+    let mut out = String::from("\n\nSession history (previous turns, oldest first):");
+    for t in history.iter() {
+        out.push_str(format!("\n[turn {}] Q: {} / A: {}", t.turn, t.question, t.answer).as_str());
+    }
+    out.push_str("\n\nContinue this session naturally.");
+    out
+}
+
+/// 会话账本追加（JSONL；目录自动建）。
+fn append_session(expert: String, session_id: String, turn: u32, question: String, answer: String, tokens: u32) {
+    let path = format!("runtime/sessions/{}/{}.jsonl", expert, session_id);
+    let line = format!(
+        "{{\"turn\":{},\"question\":\"{}\",\"answer\":\"{}\",\"tokens\":{}}}\n",
+        turn, question, answer, tokens
+    );
+    let _ = native typescript {
+        let prev = "";
+        try {
+            prev = $host.fs.read(path);
+        } catch (e) {
+            prev = "";
+        }
+        $host.fs.write(path, prev + line);
+        return true;
+    };
+}
+
+/// 粗估 token（问答各按 1 token / 3 chars 折算；诚实边界：非精确计量）。
+fn estimate_tokens(question: String, answer: String) -> u32 {
+    let raw = (question.len() + answer.len()) / 3;
+    raw as u32
+}

@@ -1,0 +1,132 @@
+// ============================================================================
+// org/runtime/journal.hsl — 事件溯源：append-only 留痕 + 确定性重放
+// ============================================================================
+// 事件总线的全部事件 append-only 留痕（类型化事件，与 HSL 事件表机制同构）。
+// 任何一次运行可由「日志 + 代码版本」确定性重放：录制当时的模型响应（即
+// scripted 剧本），替换为 fixture 重演。四个直接回报：
+//   1. 调试即时间旅行  2. 事故可复盘
+//   3. 成本精确溯源    4. journal → fixture（生产即出题）
+// ============================================================================
+
+/// 期刊条目（结构化事件；journal.jsonl 的一行）。
+#[derive(Debug, Clone)]
+export struct JournalEntry {
+    seq: u32,
+    ts: String,
+    phase: String,
+    actor: String,
+    action: String,
+    detail: String,
+}
+
+impl JournalEntry {
+    fn to_line(self) -> String {
+        format!("{}|{}|{}|{}|{}|{}", self.seq, self.ts, self.phase, self.actor, self.action, self.detail)
+    }
+}
+
+/// 期刊：内核与全部部件的留痕服务（事件上总线 + artifact 落盘）。
+#[derive(Debug, Clone)]
+export struct Journal {
+    entries: Vec<JournalEntry>,
+    seq: u32,
+    run_id: String,
+}
+
+impl Journal {
+    /// 开卷：run_start 事件 + run_id（时间戳形态）。
+    fn open(mission: String) -> Journal {
+        let ts: String = native typescript {
+            return new Date().toISOString().replace(/[:.]/g, "-");
+        };
+        let mut j = Journal { entries: Vec::new(), seq: 0, run_id: ts };
+        let mission_clone = mission.clone();
+        let _ = native typescript {
+            $host.events.emit("run_start", { mission: mission_clone });
+            return true;
+        };
+        j.log(String::from("kernel"), String::from("open"), mission);
+        j
+    }
+
+    /// 记一条（上总线 + 入卷）。
+    fn log(&mut self, actor: String, action: String, detail: String) {
+        self.seq += 1;
+        let ts: String = native typescript {
+            return new Date().toISOString();
+        };
+        let phase = phase_of(action.clone());
+        let entry = JournalEntry {
+            seq: self.seq,
+            ts: ts,
+            phase: phase,
+            actor: actor,
+            action: action,
+            detail: detail,
+        };
+        let event_name = entry.action.clone();
+        let event_detail = entry.detail.clone();
+        let _ = native typescript {
+            $host.events.emit("journal", { name: event_name, detail: event_detail });
+            return true;
+        };
+        self.entries.push(entry);
+    }
+
+    /// 落盘（artifact：journal.jsonl + 事件总线由宿主收尾写 events.jsonl）。
+    fn flush(self) -> String {
+        let mut body = String::new();
+        for e in self.entries.iter() {
+            body.push_str(e.clone().to_line().as_str());
+            body.push('\n');
+        }
+        let _ = native typescript {
+            $host.artifacts.write("journal.jsonl", body);
+            return true;
+        };
+        self.run_id
+    }
+
+    /// 条目数（报告的观测指标）。
+    fn len(self) -> u32 {
+        self.entries.len() as u32
+    }
+}
+
+/// 动作 → 阶段名（监督回路四阶段的归类）。
+fn phase_of(action: String) -> String {
+    match action.as_str() {
+        "open" | "decompose" | "clarify" | "answer" => String::from("1:decompose"),
+        "route" | "mint-spec" | "mint-hsl" | "mint-check" | "mint-exam" | "mint-register" | "patch" | "canary" => String::from("2:route"),
+        "dispatch" | "worker-done" | "review" | "re-dispatch" | "arbitrate" | "re-route" => String::from("3:supervise"),
+        "aggregate" | "asset" | "crystallize" | "score" | "close" | "mine" | "drift" | "memory" => String::from("4:aggregate"),
+        _ => String::from("0:system"),
+    }
+}
+
+/// 重放辅助：读取历史运行的 events.jsonl（org replay 的原料）。
+/// 返回事件行数组；确定性重放 = 以 journal 中的轨道记录为剧本重演。
+export fn load_events(run_dir: String) -> Vec<String> {
+    let lines: Vec<String> = native typescript {
+        try {
+            const raw = $host.fs.read(run_dir + "/events.jsonl");
+            return raw.split("\n").filter((l) => l.trim().length > 0);
+        } catch (e) {
+            return [];
+        }
+    };
+    lines
+}
+
+/// 重放辅助：读取历史运行的 journal.jsonl（人可读的时间线）。
+export fn load_journal(run_dir: String) -> Vec<String> {
+    let lines: Vec<String> = native typescript {
+        try {
+            const raw = $host.fs.read(run_dir + "/journal.jsonl");
+            return raw.split("\n").filter((l) => l.trim().length > 0);
+        } catch (e) {
+            return [];
+        }
+    };
+    lines
+}

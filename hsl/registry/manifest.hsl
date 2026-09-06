@@ -1,0 +1,345 @@
+// ============================================================================
+// org/registry/manifest.hsl — 专家库：manifest schema + 磁盘注册表 + 检索
+// ============================================================================
+// 库是磁盘上的资产层（不占运行时资源）：工作区 registry/ 目录即 git 注册表。
+// 检索 = 能力标签交集 + 语义适配（描述相似度）—— B 路径的判定依据。
+// 每个专家条目六字段：interface / capabilities / eval / version / stats / provenance。
+// ============================================================================
+
+import { ENVELOPE_SIGNATURE } from "../contracts/contract.hsl";
+import { ExpertError } from "../types/errors.hsl";
+
+/// 补丁记录（provenance：每次变更的触发原因 = 对应哪次审查反馈）。
+#[derive(Debug, Clone)]
+export struct PatchRecord {
+    from_version: String,
+    to_version: String,
+    /// 变更类型：knowledge（静态资源）/ flow（graph 拓扑）/ capability（注解）。
+    change_kind: String,
+    /// 触发原因：对应哪次审查意见（复发键）。
+    trigger: String,
+    /// 合入闸门：check+smoke / full-fixture / audit-only。
+    gate: String,
+}
+
+/// 专家 manifest（注册表条目；磁盘形态为 registry/<name>.json）。
+#[derive(Debug, Clone)]
+export struct ExpertManifest {
+    name: String,
+    /// 语义版本（蓝绿发布：补丁合入即 bump）。
+    version: String,
+    /// 绑定的 BNF 版本（语言演进的漂移检测）。
+    bnf: String,
+    /// 职责描述（语义检索的语料）。
+    description: String,
+    /// 能力标签（与 #[capability] 及子任务 skills 对齐）。
+    capabilities: Vec<String>,
+    /// 信封签名（interface 字段；工厂产物必须与常量同构）。
+    signature: String,
+    /// 生成来源：factory / manual / import。
+    source: String,
+    /// fixture 验收记录（评测分 0..1；补丁合入不得回退）。
+    eval_score: f64,
+    /// 验收套件路径（相对工作区）。
+    fixture_path: String,
+    /// 专家源码路径（相对工作区；minted 专家的执行入口）。
+    entry_path: String,
+    /// 使用次数。
+    uses: u32,
+    /// 裁决通过率（行为证据 → 评分卡归因原料）。
+    pass_rate: f64,
+    /// 补丁历史。
+    provenance: Vec<PatchRecord>,
+}
+
+impl ExpertManifest {
+    /// 手写 / 工厂产出 / 导入共用的建档工厂。
+    fn forge(name: String, version: String, description: String, capabilities: Vec<String>,
+             source: String, eval_score: f64, fixture_path: String, entry_path: String) -> ExpertManifest {
+        ExpertManifest {
+            name: name,
+            version: version,
+            bnf: String::from("v1.5.0"),
+            description: description,
+            capabilities: capabilities,
+            signature: ENVELOPE_SIGNATURE,
+            source: source,
+            eval_score: eval_score,
+            fixture_path: fixture_path,
+            entry_path: entry_path,
+            uses: 0,
+            pass_rate: 1.0,
+            provenance: Vec::new(),
+        }
+    }
+
+    /// 能力交集判定（B 路径第一判据：类型兼容 = 信封同构，标签可交）。
+    fn serves(self, skills: &Vec<String>) -> bool {
+        let mut hits = 0;
+        for s in skills.iter() {
+            if self.capabilities.contains(s.clone()) {
+                hits += 1;
+            }
+        }
+        hits > 0
+    }
+
+    /// 语义适配粗排（B 路径第二判据：goal 与描述的词面重合）。
+    fn affinity(self, goal: String) -> u32 {
+        let words = goal.split(" ").collect::<Vec<String>>();
+        let mut score: u32 = 0;
+        for w in words.iter() {
+            if w.len() >= 2 && self.description.contains(w.as_str()) {
+                score += 1;
+            }
+        }
+        score
+    }
+
+    /// manifest 序列化（JSON；写入注册表）。
+    fn to_json(self) -> String {
+        // join 序列化（无尾逗号；JSON 卫生由 Registry::load 的 parse 侧验证）
+        let mut cap_items: Vec<String> = Vec::new();
+        for c in self.capabilities.iter() {
+            cap_items.push(format!("\"{}\"", c));
+        }
+        let caps = cap_items.join(",");
+        let mut patch_items: Vec<String> = Vec::new();
+        for p in self.provenance.iter() {
+            patch_items.push(format!(
+                "{{\"from\":\"{}\",\"to\":\"{}\",\"kind\":\"{}\",\"trigger\":\"{}\",\"gate\":\"{}\"}}",
+                p.from_version, p.to_version, p.change_kind, p.trigger, p.gate
+            ));
+        }
+        let patches = patch_items.join(",");
+        format!(
+            "{{\"name\":\"{}\",\"version\":\"{}\",\"bnf\":\"{}\",\"description\":\"{}\",\"capabilities\":[{}],\"signature\":\"{}\",\"source\":\"{}\",\"eval_score\":{},\"fixture\":\"{}\",\"entry\":\"{}\",\"uses\":{},\"pass_rate\":{},\"provenance\":[{}]}}",
+            self.name, self.version, self.bnf, self.description, caps, self.signature,
+            self.source, self.eval_score, self.fixture_path, self.entry_path,
+            self.uses, self.pass_rate, patches
+        )
+    }
+
+    /// 记一次在岗使用（统计随运行增长）。
+    fn used(mut self) -> ExpertManifest {
+        self.uses += 1;
+        self
+    }
+
+    /// 补丁合入：版本 bump + provenance 追加（蓝绿：在岗会话继续旧版）。
+    fn patched(mut self, record: PatchRecord) -> ExpertManifest {
+        self.version = record.to_version.clone();
+        self.provenance.push(record);
+        self
+    }
+
+    /// 金丝雀回滚：版本退回上一版（provenance 不删 —— 历史是资产的一部分）。
+    fn revert_version(mut self, to_version: String) -> ExpertManifest {
+        self.version = to_version;
+        self
+    }
+}
+
+/// 注册表（工作区 registry/ 的内存投影）。
+#[derive(Debug, Clone)]
+export struct Registry {
+    experts: Vec<ExpertManifest>,
+    /// 注册表根（相对工作区路径）。
+    root: String,
+}
+
+impl Registry {
+    fn new(root: String) -> Registry {
+        Registry { experts: Vec::new(), root: root }
+    }
+
+    /// 从磁盘加载（工作区 registry/index.json）。
+    fn load(root: String) -> Result<Registry, ExpertError> {
+        let raw = native typescript {
+            try {
+                return $host.fs.read(root + "/index.json");
+            } catch (e) {
+                return "";
+            }
+        };
+        if raw.len() == 0 {
+            return Ok(Registry::new(root));
+        }
+        let parsed: Vec<HashMap<String, String>> = native typescript {
+            const list = JSON.parse(raw);
+            if (Array.isArray(list) === false) return [];
+            return list.map((m) => {
+                const out = new Map();
+                for (const [k, v] of Object.entries(m)) {
+                    // 类型纪律（与 $host.json.fields 同构）：对象/数组 → JSON 串，
+                    // 原始值 → String —— 避免 Array.toString 把 ["parse"] 压成 "parse"
+                    out.set(k, v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
+                }
+                return out;
+            });
+        };
+        let mut reg = Registry::new(root);
+        for entry in parsed.iter() {
+            let m = registry_entry_to_manifest(entry.clone())?;
+            reg.experts.push(m);
+        }
+        Ok(reg)
+    }
+
+    /// 检索：能力交集 + 语义适配（B 路径判定）。
+    fn find(self, goal: String, skills: &Vec<String>) -> Option<ExpertManifest> {
+        let mut best: Option<ExpertManifest> = None;
+        for m in self.experts.iter() {
+            if m.clone().serves(skills) {
+                let take = match best.clone() {
+                    Some(b) => b.clone().affinity(goal.clone()) < m.clone().affinity(goal.clone()),
+                    None => true,
+                };
+                if take {
+                    best = Some(m.clone());
+                }
+            }
+        }
+        best
+    }
+
+    /// 登记（入库：写 manifest + 更新索引；幂等按名覆盖）。
+    fn register(&mut self, manifest: ExpertManifest) -> Result<(), ExpertError> {
+        let mut kept: Vec<ExpertManifest> = Vec::new();
+        for m in self.experts.iter() {
+            if m.name != manifest.name {
+                kept.push(m.clone());
+            }
+        }
+        kept.push(manifest.clone());
+        self.experts = kept;
+        self.flush()
+    }
+
+    /// 落盘（index.json + 每专家 manifest）。
+    fn flush(&mut self) -> Result<(), ExpertError> {
+        let mut item_list: Vec<String> = Vec::new();
+        for m in self.experts.iter() {
+            item_list.push(m.clone().to_json());
+        }
+        let index = format!("[{}]", item_list.join(","));
+        let root = self.root.clone();
+        let _ = native typescript {
+            $host.fs.write(root + "/index.json", index);
+            return true;
+        };
+        for m in self.experts.iter() {
+            let path = format!("{}/{}.json", root, m.name);
+            let body = m.clone().to_json();
+            let _ = native typescript {
+                $host.fs.write(path, body);
+                return true;
+            };
+        }
+        Ok(())
+    }
+
+    /// 排除某专家后的注册表投影（Reject 重派：路由重选时排除失败执行体）。
+    fn without(self, name: String) -> Registry {
+        let mut kept: Vec<ExpertManifest> = Vec::new();
+        for m in self.experts.iter() {
+            if m.name != name {
+                kept.push(m.clone());
+            }
+        }
+        Registry { experts: kept, root: self.root.clone() }
+    }
+
+    /// 实现来源多样的候选对（N 版本冗余的检索：不同 source 或不同 version）。
+    fn diverse_pair(self, skills: &Vec<String>) -> Option<(ExpertManifest, ExpertManifest)> {
+        let mut pool: Vec<ExpertManifest> = Vec::new();
+        for m in self.experts.iter() {
+            if m.clone().serves(skills) && m.entry_path.ends_with(String::from(".hsl")) {
+                pool.push(m.clone());
+            }
+        }
+        for a in pool.iter() {
+            for b in pool.iter() {
+                if a.name == b.name {
+                    continue;
+                }
+                if a.source != b.source || a.version != b.version {
+                    return Some((a.clone(), b.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// 状态快照（org status 的原料）。
+    fn snapshot(self) -> String {
+        let mut out = format!("registry root: {} ({} experts)\n", self.root, self.experts.len());
+        for m in self.experts.iter() {
+            out.push_str(format!(
+                "  {}@{} [{}] uses={} pass_rate={} eval={}\n",
+                m.name, m.version, m.source, m.uses, m.pass_rate, m.eval_score
+            ).as_str());
+        }
+        out
+    }
+}
+
+/// JSON 字段 → manifest（$host.json.fields 类型纪律通道）。
+fn registry_entry_to_manifest(fields: HashMap<String, String>) -> Result<ExpertManifest, ExpertError> {
+    let name = fields.get(String::from("name")).unwrap_or(String::from("?"));
+    let version = fields.get(String::from("version")).unwrap_or(String::from("0.0.0"));
+    let bnf = fields.get(String::from("bnf")).unwrap_or(String::from("v1.5.0"));
+    let description = fields.get(String::from("description")).unwrap_or(String::from(""));
+    let caps_raw = fields.get(String::from("capabilities")).unwrap_or(String::from("[]"));
+    let signature = fields.get(String::from("signature")).unwrap_or(ENVELOPE_SIGNATURE);
+    let source = fields.get(String::from("source")).unwrap_or(String::from("manual"));
+    let eval_raw = fields.get(String::from("eval_score")).unwrap_or(String::from("1.0"));
+    let fixture = fields.get(String::from("fixture")).unwrap_or(String::from(""));
+    let entry = fields.get(String::from("entry")).unwrap_or(String::from(""));
+    let uses_raw = fields.get(String::from("uses")).unwrap_or(String::from("0"));
+    let pass_raw = fields.get(String::from("pass_rate")).unwrap_or(String::from("1.0"));
+
+    let eval_score = parse_f64(eval_raw);
+    let pass_rate = parse_f64(pass_raw);
+    let uses = parse_u32(uses_raw);
+
+    let capabilities: Vec<String> = native typescript {
+        const arr = JSON.parse(caps_raw);
+        if (Array.isArray(arr) === false) return [];
+        return arr.map((x) => String(x));
+    };
+
+    Ok(ExpertManifest {
+        name: name,
+        version: version,
+        bnf: bnf,
+        description: description,
+        capabilities: capabilities,
+        signature: signature,
+        source: source,
+        eval_score: eval_score,
+        fixture_path: fixture,
+        entry_path: entry,
+        uses: uses,
+        pass_rate: pass_rate,
+        provenance: Vec::new(),
+    })
+}
+
+/// 字符串 → f64（容错解析；0.0 兜底）。
+fn parse_f64(text: String) -> f64 {
+    let out = native typescript {
+        const n = parseFloat(text);
+        return Number.isFinite(n) ? n : 0.0;
+    };
+    out
+}
+
+/// 字符串 → u32（容错解析；0 兜底）。
+fn parse_u32(text: String) -> u32 {
+    let out = native typescript {
+        const n = parseInt(text, 10);
+        return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+    };
+    out
+}

@@ -1,0 +1,59 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # 创建 Release 需要
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: HSL 工具链就位（vendored 优先）
+        run: bun scripts/setup-hsl.ts
+
+      - name: 发布前校验（check + test + demo 冒烟）
+        run: |
+          bun cli/org.ts check
+          bun test tests/
+          bun cli/org.ts demo
+
+      # 发布说明：取 CHANGELOG 中与 tag 对应版本段落（## vX.Y.Z 至下一个 ## 或文件尾）
+      - name: 提取发布说明
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          awk -v sec="## ${VERSION}" '
+            $0 ~ "^"sec {flag=1; next}
+            /^## / && flag {exit}
+            flag {print}
+          ' CHANGELOG.md > /tmp/release-notes.md
+          if [[ ! -s /tmp/release-notes.md ]]; then
+            echo "（未找到 ${VERSION} 的 CHANGELOG 段落，参见 CHANGELOG.md）" > /tmp/release-notes.md
+          fi
+
+      # 打包先写 /tmp 再移回，规避 tar 自读自写冲突
+      - name: 打包（源码 tar.gz + dist zip）
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          mkdir -p /tmp/pkg
+          tar --exclude='.git' --exclude='demo-run' --exclude='.hsl-runs' \
+              --exclude='node_modules' --exclude='*.tgz' --exclude='*.zip' \
+              -czf "/tmp/pkg/org-${VERSION}-src.tar.gz" .
+          cd dist && zip -qr "/tmp/pkg/org-${VERSION}-dist.zip" . && cd -
+          mv /tmp/pkg/*.tar.gz /tmp/pkg/*.zip .
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: /tmp/release-notes.md
+          files: |
+            org-${{ github.ref_name }}-src.tar.gz
+            org-${{ github.ref_name }}-dist.zip

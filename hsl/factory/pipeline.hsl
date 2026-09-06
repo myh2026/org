@@ -1,0 +1,730 @@
+// ============================================================================
+// org/factory/pipeline.hsl — 专家工厂：生成与验收管线 + 补丁合入流水线
+// ============================================================================
+// 两条生产线共用同一道闸门（设计铁律 #4：同一意见第二次出现，修专家本体）：
+//
+//   新品线：规格提取 → HSL 生成 → dhv check → fixture 验收 → 入库登记
+//   补丁线：提案（内核提议权）→ fs.edit → dhv check → smoke 验收 → 版本登记
+//
+// 生成者与合入者分离：主控（或任何 LLM）只有补丁提议权，按合并键的是本管线。
+// 嵌套解释器调用 = 真实质量闸门：机器生成的 .hsl 必须真的通过 dhv check、
+// 真的跑通 scripted fixture 验收，才允许注册上岗。
+//
+// 环境约定：DHV_TS 指向 dhv-ts/src/main.ts 的绝对路径（CLI 负责注入）。
+// ============================================================================
+
+import { TaskSpec } from "../contracts/contract.hsl";
+import { OrgError } from "../types/errors.hsl";
+import { ExpertManifest, PatchRecord } from "../registry/manifest.hsl";
+import { Registry } from "../registry/manifest.hsl";
+import { ask } from "../providers/model.hsl";
+import { MINT_SPEC_PROMPT, MINT_SOURCE_PROMPT, MINT_SAMPLE_PROMPT } from "../config/resources.hsl";
+
+/// 管线阶段（状态机形态的 AgentLoop 素材）。
+enum MintStage {
+    ExtractSpec,
+    GenerateSource,
+    StructuralCheck,
+    FixtureExam,
+    Register,
+    Done,
+}
+
+/// 边事件（G5）。
+enum MintSignal {
+    SpecReady,
+    SourceReady,
+    CheckPassed,
+    ExamPassed,
+    Registered,
+}
+
+/// 专家规格（第 1 步产物：从任务契约反推）。
+#[derive(Debug, Clone)]
+export struct ExpertSpec {
+    name: String,
+    description: String,
+    capabilities: Vec<String>,
+    acceptance: String,
+    /// 验收样本 payload（fixture 反推的原料）。
+    sample_payload: String,
+}
+
+impl ExpertSpec {
+    fn blank() -> ExpertSpec {
+        ExpertSpec {
+            name: String::new(),
+            description: String::new(),
+            capabilities: Vec::new(),
+            acceptance: String::new(),
+            sample_payload: String::new(),
+        }
+    }
+}
+
+/// 闸门结果（第 3/4 步产物）。
+#[derive(Debug, Clone)]
+export struct MintGate {
+    check_ok: bool,
+    check_log: String,
+    exam_ok: bool,
+    exam_log: String,
+}
+
+impl MintGate {
+    fn new() -> MintGate {
+        MintGate { check_ok: false, check_log: String::new(), exam_ok: false, exam_log: String::new() }
+    }
+}
+
+/// 补丁提案（内核的提议权物化；合并键在本管线）。
+#[derive(Debug, Clone)]
+export struct PatchProposal {
+    expert: String,
+    /// 触发意见（复发键；写入 provenance.trigger）。
+    trigger: String,
+    old_text: String,
+    new_text: String,
+}
+
+/// 工厂 graph：为「库中无匹配且具备复用价值」的子任务现场铸专家。
+///
+/// 五步全部静态可追踪；任何一步失败即 Err（不允许半成品上岗）。
+export graph Factory(goal: String, skills: Vec<String>) -> Result<ExpertManifest, OrgError> {
+    // node 声明：管线各阶段的物化依赖
+    node mut spec: ExpertSpec = ExpertSpec::blank();
+    node mut source: String = String::new();
+    node gate: MintGate = MintGate::new();
+    node registry: Registry = Registry::new(String::from("registry"));
+
+    // 管线拓扑（直线流；G2 端点已声明，G4 全部可达）
+    edge spec -> source on MintSignal::SpecReady;
+    edge source -> gate on MintSignal::SourceReady;
+    edge gate -> registry on MintSignal::ExamPassed;
+    edge registry -> spec on MintSignal::Registered;
+
+    // 主控提案的补丁位（复用同管线的闸门）
+    let mut stage = MintStage::ExtractSpec;
+
+    // AgentLoop（G1）：阶段状态机推进
+    loop {
+        match stage.clone() {
+            MintStage::ExtractSpec => {
+                let raw = ask(String::from("mint_spec"), MINT_SPEC_PROMPT.clone(), goal.clone()).await?;
+                spec = parse_spec(raw)?;
+                stage = MintStage::GenerateSource;
+            },
+            MintStage::GenerateSource => {
+                let brief = format!("{}\n技能标签: {}", spec.description.clone(), skills.join(","));
+                let raw = ask(String::from("mint_hsl"), MINT_SOURCE_PROMPT.clone(), brief).await?;
+                source = raw.trim();
+                stage = MintStage::StructuralCheck;
+            },
+            MintStage::StructuralCheck => {
+                let written = write_source(spec.name.clone(), source.clone())?;
+                let cmd = format!("bun {} check {}", dhv_path(), written);
+                let out = shell_exec(cmd);
+                gate.check_ok = out.ok;
+                gate.check_log = out.output;
+                if out.ok {
+                    stage = MintStage::FixtureExam;
+                } else {
+                    return Err(OrgError::factory(format!(
+                        "dhv check 拒绝生成物（结构不合格不允许上岗）：\n{}",
+                        out.output
+                    )));
+                }
+            },
+            MintStage::FixtureExam => {
+                println!("[factory] stage=Exam");
+                let sample = sample_spec(spec.clone())?;
+                let out = run_expert(spec.name.clone(), sample, String::from("factory/mint-out"));
+                // 行为闸门：样本必须过覆盖率线（验收语义 ≠ 执行语义）
+                gate.exam_ok = out.ok && read_acceptance_coverage(String::from("factory/mint-out"));
+                gate.exam_log = out.output;
+                if gate.exam_ok {
+                    stage = MintStage::Register;
+                } else {
+                    return Err(OrgError::factory(format!(
+                        "fixture 验收未通过（行为不合格不允许上岗）：\n{}",
+                        out.output
+                    )));
+                }
+            },
+            MintStage::Register => {
+                println!("[factory] stage=Register");
+                let manifest = register_expert(spec.clone(), gate.clone())?;
+                let _ = manifest;
+                stage = MintStage::Done;
+            },
+            MintStage::Done => break,
+        }
+    }
+
+    // 登记位产出：从磁盘注册表取回（register_expert 已写入并提交）
+    println!("[factory] stage=Done");
+    let disk_registry = Registry::load(String::from("registry"))?;
+    let found = disk_registry.find(goal.clone(), &skills);
+    match found {
+        Some(m) => Ok(m),
+        None => Err(OrgError::factory(String::from("登记后检索失败（管线状态不一致）"))),
+    }
+}
+
+/// 补丁合入流水线（变更分级闸门：knowledge / flow / capability）。
+///
+/// 提议权在内核；合并键在此。任何闸门不过 → 回滚编辑并 Err（宁可拒绝不可静默）。
+/// 变更分级（机械启发式，诚实边界见 classify_patch 注释）：
+///   knowledge   静态资源 / 规则行      闸门：check + smoke
+///   flow        graph 拓扑关键词       闸门：check + smoke + 评测分不得回退
+///   capability  #[capability] 注解     闸门：审计事件，仅用户可批准（env 门）
+export fn merge_patch(registry: Registry, proposal: PatchProposal) -> Result<ExpertManifest, OrgError> {
+    let manifest = match registry.find_by_name(proposal.expert.clone()) {
+        Some(m) => m,
+        None => {
+            return Err(OrgError::factory(format!("补丁目标专家不存在：{}", proposal.expert)));
+        },
+    };
+
+    // 0) 变更分级（编辑之前 —— capability 变更被拒时不得触碰源码）
+    let change_kind = classify_patch(proposal.old_text.clone(), proposal.new_text.clone());
+    let mut gate = String::from("check+smoke");
+    if change_kind == String::from("capability") {
+        let approved: bool = native typescript {
+            return $host.env.get("ORG_CAPABILITY_APPROVED") === "1";
+        };
+        if approved == false {
+            let _ = native typescript {
+                $host.events.emit("audit", { event: "capability_change_rejected", expert: proposal.expert, reason: "仅用户可批准（ORG_CAPABILITY_APPROVED=1 缺失）" });
+                return true;
+            };
+            return Err(OrgError::factory(String::from("能力变更补丁被拒：天花板调升只属于用户（审计事件已留痕）")));
+        }
+        let _ = native typescript {
+            $host.events.emit("audit", { event: "capability_change_approved", expert: proposal.expert });
+            return true;
+        };
+        gate = String::from("audit-user-only+check+smoke");
+    } else if change_kind == String::from("flow") {
+        gate = String::from("full-fixture+no-regress");
+    }
+
+    // 1) 版本归档（蓝绿 + 金丝雀的回退原料）：编辑前把当前源存为 <name>@<from>.hsl
+    let archive_path = format!("registry/experts/{}@{}.hsl", manifest.name, manifest.version);
+    let entry_for_read = manifest.entry_path.clone();
+    let archive_for_write = archive_path.clone();
+    let _ = native typescript {
+        try {
+            const src = $host.fs.read(entry_for_read);
+            if (src.length > 0) $host.fs.write(archive_for_write, src);
+        } catch (e) {
+            // 归档失败不阻断补丁（金丝雀将以当前盘上版本为旧侧）
+        }
+        return true;
+    };
+
+    // 2) 提案应用（fs.edit：old_text 必须唯一命中）
+    let path = manifest.entry_path.clone();
+    let old_text = proposal.old_text.clone();
+    let new_text = proposal.new_text.clone();
+    let edit_ok: bool = native typescript {
+        const r = $host.fs.edit(path, old_text, new_text);
+        return r.ok === true;
+    };
+    if edit_ok == false {
+        return Err(OrgError::factory(String::from("补丁锚点未命中（old_text 不存在或不唯一）")));
+    }
+
+    // 3) 结构闸门：dhv check（补丁后源码必须仍然合法）
+    let cmd = format!("bun {} check {}", dhv_path(), path);
+    let check_out = shell_exec(cmd);
+    if check_out.ok == false {
+        rollback(path, proposal.new_text.clone(), proposal.old_text.clone());
+        return Err(OrgError::factory(format!("补丁未过 dhv check（已回滚）：\n{}", check_out.output)));
+    }
+
+    // 4) 行为闸门：smoke（以验收样本重跑：执行 ok + 覆盖率不回退）
+    let sample_path = manifest.fixture_path.clone();
+    let sample = load_sample_spec(sample_path);
+    match sample {
+        Some(spec) => {
+            let out = run_expert(manifest.name.clone(), spec, String::from("factory/patch-out"));
+            let smoke_coverage = read_acceptance_coverage(String::from("factory/patch-out"));
+            if out.ok == false || smoke_coverage == false {
+                rollback(path, proposal.new_text.clone(), proposal.old_text.clone());
+                return Err(OrgError::factory(format!("补丁未过 smoke 验收（已回滚）：\n{}", out.output)));
+            }
+            // flow 附加闸门：评测分不得回退（补丁后样本覆盖率 >= 在岗 eval_score）
+            if change_kind == String::from("flow") {
+                let after = read_acceptance_details(String::from("factory/patch-out"));
+                if after.0 + 0.01 < manifest.eval_score {
+                    rollback(path, proposal.new_text.clone(), proposal.old_text.clone());
+                    return Err(OrgError::factory(format!(
+                        "补丁未过评测分不回退闸门（已回滚）：coverage {:.2} < eval {:.2}",
+                        after.0, manifest.eval_score
+                    )));
+                }
+            }
+        },
+        None => {
+            rollback(path, proposal.new_text.clone(), proposal.old_text.clone());
+            return Err(OrgError::factory(String::from("验收样本缺失，补丁合入拒绝（宁可拒绝不可静默）")));
+        },
+    }
+
+    // 5) 版本登记：蓝绿发布（在岗会话继续旧版；新派单自动加载新版）
+    let from_version = manifest.version.clone();
+    let to_version = bump_patch_version(from_version.clone());
+    let record = PatchRecord {
+        from_version: from_version,
+        to_version: to_version.clone(),
+        change_kind: change_kind,
+        trigger: proposal.trigger.clone(),
+        gate: gate,
+    };
+    let patched = manifest.patched(record);
+    let mut reg = registry;
+    let _ = reg.register(patched.clone())?;
+    let _ = commit_registry(format!("patch {} -> {} ({})", proposal.expert, to_version, proposal.trigger));
+    Ok(patched)
+}
+
+/// 补丁变更分级（机械启发式；诚实边界：文本级分类无法与语法级完全等价，
+/// v1 以关键词保守归类 —— 宁可过重闸门，不可放行流程变更）。
+///   capability：触碰 #[capability 注解 —— 仅用户可批准；
+///   flow      ：触碰 graph 拓扑关键词（node/edge/graph/loop/match/fn main）；
+///   knowledge ：其余（静态资源 / 规则行）。
+fn classify_patch(old_text: String, new_text: String) -> String {
+    if new_text.contains("#[capability") || old_text.contains("#[capability") {
+        return String::from("capability");
+    }
+    if contains_flow_keyword(new_text.clone()) || contains_flow_keyword(old_text.clone()) {
+        return String::from("flow");
+    }
+    String::from("knowledge")
+}
+
+/// 拓扑关键词检测（classify_patch 辅助）。
+fn contains_flow_keyword(text: String) -> bool {
+    text.contains("node ") || text.contains("edge ") || text.contains("graph ")
+        || text.contains("loop") || text.contains("match ") || text.contains("fn main")
+}
+
+/// 验收样本落盘 + 嵌套执行 minted 专家（真实闸门：子进程解释器）。
+export fn run_expert(expert: String, spec: TaskSpec, out_dir: String) -> ShellFlat {
+    let entry = format!("registry/experts/{}.hsl", expert);
+    let fixture = format!("factory/fixtures/{}.fixture.json", expert);
+    run_expert_at(entry, fixture, spec, out_dir)
+}
+
+/// 按显式 entry/fixture 执行（金丝雀双跑同晶专家的旧版本归档用）。
+export fn run_expert_at(entry: String, fixture: String, spec: TaskSpec, out_dir: String) -> ShellFlat {
+    // 工单落盘（嵌套进程的输入契约）
+    let spec_path = String::from("factory/current-spec.json");
+    let body = spec_to_json(spec);
+    let _ = native typescript {
+        $host.fs.write(spec_path, body);
+        return true;
+    };
+    let entry_cmd = entry.clone();
+    let fixture_cmd = fixture.clone();
+    let goal_cmd = spec.goal.clone();
+    let out_cmd = out_dir.clone();
+    let cmd = format!(
+        "bun {} run {} --workspace . --task \"{}\" --model scripted --fixture {} --out {} --quiet",
+        dhv_path(), entry_cmd, goal_cmd, fixture_cmd, out_cmd
+    );
+    let out = shell_exec(cmd);
+    // 执行判定（确定性）：run.json ok —— 覆盖率裁决归监督回路 / 验收调用点，
+    // 此处不越权（真实派单首轮低覆盖是合法的 Revise 语义）
+    let verdict = read_run_ok(out_dir.clone());
+    let flat = ShellFlat {
+        ok: out.ok && verdict,
+        code: out.code,
+        output: concat3(out.output.clone(), verdict_detail(out_dir), coverage_note(out_dir)),
+    };
+    flat
+}
+
+/// 供嵌套执行复用的结果载体（native → HSL 的字段直通形态）。
+#[derive(Debug, Clone)]
+export struct ShellFlat {
+    ok: bool,
+    code: u32,
+    output: String,
+}
+
+// ----------------------------------------------------------------------------
+// 步骤实现（管线内部函数）
+// ----------------------------------------------------------------------------
+
+/// dhv-ts 解释器路径（CLI 注入 DHV_TS；缺省时给出可诊断的错误）。
+/// 跨平台注记：统一转成正斜杠 —— shell_exec 经 bash -c 执行，反斜杠路径
+/// 在 bash 串里会被吃掉；Windows API 接受正斜杠，bun 同样接受。
+fn dhv_path() -> String {
+    let path: String = native typescript {
+        const v = $host.env.get("DHV_TS");
+        return String(v || "").replace(/\\/g, "/");
+    };
+    if path.len() == 0 {
+        String::from("UNSET_DHV_TS")
+    } else {
+        path
+    }
+}
+
+/// 壳执行（首词白名单：bun）。
+fn shell_exec(command: String) -> ShellFlat {
+    let cmd = command.clone();
+    let r = native typescript {
+        const out = await $host.shell.run(cmd, { timeoutMs: 90000 });
+        return { ok: out.ok, code: out.code, stdout: out.stdout, stderr: out.stderr };
+    };
+    let mut combined = String::new();
+    if r.stdout.len() > 0 {
+        combined.push_str(r.stdout.as_str());
+    }
+    if r.stderr.len() > 0 {
+        combined.push_str("\n[stderr]\n");
+        combined.push_str(r.stderr.as_str());
+    }
+    if combined.len() == 0 {
+        combined.push_str(format!("(no output, exit {})", r.code).as_str());
+    }
+    ShellFlat { ok: r.ok, code: r.code, output: combined }
+}
+
+/// 规格解析（mint_spec 轨道输出 → ExpertSpec）。
+fn parse_spec(raw: String) -> Result<ExpertSpec, OrgError> {
+    let fields: HashMap<String, String> = native typescript {
+        try {
+            return $host.json.fields(raw);
+        } catch (e) {
+            const m = new Map();
+            m.set("error", String(e && e.message || e));
+            return m;
+        }
+    };
+    if fields.contains_key(String::from("error")) {
+        return Err(OrgError::factory(format!(
+            "规格提取输出不是合法 JSON：{}",
+            fields.get(String::from("error")).unwrap_or(String::from("?"))
+        )));
+    }
+    let name = fields.get(String::from("name")).unwrap_or(String::from("minted-expert"));
+    let description = fields.get(String::from("description")).unwrap_or(String::from(""));
+    let acceptance = fields.get(String::from("acceptance")).unwrap_or(String::from("coverage >= 0.95"));
+    let caps_raw = fields.get(String::from("capabilities")).unwrap_or(String::from("[]"));
+    let capabilities: Vec<String> = native typescript {
+        const arr = JSON.parse(caps_raw);
+        if (Array.isArray(arr) === false) return [];
+        return arr.map((x) => String(x));
+    };
+    Ok(ExpertSpec {
+        name: name,
+        description: description,
+        capabilities: capabilities,
+        acceptance: acceptance,
+        sample_payload: String::new(),
+    })
+}
+
+/// 源码落盘（registry/experts/<name>.hsl）。
+fn write_source(name: String, source: String) -> Result<String, OrgError> {
+    if name.len() == 0 || source.len() == 0 {
+        return Err(OrgError::factory(String::from("生成物为空（name / source 缺失）")));
+    }
+    let path = format!("registry/experts/{}.hsl", name);
+    let body = source.clone();
+    let _ = native typescript {
+        $host.fs.write(path, body);
+        return true;
+    };
+    Ok(path)
+}
+
+/// 验收样本（从任务规格反推；scripted 模式由剧本轨道提供）。
+/// 同时落盘两类资产：
+///   factory/samples/<name>.json          验收样本工单（补丁 smoke 的重放原料）
+///   factory/fixtures/<name>.fixture.json 嵌套运行的空剧本（机械专家零轨道）
+async fn sample_spec(spec: ExpertSpec) -> Result<TaskSpec, OrgError> {
+    let raw = ask(String::from("mint_fixture"), MINT_SAMPLE_PROMPT.clone(), spec.acceptance.clone()).await?;
+    let fields: HashMap<String, String> = native typescript {
+        try {
+            return $host.json.fields(raw);
+        } catch (e) {
+            const m = new Map();
+            m.set("error", String(e && e.message || e));
+            return m;
+        }
+    };
+    let payload = fields.get(String::from("payload")).unwrap_or(String::from("[]"));
+    let goal = fields.get(String::from("goal")).unwrap_or(spec.goal_hint());
+    let acceptance = fields.get(String::from("acceptance")).unwrap_or(spec.acceptance.clone());
+    let feedback = fields.get(String::from("feedback")).unwrap_or(String::from("[]"));
+    let spec_json = format!(
+        "{{\"task_id\":1,\"goal\":\"{}\",\"acceptance\":\"{}\",\"payload\":{},\"feedback\":{}}}",
+        goal, acceptance, payload, feedback
+    );
+    let sample_path = format!("factory/samples/{}.json", spec.name);
+    let sample_body = spec_json.clone();
+    let _ = native typescript {
+        $host.fs.write(sample_path, sample_body);
+        return true;
+    };
+    // 嵌套运行的剧本文件（机械专家：空轨道剧本即可）
+    let fixture_path = format!("factory/fixtures/{}.fixture.json", spec.name);
+    let _ = native typescript {
+        $host.fs.write(fixture_path, JSON.stringify({ acts: [], reviews: [], tracks: {} }));
+        return true;
+    };
+    let task_id: u32 = 1;
+    // feedback 织入工单（验收样本的宽容语义随样本走，不随 forge 默认值丢失）
+    let feedback_list: Vec<String> = native typescript {
+        try {
+            const arr = JSON.parse(feedback);
+            if (Array.isArray(arr) === false) return [];
+            return arr.map((f) => String(f));
+        } catch (e) {
+            return [];
+        }
+    };
+    let mut spec_out = TaskSpec::forge(task_id, goal, String::from("验收样本"), acceptance, payload, 4096, 2);
+    for f in feedback_list.iter() {
+        spec_out = spec_out.clone().with_feedback(f.clone());
+    }
+    Ok(spec_out)
+}
+
+impl ExpertSpec {
+    fn goal_hint(self) -> String {
+        format!("acceptance rehearsal for {}", self.name)
+    }
+}
+
+/// 入库登记（manifest 建档 + 注册表提交 + git 版本记录）。
+fn register_expert(spec: ExpertSpec, gate: MintGate) -> Result<ExpertManifest, OrgError> {
+    let eval_score = if gate.exam_ok { 1.0 } else { 0.0 };
+    let manifest = ExpertManifest::forge(
+        spec.name.clone(),
+        String::from("1.0.0"),
+        spec.description.clone(),
+        spec.capabilities.clone(),
+        String::from("factory"),
+        eval_score,
+        format!("factory/samples/{}.json", spec.name),
+        format!("registry/experts/{}.hsl", spec.name),
+    );
+    let mut registry = Registry::load(String::from("registry"))?;
+    let _ = registry.register(manifest.clone())?;
+    let _ = commit_registry(format!("mint {}@1.0.0 (factory)", spec.name));
+    Ok(manifest)
+}
+
+/// git 注册表提交（best-effort：git 不可用则跳过并记事件）。
+fn commit_registry(message: String) -> bool {
+    let msg = message.clone();
+    let ok: bool = native typescript {
+        const add = await $host.shell.run("git add registry/ 2>/dev/null", { timeoutMs: 15000 });
+        const commit = await $host.shell.run("git commit -m '" + msg + "' 2>/dev/null", { timeoutMs: 15000 });
+        return commit.ok === true;
+    };
+    if ok == false {
+        let _ = native typescript {
+            $host.events.emit("registry_commit_skipped", { message: msg });
+            return true;
+        };
+    }
+    ok
+}
+
+/// TaskSpec → JSON（current-spec.json 的写盘形态）。
+fn spec_to_json(spec: TaskSpec) -> String {
+    let mut fb_items: Vec<String> = Vec::new();
+    for f in spec.feedback.iter() {
+        fb_items.push(format!("\"{}\"", f));
+    }
+    let fb = fb_items.join(",");
+    format!(
+        "{{\"task_id\":{},\"goal\":\"{}\",\"acceptance\":\"{}\",\"payload\":{},\"feedback\":[{}]}}",
+        spec.task_id, spec.goal, spec.acceptance, spec.payload, fb
+    )
+}
+
+/// 嵌套 run.json 的 ok 判定。
+export fn read_run_ok(out_dir: String) -> bool {
+    let path = format!("{}/run.json", out_dir);
+    let ok: bool = native typescript {
+        try {
+            const raw = $host.fs.read(path);
+            const obj = JSON.parse(raw);
+            return obj.ok === true;
+        } catch (e) {
+            return false;
+        }
+    };
+    ok
+}
+
+/// 嵌套 acceptance.json 的覆盖率判定（行为闸门：coverage >= 0.95）。
+export fn read_acceptance_coverage(out_dir: String) -> bool {
+    let d = read_acceptance_details(out_dir);
+    d.0 >= 0.95
+}
+
+/// 嵌套 acceptance.json 的明细读取（金丝雀对比与评测分不回退闸门的原料）。
+/// 返回 (coverage, valid, total)；文件缺失时 (0.0, 0, 0)。
+export fn read_acceptance_details(out_dir: String) -> (f64, u32, u32) {
+    let path = format!("{}/acceptance.json", out_dir);
+    let raw: String = native typescript {
+        try {
+            return $host.fs.read(path);
+        } catch (e) {
+            return "";
+        }
+    };
+    if raw.len() == 0 {
+        return (0.0, 0, 0);
+    }
+    let fields: HashMap<String, String> = native typescript {
+        try {
+            return $host.json.fields(raw);
+        } catch (e) {
+            return new Map();
+        }
+    };
+    let cov_raw = fields.get(String::from("coverage")).unwrap_or(String::from("0"));
+    let valid_raw = fields.get(String::from("valid")).unwrap_or(String::from("0"));
+    let total_raw = fields.get(String::from("total")).unwrap_or(String::from("0"));
+    let cov: f64 = native typescript {
+        const n = parseFloat(cov_raw);
+        return Number.isFinite(n) ? n : 0.0;
+    };
+    let valid: u32 = native typescript {
+        const n = parseInt(valid_raw, 10);
+        return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+    };
+    let total: u32 = native typescript {
+        const n = parseInt(total_raw, 10);
+        return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+    };
+    (cov, valid, total)
+}
+
+/// 覆盖率回声（验收日志的人类可读面）。
+fn coverage_note(out_dir: String) -> String {
+    let path = format!("{}/acceptance.json", out_dir);
+    let head: String = native typescript {
+        try {
+            const raw = $host.fs.read(path);
+            return raw.slice(0, 200);
+        } catch (e) {
+            return "(acceptance.json missing)";
+        }
+    };
+    head
+}
+
+/// 验收明细（嵌套产物的人类可读回声）。
+fn verdict_detail(out_dir: String) -> String {
+    let path = format!("{}/report.md", out_dir);
+    let head: String = native typescript {
+        try {
+            const raw = $host.fs.read(path);
+            return raw.slice(0, 400);
+        } catch (e) {
+            return "";
+        }
+    };
+    if head.len() == 0 {
+        String::from("(no acceptance report)")
+    } else {
+        head
+    }
+}
+
+/// 补丁回滚（fs.edit 反向：把已打入的补丁行换回原始行）。
+fn rollback(path: String, current: String, original: String) {
+    let _ = native typescript {
+        try {
+            $host.fs.edit(path, current, original);
+        } catch (e) {
+            $host.events.emit("patch_rollback_failed", { path, message: String(e && e.message || e) });
+        }
+        return true;
+    };
+}
+
+/// 语义版本 patch 位 bump（1.0.0 → 1.0.1）。
+fn bump_patch_version(version: String) -> String {
+    let parts = version.split(".");
+    let segs: Vec<String> = parts.collect();
+    if segs.len() == 3 {
+        let major = segs[0].clone();
+        let minor = segs[1].clone();
+        let patch_raw = segs[2].clone();
+        let patch_num = native typescript {
+            const n = parseInt(patch_raw, 10);
+            return Number.isFinite(n) ? n + 1 : 1;
+        };
+        format!("{}.{}.{}", major, minor, patch_num)
+    } else {
+        String::from("0.0.1")
+    }
+}
+
+/// 注册表按名检索（补丁线用）。
+fn find_by_name_helper(registry: Registry, name: String) -> Option<ExpertManifest> {
+    registry.find_by_name(name)
+}
+
+/// 验收样本读取（补丁 smoke 的原料：factory/fixtures/<name>.json）。
+fn load_sample_spec(sample_path: String) -> Option<TaskSpec> {
+    let raw: String = native typescript {
+        try {
+            return $host.fs.read(sample_path);
+        } catch (e) {
+            return "";
+        }
+    };
+    if raw.len() == 0 {
+        return None;
+    }
+    let fields: HashMap<String, String> = native typescript {
+        try {
+            return $host.json.fields(raw);
+        } catch (e) {
+            return new Map();
+        }
+    };
+    let goal = fields.get(String::from("goal")).unwrap_or(String::from("smoke"));
+    let acceptance = fields.get(String::from("acceptance")).unwrap_or(String::from("coverage >= 0.95"));
+    let payload = fields.get(String::from("payload")).unwrap_or(String::from("[]"));
+    Some(TaskSpec::forge(999, goal, String::from("补丁 smoke"), acceptance, payload, 4096, 2))
+}
+
+impl Registry {
+    /// 按名检索（精确匹配）。
+    fn find_by_name(self, name: String) -> Option<ExpertManifest> {
+        for m in self.experts.iter() {
+            if m.name == name {
+                return Some(m.clone());
+            }
+        }
+        None
+    }
+}
+
+/// 三段拼接（日志卫生）。
+fn concat3(a: String, b: String, c: String) -> String {
+    let mut out = a;
+    if b.len() > 0 {
+        out.push_str("\n");
+        out.push_str(b.as_str());
+    }
+    if c.len() > 0 {
+        out.push_str("\n");
+        out.push_str(c.as_str());
+    }
+    out
+}

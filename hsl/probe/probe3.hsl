@@ -1,0 +1,58 @@
+// ============================================================================
+// probe3.hsl — 迭代 / 元组 / 字符串方法探针
+// ============================================================================
+// 目标：确认 (1) HashMap for-in 与元组解构；(2) native 返回的元组数组索引；
+//       (3) split / join / lines / strip_prefix；(4) Vec 的 iter/map/filter。
+// ============================================================================
+
+export fn main() -> Result<(), String> {
+    // 1) HashMap for-in + 元组解构
+    let mut m: HashMap<String, u32> = HashMap::new();
+    m.insert(String::from("a"), 1);
+    m.insert(String::from("b"), 2);
+    let mut total = 0;
+    for (k, v) in m {
+        let _ = k.len();
+        total += v;
+    }
+    println!("[probe3] map sum = {}", total);
+
+    // 2) native 返回 [ [k,v], ... ] 数组的索引访问
+    let pairs: Vec<Vec<String>> = native typescript {
+        return [["x", "1"], ["y", "2"]];
+    };
+    let mut joined = String::new();
+    for p in pairs.iter() {
+        joined.push_str(p[0].clone().as_str());
+        joined.push_str(p[1].clone().as_str());
+    }
+    println!("[probe3] pairs joined = {}", joined);
+
+    // 3) String 方法
+    let text = String::from("标题: 公告一\n日期: 2024年3月10日\n部门: 董事会");
+    let lines = text.lines();
+    println!("[probe3] lines = {}", lines.len());
+    let first = lines[0].clone();
+    let stripped = first.strip_prefix(String::from("标题: "));
+    match stripped {
+        Some(title) => println!("[probe3] title = {}", title),
+        None => println!("[probe3] no title prefix"),
+    }
+    let words = String::from("fetch parse validate").split(" ");
+    let joined_words = words.join("|");
+    println!("[probe3] words = {}", joined_words);
+
+    // 4) Vec iter + map + filter
+    let nums = vec![1, 2, 3, 4, 5];
+    let evens = nums.iter().filter(|n: &i32| n % 2 == 0).collect::<Vec<i32>>();
+    let doubled = evens.iter().map(|n: &i32| n * 2).collect::<Vec<i32>>();
+    println!("[probe3] doubled evens = {}", doubled.len());
+
+    // 5) String contains + char_count
+    let date = String::from("2024年3月10日");
+    if date.contains("年") && date.contains("月") && date.contains("日") {
+        println!("[probe3] cn date detected, chars = {}", date.char_count());
+    }
+
+    Ok(())
+}

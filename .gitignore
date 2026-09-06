@@ -1,0 +1,17 @@
+# 本地运行时工作区（含嵌套 git 注册表，不入库；dist/demo 是入库快照）
+demo-run/
+demo-run-tests/
+out-ask/
+
+# 解释器默认产物目录
+.hsl-runs/
+
+# 依赖与构建
+node_modules/
+dist/pkg/
+*.tgz
+*.zip
+
+# 编辑器
+.DS_Store
+Thumbs.db

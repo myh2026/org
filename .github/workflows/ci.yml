@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: write # dist/ 产物回写提交需要
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # 幂等：仓库已 vendored toolchain/dhv-ts，此步通常直接命中退出
+      - name: HSL 工具链就位（vendored 优先）
+        run: bun scripts/setup-hsl.ts
+
+      - name: dhv check 全部 HSL 源码（hsl/ + probe/ + dist/ 铸出专家）
+        run: bun cli/org.ts check
+
+      - name: 机制级测试（结构闸门 / README 走读 / 动力学点火）
+        run: bun test tests/
+
+      - name: 全叙事冒烟（三连跑 + 直连 + 暖移交，自动导出 dist/demo）
+        run: bun cli/org.ts demo
+
+      - name: status 冒烟
+        run: bun cli/org.ts status
+
+      - name: 上传运行产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: org-demo-run
+          path: demo-run/out-*
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # 编译产物与源码同库演进：demo 再生后有变化则自动回写（[skip ci] 防循环）
+      - name: dist/ 产物回写
+        run: |
+          git config user.email "ci@org.local"
+          git config user.name "org-ci"
+          if [[ -n "$(git status --porcelain dist/)" ]]; then
+            git add dist/
+            git commit -m "chore(dist): regenerate demo artifacts [skip ci]"
+            git push
+          else
+            echo "dist/ 无变化，跳过回写"
+          fi

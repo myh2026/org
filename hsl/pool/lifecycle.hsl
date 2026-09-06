@@ -1,0 +1,302 @@
+// ============================================================================
+// org/pool/lifecycle.hsl — 智能体池：实例生命周期 + 会话隔离 + 历史索引
+// ============================================================================
+// 库是磁盘上的档案（不占运行时资源）；池是运行中的实例（占用并发额度）。
+// 生命周期：入编 → 待命 → 派单(busy) → 审查 → 回到待命（候选态见影子晋升，
+// v1 以 manifest.source=import/ 注册分预备位）。
+//
+// 轻档演进（v1）：manifest + 任务历史索引，无易变共享状态。
+// 会话隔离：编排会话（主控派单）与直连会话（用户）状态分离；
+//           编排执行中的实例收到直连请求时排队（不打断）。
+// ============================================================================
+
+import { StatusReport, TaskSpec } from "../contracts/contract.hsl";
+import { ExpertError } from "../types/errors.hsl";
+import { ExpertManifest } from "../registry/manifest.hsl";
+import { NoticeParser } from "../registry/experts/notice-parser.hsl";
+
+/// 实例生命周期状态（候选态 = 影子晋升的载体：镜像生产流量计分，不交付）。
+#[derive(Debug, Clone, PartialEq)]
+export enum InstanceState {
+    /// 入编（工厂产出 / 外部导入）。
+    Booting,
+    /// 待命（可派单）。
+    Idle,
+    /// 派单执行中（编排会话占用）。
+    Busy,
+    /// 直连会话中（用户占用）。
+    InDirect,
+    /// 审查中（产物待裁决）。
+    UnderReview,
+    /// 候选（影子晋升：与在岗版本镜像对比期，不接生产派单）。
+    Candidate,
+}
+
+impl InstanceState {
+    fn label(self) -> String {
+        match self {
+            InstanceState::Booting => String::from("booting"),
+            InstanceState::Idle => String::from("idle"),
+            InstanceState::Busy => String::from("busy"),
+            InstanceState::InDirect => String::from("direct"),
+            InstanceState::UnderReview => String::from("review"),
+            InstanceState::Candidate => String::from("candidate"),
+        }
+    }
+
+    /// 是否可接受编排派单（候选态不接生产派单 —— 只影子计分）。
+    fn dispatchable(self) -> bool {
+        self == InstanceState::Idle
+    }
+}
+
+/// 会话种类（隔离的两侧）。
+#[derive(Debug, Clone, PartialEq)]
+export enum SessionKind {
+    Orchestrated,
+    Direct,
+}
+
+/// 池中实例（轻档：manifest 投影 + 任务历史索引）。
+#[derive(Debug, Clone)]
+export struct Instance {
+    expert: ExpertManifest,
+    state: InstanceState,
+    /// 当前会话种类（None = 无会话）。
+    session: Option<SessionKind>,
+    /// 任务历史索引（task_id 序列；热启动的原料）。
+    history: Vec<u32>,
+    /// 会话内 Revise 计数（有界返工的池侧镜像）。
+    revises: u32,
+}
+
+impl Instance {
+    fn new(expert: ExpertManifest) -> Instance {
+        Instance {
+            expert: expert,
+            state: InstanceState::Booting,
+            session: None,
+            history: Vec::new(),
+            revises: 0,
+        }
+    }
+
+    fn name(self) -> String {
+        self.expert.name.clone()
+    }
+
+    /// 出勤：Booting → Idle。
+    fn ready(mut self) -> Instance {
+        self.state = InstanceState::Idle;
+        self
+    }
+
+    /// 派单占用（Idle → Busy + 编排会话）。
+    fn engage(mut self, task_id: u32) -> Instance {
+        self.state = InstanceState::Busy;
+        self.session = Some(SessionKind::Orchestrated);
+        self.history.push(task_id);
+        self
+    }
+
+    /// 完工释放（Busy → UnderReview → 由池回置 Idle）。
+    fn release(mut self) -> Instance {
+        self.state = InstanceState::UnderReview;
+        self.session = None;
+        self
+    }
+
+    /// 审查归位（UnderReview → Idle）。
+    fn settle(mut self) -> Instance {
+        self.state = InstanceState::Idle;
+        self
+    }
+
+    /// 直连占用（Idle → InDirect；编排执行中则拒绝 —— 排队由调用方处理）。
+    fn engage_direct(mut self) -> Result<Instance, ExpertError> {
+        if self.state.dispatchable() == false && self.state != InstanceState::InDirect {
+            return Err(ExpertError::capability(
+                self.expert.name.clone(),
+                String::from("实例正忙（编排会话执行中，直连请求排队）"),
+            ));
+        }
+        self.state = InstanceState::InDirect;
+        self.session = Some(SessionKind::Direct);
+        Ok(self)
+    }
+}
+
+/// 智能体池。
+#[derive(Debug, Clone)]
+export struct Pool {
+    instances: Vec<Instance>,
+    /// 并发上限（影子/金丝雀期双倍算力由该值控制）。
+    concurrency_cap: u32,
+}
+
+impl Pool {
+    fn new(concurrency_cap: u32) -> Pool {
+        Pool { instances: Vec::new(), concurrency_cap: concurrency_cap }
+    }
+
+    /// 入编（装配实例：从 manifest 上岗）。
+    fn enlist(&mut self, expert: ExpertManifest) -> Instance {
+        let inst = Instance::new(expert).ready();
+        self.instances.push(inst.clone());
+        inst
+    }
+
+    /// 按名取实例。
+    fn get(self, expert: String) -> Option<Instance> {
+        for i in self.instances.iter() {
+            if i.expert.name == expert {
+                return Some(i.clone());
+            }
+        }
+        None
+    }
+
+    /// 派单执行（信封契约调用点）。
+    ///
+    /// v1 的两条执行通路：
+    ///   - 静态专家（随 ORG 发行、进程内 import）：直接 graph 调用
+    ///   - minted 专家（运行时注册、磁盘加载）：由工厂/内核经嵌套解释器执行
+    ///     （本方法只登记派单态；嵌套执行在 factory/pipeline.hsl）
+    async fn dispatch(&mut self, manifest: ExpertManifest, spec: TaskSpec)
+        -> Result<StatusReport, ExpertError> {
+        if self.busy_count() >= self.concurrency_cap {
+            return Err(ExpertError::budget(
+                String::from("pool"),
+                format!("并发额度已满（cap={}）", self.concurrency_cap),
+            ));
+        }
+        // 登记派单态（按名就位；不在池则入编）
+        match self.get(manifest.name.clone()) {
+            Some(_) => {},
+            None => {
+                let _ = self.enlist(manifest.clone());
+            },
+        }
+        self.mark_busy(manifest.name.clone(), spec.task_id);
+        // 静态专家：进程内执行（minted 专家不会走到这里 —— 内核在路由层分流）
+        // 导入体执行接线检查：entry 为空 = 登记未在岗（明确报错，不静默）
+        if manifest.entry_path.len() == 0 {
+            self.mark_reviewing(manifest.name.clone());
+            return Err(ExpertError::capability(
+                manifest.name.clone(),
+                String::from("导入体执行接线未完成（登记 ≠ 在岗；v1 通过工厂生成可获得可执行 entry）"),
+            ));
+        }
+        let report = static_dispatch(manifest.name.clone(), spec.clone())?;
+        self.mark_reviewing(manifest.name.clone());
+        Ok(report)
+    }
+
+    /// 影子镜像（候选实例：同输入执行，产出只计分不交付 ——
+    /// 返回 None 表示候选期不产出交付物；对比计分在 runtime/promotion.hsl）。
+    fn engage_candidate(&mut self, manifest: ExpertManifest) {
+        match self.get(manifest.name.clone()) {
+            Some(_) => {},
+            None => {
+                let _ = self.enlist(manifest.clone());
+            },
+        }
+        for i in self.instances.iter_mut() {
+            if i.expert.name == manifest.name {
+                i.state = InstanceState::Candidate;
+            }
+        }
+    }
+
+    /// 候选晋升（影子分达标 → 转正在岗）。
+    fn promote(&mut self, expert: String) -> bool {
+        let mut found = false;
+        for i in self.instances.iter_mut() {
+            if i.expert.name == expert && i.state == InstanceState::Candidate {
+                i.state = InstanceState::Idle;
+                found = true;
+            }
+        }
+        found
+    }
+
+    fn mark_busy(&mut self, expert: String, task_id: u32) {
+        for i in self.instances.iter_mut() {
+            if i.expert.name == expert {
+                let next = i.clone().engage(task_id);
+                i.state = next.state;
+                i.session = next.session;
+                i.history = next.history;
+            }
+        }
+    }
+
+    fn mark_reviewing(&mut self, expert: String) {
+        for i in self.instances.iter_mut() {
+            if i.expert.name == expert {
+                let next = i.clone().release();
+                i.state = next.state;
+                i.session = next.session;
+            }
+        }
+    }
+
+    /// 审查后归位（收货 / 返工重派均回到 Idle）。
+    fn settle(&mut self, expert: String) {
+        for i in self.instances.iter_mut() {
+            if i.expert.name == expert {
+                let next = i.clone().settle();
+                i.state = next.state;
+            }
+        }
+    }
+
+    fn busy_count(self) -> u32 {
+        let mut n = 0;
+        for i in self.instances.iter() {
+            if i.state == InstanceState::Busy {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// 在岗专家名集合（D 暖移交路径的输入：职责域命中判定）。
+    fn on_duty(self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for i in self.instances.iter() {
+            if i.state != InstanceState::Booting {
+                out.push(i.expert.name.clone());
+            }
+        }
+        out
+    }
+
+    /// 状态快照（org status 的池侧原料）。
+    fn snapshot(self) -> String {
+        let mut out = format!("pool: {} instances (cap {})\n", self.instances.len(), self.concurrency_cap);
+        for i in self.instances.iter() {
+            out.push_str(format!(
+                "  {}@{} [{}] history={} revises={}\n",
+                i.expert.name, i.expert.version, i.state.label(), i.history.len(), i.revises
+            ).as_str());
+        }
+        out
+    }
+}
+
+/// 池默认并发额度。
+export const POOL_CONCURRENCY_CAP: u32 = 4;
+
+/// 静态专家分派（进程内车道的名字面 → graph 调用表）。
+/// 随发行静态专家在此登记；导入体（entry 空）在 dispatch 入口已拦截。
+fn static_dispatch(name: String, spec: TaskSpec) -> Result<StatusReport, ExpertError> {
+    if name == String::from("notice-parser") {
+        NoticeParser::run(spec)
+    } else {
+        Err(ExpertError::capability(
+            name,
+            String::from("未知静态专家（随发行静态专家需在 static_dispatch 登记）"),
+        ))
+    }
+}

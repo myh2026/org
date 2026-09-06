@@ -1,0 +1,57 @@
+{
+  "acts": [],
+  "reviews": [],
+  "tracks": {
+    "decompose": [
+      "[{\"id\":1,\"goal\":\"读取工作区 raw/notices.txt 获取一周公告原文\",\"role\":\"fetch\",\"skills\":[],\"depends_on\":[],\"priority\":1},{\"id\":2,\"goal\":\"结构化解析公告为记录（标题 日期 部门 分类）\",\"role\":\"parse\",\"skills\":[\"parse\"],\"depends_on\":[1],\"priority\":2},{\"id\":3,\"goal\":\"校验记录完整性并产出验收结论\",\"role\":\"validate\",\"skills\":[\"validate\"],\"depends_on\":[2],\"priority\":3}]"
+    ],
+    "clarify": [
+      "[\"输出字段偏好：标题、日期、部门、分类？\",\"日期格式用 ISO 8601 还是保留原文？\"]"
+    ],
+    "answers": [
+      "[\"字段偏好：标题、日期、部门、分类\",\"日期用 ISO 8601，无法解析的保留原文并标注\"]"
+    ],
+    "norm_date": [
+      "unknown",
+      "2024-03-10",
+      "2024-03-12",
+      "2024-03-10",
+      "2024-03-12",
+      "unknown"
+    ],
+    "review:fetch": [
+      "{\"verdict\":\"accept\"}",
+      "{\"verdict\":\"accept\"}",
+      "{\"verdict\":\"accept\"}"
+    ],
+    "review:parse": [
+      "{\"verdict\":\"accept\"}",
+      "{\"verdict\":\"accept\"}",
+      "{\"verdict\":\"accept\"}"
+    ],
+    "review:validate": [
+      "{\"verdict\":\"accept\"}",
+      "{\"verdict\":\"accept\"}",
+      "{\"verdict\":\"accept\"}"
+    ],
+    "mint_spec": [
+      "{\"name\":\"record-validator\",\"description\":\"校验结构化记录完整性并产出验收结论\",\"capabilities\":[\"validate\"],\"acceptance\":\"coverage >= 0.95 (all records pass field rules)\"}"
+    ],
+    "mint_hsl": [
+      "// ============================================================================\n// record-validator.hsl — ORG 工厂生成物（生成响应的录制剧本 + 人工抽查样本）\n// ============================================================================\n// 说明：本文件是「工厂现场生成」的诚实形态——scripted 模式下它是某次真实\n// 生成响应的录制（fixture 轨道 mint_hsl 的内容与本文件逐字一致）；它同时\n// 作为人工抽查（human review）的存档保留在 factory/stock/。运行时工厂把它\n// 写入工作区 registry/experts/ 并经 dhv check + fixture 验收后注册上岗。\n//\n// 信封契约（内核视角）：\n//   输入：factory/current-spec.json（TaskSpec 工单：goal/acceptance/payload/feedback）\n//   输出：work-out/acceptance.json（验收工件：coverage/issues/summary）\n//\n// 节点分类：全部机械节点（纯 HSL 校验规则，零模型调用）—— 返工重跑零成本。\n// PATCH-ANCHOR 行是知识补丁的锚点（v1.0.0：unparsed 记录是否计入覆盖由\n// spec.feedback 门控；复发两次的意见经补丁管线改为无条件计入）。\n// ============================================================================\n\n#[derive(Debug, Clone)]\nstruct Record {\n    title: String,\n    date: String,\n    date_status: String,\n    dept: String,\n    category: String,\n}\n\n#[derive(Debug, Clone)]\nstruct Issue {\n    title: String,\n    reason: String,\n}\n\nexport fn main() -> Result<(), String> {\n    // ---- 工单读取（输入契约） ----\n    let spec_json: String = native typescript {\n        try {\n            return $host.fs.read(\"factory/current-spec.json\");\n        } catch (e) {\n            return \"\";\n        }\n    };\n    if spec_json.len() == 0 {\n        return Err(String::from(\"factory/current-spec.json 缺失（工单未落盘）\"));\n    }\n    let fields: HashMap<String, String> = native typescript {\n        try {\n            const m = new Map();\n            const obj = JSON.parse(spec_json);\n            for (const [k, v] of Object.entries(obj)) {\n                // 类型纪律：对象/数组 → JSON 串，原始值 → String\n                m.set(k, v === null || v === undefined ? \"\" : typeof v === \"object\" ? JSON.stringify(v) : String(v));\n            }\n            return m;\n        } catch (e) {\n            const m = new Map();\n            m.set(\"error\", String(e && e.message || e));\n            return m;\n        }\n    };\n    if fields.contains_key(String::from(\"error\")) {\n        return Err(format!(\"工单不是合法 JSON：{}\", fields.get(String::from(\"error\")).unwrap_or(String::from(\"?\"))));\n    }\n    let _goal = fields.get(String::from(\"goal\")).unwrap_or(String::from(\"validate records\"));\n    let feedback_raw = fields.get(String::from(\"feedback\")).unwrap_or(String::from(\"[]\"));\n\n    // PATCH-ANCHOR: unparsed-date policy (v1.0.0 — feedback-gated)\n    let unparsed_ok = feedback_raw != String::from(\"[]\");\n\n    // ---- 记录解析（payload = JSON 数组） ----\n    let payload_raw = fields.get(String::from(\"payload\")).unwrap_or(String::from(\"[]\"));\n    let records: Vec<HashMap<String, String>> = native typescript {\n        try {\n            const arr = JSON.parse(payload_raw);\n            if (Array.isArray(arr) === false) return [];\n            return arr.map((r) => {\n                const m = new Map();\n                for (const [k, v] of Object.entries(r)) m.set(k, String(v));\n                return m;\n            });\n        } catch (e) {\n            return [];\n        }\n    };\n    if records.len() == 0 {\n        return Err(String::from(\"payload 不含任何记录（无法验收）\"));\n    }\n\n    // ---- 校验规则（机械节点：零模型调用） ----\n    let mut valid: u32 = 0;\n    let mut issues: Vec<Issue> = Vec::new();\n    let mut seen_titles: Vec<String> = Vec::new();\n    for row in records.iter() {\n        let title = row.get(String::from(\"title\")).unwrap_or(String::new());\n        let date_status = row.get(String::from(\"date_status\")).unwrap_or(String::from(\"ok\"));\n        let dept = row.get(String::from(\"dept\")).unwrap_or(String::new());\n        let category = row.get(String::from(\"category\")).unwrap_or(String::from(\"other\"));\n\n        let mut ok = true;\n        let mut reason = String::new();\n\n        if title.len() == 0 {\n            ok = false;\n            reason.push_str(\"title empty;\");\n        }\n        if dept.len() == 0 {\n            ok = false;\n            reason.push_str(\"dept empty;\");\n        }\n        if category != String::from(\"announcement\") && category != String::from(\"notice\")\n            && category != String::from(\"other\") {\n            ok = false;\n            reason.push_str(\"category unknown;\");\n        }\n        if date_status == String::from(\"ok\") {\n            let date = row.get(String::from(\"date\")).unwrap_or(String::new());\n            if date.len() != 10 {\n                ok = false;\n                reason.push_str(\"date not ISO-8601;\");\n            }\n        } else {\n            if unparsed_ok == false {\n                ok = false;\n                reason.push_str(\"date_status=unparsed excluded;\");\n            }\n        }\n        if seen_titles.contains(title.clone()) {\n            ok = false;\n            reason.push_str(\"duplicate title;\");\n        }\n\n        if ok {\n            valid += 1;\n            seen_titles.push(title);\n        } else {\n            issues.push(Issue { title: title, reason: reason });\n        }\n    }\n\n    // ---- 覆盖率与工件（输出契约） ----\n    let total = records.len();\n    let coverage = valid as f64 / total as f64;\n    let mut summary = format!(\"valid {}/{} records (coverage {:.2})\", valid, total, coverage);\n    if unparsed_ok {\n        summary.push_str(\" [feedback: unparsed tolerated]\");\n    }\n    for i in issues.iter() {\n        summary.push_str(format!(\"; issue[{}]: {}\", i.title, i.reason).as_str());\n    }\n    let payload_note = if issues.len() > 0 {\n        String::from(\"remedy: count date_status=unparsed as valid (flagged, not excluded)\")\n    } else {\n        String::from(\"all rules pass\")\n    };\n\n    let coverage_str = format!(\"{:.2}\", coverage);\n    let body = format!(\n        \"{{\\\"coverage\\\":{},\\\"valid\\\":{},\\\"total\\\":{},\\\"summary\\\":\\\"{}\\\",\\\"note\\\":\\\"{}\\\"}}\",\n        coverage_str, valid, total, summary, payload_note\n    );\n    let _ = native typescript {\n        $host.artifacts.write(\"acceptance.json\", body);\n        return true;\n    };\n    println!(\"[record-validator] {}\", summary);\n    println!(\"[record-validator] {}\", payload_note);\n    Ok(())\n}\n"
+    ],
+    "mint_fixture": [
+      "{\"goal\":\"acceptance rehearsal: validate sample records\",\"acceptance\":\"coverage >= 0.95\",\"payload\":[{\"title\":\"样本公告\",\"date\":\"2024-03-10\",\"date_status\":\"ok\",\"dept\":\"办公室\",\"category\":\"announcement\"},{\"title\":\"样本通知\",\"date\":\"3月14日\",\"date_status\":\"unparsed\",\"dept\":\"综合部\",\"category\":\"notice\"}],\"feedback\":[\"accept flagged records\"]}"
+    ],
+    "patch_diff": [
+      "{\"old_text\":\"let unparsed_ok = feedback_raw != String::from(\\\"[]\\\");\",\"new_text\":\"let unparsed_ok = feedback_raw != String::from(\\\"[]\\\") || true; // v1.0.1: unparsed records count as valid (flagged)\"}"
+    ],
+    "direct:notice-parser": [
+      "上周抓取任务的字段映射规则：标题/日期/部门取自块内「字段: 值」行；分类由标题关键词判定（公告→announcement，通知→notice）；日期经 norm_date 判定节点归一化为 ISO 8601，无法解析的保留原文并标注 date_status=unparsed。该判定节点已固化，命中 memo 时零模型调用。",
+      "日期无法解析时保留原文并在记录里标注 date_status=unparsed（不静默丢弃）；补丁 v1.0.1 之后这些标注记录计入覆盖（flagged, not excluded），由校验专家以 flagged 语义验收。"
+    ],
+    "handoff:notice-parser": [
+      "一句话版：公告按「=== NOTICE」切块，取标题/日期/部门三字段，分类看标题关键词，日期归一化为 ISO 8601（解析不了就保留原文并标注 unparsed）。"
+    ]
+  }
+}

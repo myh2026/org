@@ -1,0 +1,32 @@
+// ============================================================================
+// probe9.hsl — 直接运行 NoticeParser 观察块处理与覆盖率
+// ============================================================================
+import { NoticeParser } from "../registry/experts/notice-parser.hsl";
+import { TaskSpec } from "../contracts/contract.hsl";
+
+export fn main() -> Result<(), String> {
+    let payload: String = native typescript {
+        return $host.fs.read("raw/notices.txt");
+    };
+    println!("[probe9] payload len = {}", payload.len());
+    let spec = TaskSpec::forge(2, String::from("parse"), String::from("d"), String::from("a"), payload, 8192, 2);
+    let outcome = NoticeParser::run(spec);
+    match outcome {
+        Ok(report) => {
+            println!("[probe9] coverage = {}", report.coverage);
+            println!("[probe9] model_calls = {}", report.model_calls);
+            println!("[probe9] deliverable = {}", report.deliverable);
+            for n in report.notes.iter() {
+                println!("[probe9] note: {}", n);
+            }
+            for t in report.node_trace.iter() {
+                println!("[probe9] trace: {}", t);
+            }
+            Ok(())
+        },
+        Err(e) => {
+            println!("[probe9] expert error: {}", e.render());
+            Err(String::from("parser failed"))
+        },
+    }
+}

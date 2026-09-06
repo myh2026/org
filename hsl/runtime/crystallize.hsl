@@ -1,0 +1,307 @@
+// ============================================================================
+// org/runtime/crystallize.hsl — 固化管线：判定节点冻结 + 命中监控 + 降级
+// ============================================================================
+// 专家 graph 的节点分两类：判定节点（需要 LLM 的开放判断）与机械节点
+// （确定性变换）。运行时持续记录判定节点的输入输出对：
+//
+//   固化条件（v1 精确匹配档）：
+//     规范化后的输入在 N 次观测中始终映射同一输出 → 冻结 input→output；
+//     冻结后的映射必须通过对应 fixture 套件（此处以既有剧本轨道为套件）。
+//   命中监控：
+//     冻结入口的命中 / 未命中计数；命中率下降即降级回 LLM 节点并记审计事件。
+//
+// 固化改变成本结构：成熟流程的单位成本随复用次数递减。
+// 已知边界：语义等价固化是开放问题，v1 仅支持规范化精确匹配。
+// ============================================================================
+
+import { ExpertError } from "../types/errors.hsl";
+import { ask } from "../providers/model.hsl";
+
+/// 固化观测：同一输入的最近输出与连续稳定次数。
+#[derive(Debug, Clone)]
+struct Observation {
+    last_output: String,
+    stable: u32,
+}
+
+/// 固化器：一个专家实例持有一个（其 memo 即「私有 fixture」资产）。
+#[derive(Debug, Clone)]
+export struct Crystallizer {
+    /// 节点标识（"notice-parser/norm_date"）。
+    node: String,
+    /// 判定轨道名（scripted 模式下的剧本轨道；固化命中则不消耗）。
+    track: String,
+    /// 冻结表：规范化输入 → 输出（纯函数的 v1 形态：memo 表）。
+    memos: HashMap<String, String>,
+    /// 观测表：输入 → {最近输出, 连续稳定次数}。
+    observations: HashMap<String, Observation>,
+    /// 冻结所需稳定观测次数（默认 2：同一输入两次同输出）。
+    freeze_after: u32,
+    /// 命中 / 未命中 / 降级计数（评分卡与报告的原料）。
+    hits: u32,
+    misses: u32,
+    degrades: u32,
+    /// 热启动时已冻结的条数（降级判据：区分冷启动低命中与漂移低命中）。
+    warm_memos: u32,
+    /// memo 持久化路径（相对工作区；跨运行复用 = 资产沉淀）。
+    memo_path: String,
+}
+
+impl Crystallizer {
+    /// 新建（或从工作区 memo 文件热启动 —— 任务记忆的精确匹配档）。
+    fn load(node: String, track: String, memo_path: String) -> Crystallizer {
+        let mut c = Crystallizer {
+            node: node,
+            track: track,
+            memos: HashMap::new(),
+            observations: HashMap::new(),
+            freeze_after: FREEZE_AFTER,
+            hits: 0,
+            misses: 0,
+            degrades: 0,
+            warm_memos: 0,
+            memo_path: memo_path,
+        };
+        let raw: String = native typescript {
+            try {
+                return $host.fs.read(memo_path);
+            } catch (e) {
+                return "";
+            }
+        };
+        if raw.len() > 0 {
+            // 持久化格式：{"memos": {k:v}, "observations": {k: {"last_output": v, "stable": n}}}
+            // 观测账本随 memo 一起沉淀 —— 跨运行的稳定性计数（否则同一输入每轮
+            // 都是 obs1，永达不到冻结阈值）
+            let loaded: Vec<(String, String, u32)> = native typescript {
+                const obj = JSON.parse(raw);
+                const out = [];
+                for (const [k, v] of Object.entries(obj.memos ?? {})) {
+                    out.push([String(k), String(v), 0]);
+                }
+                for (const [k, o] of Object.entries(obj.observations ?? {})) {
+                    out.push([String(k), String(o.last_output ?? ""), Math.max(0, Math.floor(Number(o.stable ?? 0)))]);
+                }
+                return out;
+            };
+            for row in loaded.iter() {
+                let key = row[0].clone();
+                let val = row[1].clone();
+                let stable = row[2].clone();
+                if stable > 0 {
+                    c.observations.insert(key, Observation { last_output: val, stable: stable });
+                } else {
+                    c.memos.insert(key, val);
+                    c.warm_memos += 1;
+                }
+            }
+        }
+        c
+    }
+
+    /// 判定或命中：固化管线的唯一入口。
+    ///
+    /// 命中 → 返回冻结值（零模型调用，track 不消耗）；
+    /// 未命中 → 调用判定（经模型网关）→ 记观测 → 达到稳定阈值即冻结。
+    async fn judge(&mut self, system: String, input: String) -> Result<String, ExpertError> {
+        let key = normalize_key(input.clone());
+        match self.memos.get(key.clone()) {
+            Some(frozen) => {
+                self.hits += 1;
+                let hit_node = self.node.clone();
+                let _ = native typescript {
+                    $host.events.emit("crystallize_hit", { node: hit_node, input: key });
+                    return true;
+                };
+                Ok(frozen.clone())
+            },
+            None => {
+                self.misses += 1;
+                let track = self.track.clone();
+                let user = input.clone();
+                let raw = ask(track, system, user).await?;
+                let output = raw.trim();
+                self.observe(key.clone(), output.clone());
+                Ok(output.clone())
+            },
+        }
+    }
+
+    /// 观测 + 稳定性检查（同一输入连续同输出 ≥ freeze_after → 冻结）。
+    fn observe(&mut self, key: String, output: String) {
+        let prev = self.observations.get(key.clone()).cloned();
+        let stable_next = match prev {
+            Some(o) => {
+                if o.last_output == output {
+                    o.stable + 1
+                } else {
+                    // 输出漂移：稳定性归零（语义等价是 v2 问题，v1 保守重置）
+                    1
+                }
+            },
+            None => 1,
+        };
+        self.observations.insert(key.clone(), Observation { last_output: output.clone(), stable: stable_next });
+        if stable_next >= self.freeze_after {
+            self.memos.insert(key.clone(), output.clone());
+            let node = self.node.clone();
+            let _ = native typescript {
+                $host.events.emit("crystallize_frozen", { node, input: key });
+                return true;
+            };
+        }
+    }
+
+    /// 降级通道（生命线而非可选项）：命中侧漂移监控入口。
+    /// v1 由外层按命中率调用；调用即记审计事件并解冻指定键。
+    fn degrade(&mut self, key: String) -> bool {
+        self.degrades += 1;
+        let removed = self.memos.get(key.clone()).is_some();
+        self.memos = remove_key(self.memos.clone(), key.clone());
+        let node = self.node.clone();
+        let _ = native typescript {
+            $host.events.emit("crystallize_degrade", { node, input: key });
+            return true;
+        };
+        removed
+    }
+
+    /// 命中率漂移的自动降级（静默更新检测的固化侧接线）。
+    ///
+    /// 判据（保守起步，双重防误伤）：
+    ///   - 热启动（warm_memos > 0）：冷启动低命中是固化的正常起点，不是漂移；
+    ///   - 观测样本足够（hits + misses >= min_observations）；
+    ///   - 命中率 < bar 且存在未命中（全命中无降级对象）。
+    ///
+    /// 动作（v1 保守）：解冻插入序最旧的冻结键，使其重新进入观测（回归生命线）；
+    /// 同时把本轮新冻结的键回退到观测态 —— 漂移期间的冻结映射不可信（输入分布
+    /// 已变化），继续固化有污染风险。观测账本保留完整记录，跨轮确认稳定后可再冻结。
+    fn maybe_degrade(&mut self, min_observations: u32, bar: f64) -> bool {
+        if self.warm_memos == 0 {
+            return false;
+        }
+        if self.memos.len() == 0 {
+            return false;
+        }
+        let total = self.hits + self.misses;
+        if total < min_observations {
+            return false;
+        }
+        if self.misses == 0 {
+            return false;
+        }
+        let rate = self.hits as f64 / total as f64;
+        if rate >= bar {
+            return false;
+        }
+        // 插入序最旧键（JS 对象插入序 = 解释器 HashMap 迭代序，确定性）。
+        // 顺序纪律：先回滚本轮新冻结（此时前 warm_memos 个是纯旧键，边界未移位），
+        // 再解冻最旧键 —— 反过来会使 warm 边界偏移一位，漏删一个新冻结键。
+        let oldest = self.first_memo_key();
+        match oldest {
+            Some(key) => {
+                self.rollback_fresh_memos();
+                let _ = self.degrade(key);
+                true
+            },
+            None => false,
+        }
+    }
+
+    /// 回滚本轮新冻结的键（插入序在 warm_memos 之后的条目）到观测态。
+    ///
+    /// 只从 memos 移除，observations 不动 —— 新键需跨轮运行确认稳定后才
+    /// 重新获得冻结资格（降级期间学习降速，防漂移输入污染冻结表）。
+    fn rollback_fresh_memos(&mut self) {
+        let mut idx: u32 = 0;
+        let mut fresh: Vec<String> = Vec::new();
+        for k in self.memos.keys() {
+            if idx >= self.warm_memos {
+                fresh.push(k.clone());
+            }
+            idx += 1;
+        }
+        for k in fresh.iter() {
+            self.memos = remove_key(self.memos.clone(), k.clone());
+        }
+    }
+
+    /// 冻结表的首键（插入序最旧；空表 None）。
+    fn first_memo_key(self) -> Option<String> {
+        for k in self.memos.keys() {
+            return Some(k.clone());
+        }
+        None
+    }
+
+    /// memo 持久化（资产沉淀：下一次运行热启动）。
+    fn persist(self) -> u32 {
+        let count = self.memos.len();
+        if count > 0 {
+            let body = crystallize_to_json(self.memos.clone(), self.observations.clone());
+            let path = self.memo_path.clone();
+            let _ = native typescript {
+                $host.fs.write(path, body);
+                return true;
+            };
+        }
+        count
+    }
+
+    /// 统计快照（StatusReport.node_trace 与评分卡原料）。
+    fn stats(self) -> String {
+        format!(
+            "frozen={} hits={} misses={} degrades={}",
+            self.memos.len(), self.hits, self.misses, self.degrades
+        )
+    }
+}
+
+/// 规范化键（v1 精确匹配档：折叠空白；语义级规范化是 v2 开放问题）。
+fn normalize_key(input: String) -> String {
+    let mut out = String::new();
+    let mut prev_space = false;
+    for ch in input.chars() {
+        if ch == ' ' || ch == '\t' || ch == '\n' {
+            if prev_space == false {
+                out.push(' ');
+            }
+            prev_space = true;
+        } else {
+            out.push(ch);
+            prev_space = false;
+        }
+    }
+    out
+}
+
+/// HashMap 删除（immutable 风格：重建表）。
+fn remove_key(map: HashMap<String, String>, key: String) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    for (k, v) in map {
+        if k.clone() != key {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    out
+}
+
+/// 固化状态 → JSON（持久化格式：memos + observations 观测账本）。
+fn crystallize_to_json(memos: HashMap<String, String>, observations: HashMap<String, Observation>) -> String {
+    let mut memo_items: Vec<String> = Vec::new();
+    for (k, v) in memos {
+        memo_items.push(format!("\"{}\":\"{}\"", k.clone(), v.clone()));
+    }
+    let mut obs_items: Vec<String> = Vec::new();
+    for (k, o) in observations {
+        obs_items.push(format!(
+            "\"{}\":{{\"last_output\":\"{}\",\"stable\":{}}}",
+            k.clone(), o.last_output.clone(), o.stable.clone()
+        ));
+    }
+    format!("{{\"memos\":{{{}}},\"observations\":{{{}}}}}", memo_items.join(","), obs_items.join(","))
+}
+
+/// 冻结阈值：同一输入连续 2 次同输出 → 冻结。
+/// （保守起步；按任务类调参是已知边界）
+export const FREEZE_AFTER: u32 = 2;

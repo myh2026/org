@@ -1,0 +1,24 @@
+// ============================================================================
+// probe6.hsl — Registry::load 第二段 native（Map 映射）复现
+// ============================================================================
+export fn main() -> Result<(), String> {
+    let root: String = String::from("registry");
+    let raw: String = native typescript {
+        try {
+            return $host.fs.read(root + "/index.json");
+        } catch (e) {
+            return "";
+        }
+    };
+    let parsed: Vec<HashMap<String, String>> = native typescript {
+        const list = JSON.parse(raw);
+        if (Array.isArray(list) === false) return [];
+        return list.map((m) => {
+            const out = new Map();
+            for (const [k, v] of Object.entries(m)) out.set(k, String(v));
+            return out;
+        });
+    };
+    println!("[probe6] rows = {}", parsed.len());
+    Ok(())
+}

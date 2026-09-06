@@ -1,0 +1,116 @@
+// ============================================================================
+// probe1.hsl — ORG 前置探针：测试 ORG 将用到的语言特性
+// ============================================================================
+// 目标：在写正式代码前，验证以下特性在 dhv-ts 中的真实支持度：
+//   1. struct 变体枚举（多字段）+ 穷尽 match
+//   2. HashMap 方法（insert / get / len）
+//   3. #[capability] 属性位置（struct / fn）
+//   4. 闭包捕获 + iter().map().collect()
+//   5. if let / let else
+//   6. Result<T, EnumError> 与 ? 传播
+//   7. graph + node + edge on Guard + AgentLoop
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq)]
+export enum Verdict {
+    Accept,
+    Revise { note: String, count: u32 },
+    Reject { reason: String },
+    Escalate { question: String },
+}
+
+#[derive(Debug, Clone)]
+export struct Worker {
+    name: String,
+    revises: u32,
+    max_revises: u32,
+}
+
+impl Worker {
+    fn new(name: String) -> Worker {
+        Worker { name: name, revises: 0, max_revises: 2 }
+    }
+
+    fn apply(mut self, v: Verdict) -> Result<Worker, String> {
+        match v {
+            Verdict::Accept => Ok(self),
+            Verdict::Revise { note: _, count } => {
+                self.revises += count;
+                if self.revises > self.max_revises {
+                    Err(format!("revise budget exhausted for {}", self.name))
+                } else {
+                    Ok(self)
+                }
+            },
+            Verdict::Reject { reason } => Err(reason),
+            Verdict::Escalate { question: _ } => Ok(self),
+        }
+    }
+}
+
+export fn main() -> Result<(), String> {
+    // HashMap probe
+    let mut scores: HashMap<String, u32> = HashMap::new();
+    scores.insert(String::from("parse"), 3);
+    scores.insert(String::from("crawl"), 5);
+
+    let total = scores.len();
+    let got = scores.get(String::from("parse"));
+    match got {
+        Some(v) => {
+            if v >= 3 {
+                let _ = v;
+            }
+        },
+        None => {},
+    }
+
+    // closure + iter probe
+    let names = vec![String::from("a"), String::from("b")];
+    let upper: Vec<String> = names.iter().map(|n: &String| n.clone()).collect();
+    let _ = upper.len() + total;
+
+    // if let probe
+    let w = Worker::new(String::from("parser"));
+    let outcome = w.clone().apply(Verdict::Revise { note: String::from("coverage"), count: 1 });
+    let done = match outcome {
+        Ok(worker) => worker,
+        Err(msg) => return Err(msg),
+    };
+
+    // graph call 约定在 probe2 中
+    let _ = done.name.len();
+    Ok(())
+}
+
+/// 编排边事件。
+enum Signal {
+    TaskReady,
+    ReportReady,
+}
+
+graph Supervisor -> Result<u32, String> {
+    node mut tally: Vec<u32> = Vec::new();
+    node counter: Worker = Worker::new(String::from("sup"));
+
+    edge tally -> counter on Signal::TaskReady;
+    edge counter -> tally on Signal::ReportReady;
+
+    let mut rounds: u32 = 0;
+
+    loop {
+        let v = counter.clone().apply(Verdict::Accept);
+        match v {
+            Ok(worker) => {
+                tally.push(worker.revises);
+                rounds += 1;
+                if rounds >= 3 {
+                    break;
+                }
+            },
+            Err(msg) => return Err(msg),
+        }
+    }
+
+    Ok(rounds)
+}

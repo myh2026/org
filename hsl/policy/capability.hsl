@@ -1,0 +1,162 @@
+// ============================================================================
+// org/policy/capability.hsl — 能力三态策略 / 预算水位 / 审计事件
+// ============================================================================
+// 权限是编译期与审计事件的组合：
+//   - 编译期：#[capability(...)] 注解使最小权限可静态执行（工具链已处决）
+//   - 运行期：本模块实现三态策略（auto / confirm / deny）+ 审计事件留痕
+//
+// 治理原则（设计铁律 #2/#3）：
+//   权限跟随委托链 —— 编排模式（用户缺席）只授 auto/deny；
+//   直连模式（用户在场）confirm 就地确认。天花板管缺席，确认管在场。
+// ============================================================================
+
+import { OrgError } from "../types/errors.hsl";
+
+/// 能力三态。
+#[derive(Debug, Clone, PartialEq)]
+export enum CapState {
+    /// 自动允许（缺席授权：用户不在场时的唯一放行态）。
+    Auto,
+    /// 需用户在场确认（专供直连模式）。
+    Confirm,
+    /// 拒绝（不可协商）。
+    Deny,
+}
+
+/// 访问模式（委托链的形态）。
+#[derive(Debug, Clone, PartialEq)]
+export enum AccessMode {
+    /// 团队/编排模式：主控代行委托 —— 静态最小权限。
+    Orchestrated,
+    /// 直连模式：用户本人在场 —— 动态确认。
+    Direct,
+}
+
+/// 能力名（封闭枚举的字符串形态；与 #[capability] 注解词表对齐）。
+export const KNOWN_CAPABILITIES: Vec<String> = vec![
+    String::from("file_read"),
+    String::from("file_write"),
+    String::from("net_connect"),
+    String::from("process_spawn"),
+    String::from("secret_access"),
+    String::from("llm_call"),
+];
+
+/// 策略引擎：capability × mode → 放行 / 拒绝 / 待确认。
+#[derive(Debug, Clone)]
+export struct CapabilityPolicy {
+    grants: HashMap<String, CapState>,
+    /// 审计事件条数（预算外的可观测指标）。
+    audit_events: u32,
+}
+
+impl CapabilityPolicy {
+    /// 默认策略：最小权限（读 / 判定自动；写 / 联网 / 进程 / 秘密拒绝）。
+    fn default() -> CapabilityPolicy {
+        let mut grants: HashMap<String, CapState> = HashMap::new();
+        grants.insert(String::from("file_read"), CapState::Auto);
+        grants.insert(String::from("llm_call"), CapState::Auto);
+        grants.insert(String::from("net_connect"), CapState::Auto);
+        grants.insert(String::from("file_write"), CapState::Confirm);
+        grants.insert(String::from("process_spawn"), CapState::Confirm);
+        grants.insert(String::from("secret_access"), CapState::Deny);
+        CapabilityPolicy { grants: grants, audit_events: 0 }
+    }
+
+    /// 判定：编排模式下 Confirm 降级为拒绝（天花板管缺席）。
+    fn decide(&mut self, capability: String, mode: AccessMode) -> Result<(), OrgError> {
+        let state = match self.grants.get(capability.clone()) {
+            Some(s) => s.clone(),
+            None => CapState::Deny,
+        };
+        self.audit_events += 1;
+        let allowed = match (state.clone(), mode.clone()) {
+            (CapState::Auto, _) => true,
+            (CapState::Deny, _) => false,
+            (CapState::Confirm, AccessMode::Direct) => true,
+            (CapState::Confirm, AccessMode::Orchestrated) => false,
+        };
+        if allowed {
+            // N3 纪律：模式判定在 HSL 侧；native 只做事件 IO
+            let mode_label = match mode {
+                AccessMode::Orchestrated => String::from("orchestrated"),
+                AccessMode::Direct => String::from("direct"),
+            };
+            let _ = native typescript {
+                $host.events.emit("capability_granted", { capability, mode: mode_label });
+                return true;
+            };
+            Ok(())
+        } else {
+            let reason = match (state.clone(), mode.clone()) {
+                (CapState::Confirm, AccessMode::Orchestrated) => {
+                    String::from("confirm 能力在编排模式（用户缺席）下降级为拒绝")
+                },
+                _ => format!("能力 {} 被策略拒绝", capability),
+            };
+            let _ = native typescript {
+                $host.events.emit("capability_denied", { capability, reason });
+                return true;
+            };
+            Err(OrgError::new(String::from("capability"), reason))
+        }
+    }
+
+    /// 能力天花板调升（仅用户可批准 —— 信任链的根）。
+    /// 返回审计事件描述；调用方必须把调用点约束在用户在场的通道上。
+    fn elevate(&mut self, capability: String, to: CapState) -> Result<String, OrgError> {
+        if KNOWN_CAPABILITIES.contains(capability.clone()) == false {
+            return Err(OrgError::new(
+                String::from("capability"),
+                format!("未知能力 {}（治理面审批扩展前不可用）", capability),
+            ));
+        }
+        self.grants.insert(capability.clone(), to.clone());
+        self.audit_events += 1;
+        let state_label = match to {
+            CapState::Auto => String::from("auto"),
+            CapState::Confirm => String::from("confirm"),
+            CapState::Deny => String::from("deny"),
+        };
+        let event = format!("capability_elevated: {} -> {}", capability, state_label);
+        let _ = native typescript {
+            $host.events.emit("audit", { event });
+            return true;
+        };
+        Ok(event)
+    }
+}
+
+/// 预算水位（三段：token / 返工双轨）。
+#[derive(Debug, Clone, PartialEq)]
+export enum BudgetLevel {
+    Green,
+    Amber,
+    Red,
+}
+
+/// 用量 → 水位（80% 起琥珀，95% 起红）。
+export fn budget_level(used: u32, cap: u32) -> BudgetLevel {
+    if cap == 0 {
+        BudgetLevel::Red
+    } else {
+        let ratio = used as f64 / cap as f64;
+        if ratio >= 0.95 {
+            BudgetLevel::Red
+        } else if ratio >= 0.8 {
+            BudgetLevel::Amber
+        } else {
+            BudgetLevel::Green
+        }
+    }
+}
+
+impl BudgetLevel {
+    fn label(self) -> String {
+        match self {
+            BudgetLevel::Green => String::from("green"),
+            BudgetLevel::Amber => String::from("amber"),
+            BudgetLevel::Red => String::from("red"),
+        }
+    }
+}

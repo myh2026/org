@@ -1,0 +1,88 @@
+// ============================================================================
+// org/types/errors.hsl — 错误层 + From 转换（? 的唯一显式通道）
+// ============================================================================
+// ORG 双错误族：
+//   ExpertError — 信封契约层：任何专家 graph 的 Err 侧（信封外层统一）
+//   OrgError    — 内核层：路由 / 工厂 / 监督 / 池 / 直连 / 期刊的失败
+// ? 传播依赖 impl From，S3 强制错误处理。
+// ============================================================================
+
+/// 专家错误：信封契约 `TaskSpec -> Result<StatusReport, ExpertError>` 的 Err 侧。
+#[derive(Debug, Clone)]
+export struct ExpertError {
+    expert: String,
+    kind: String,
+    message: String,
+}
+
+impl ExpertError {
+    fn new(expert: String, kind: String, message: String) -> ExpertError {
+        ExpertError { expert: expert, kind: kind, message: message }
+    }
+
+    /// 工厂产专家在结构校验阶段的失败（generation/check 闸门）。
+    fn structural(expert: String, message: String) -> ExpertError {
+        ExpertError::new(expert, String::from("structural"), message)
+    }
+
+    /// 预算耗尽（契约预算水位）。
+    fn budget(expert: String, message: String) -> ExpertError {
+        ExpertError::new(expert, String::from("budget"), message)
+    }
+
+    /// 能力违规（编译期 #[capability] 之外的运行期第二道闸）。
+    fn capability(expert: String, message: String) -> ExpertError {
+        ExpertError::new(expert, String::from("capability"), message)
+    }
+
+    fn render(self) -> String {
+        format!("[{}] {} :: {}", self.expert, self.kind, self.message)
+    }
+}
+
+/// 内核错误：ORG 六大部件的失败类别（route/factory/supervision/pool/direct/journal）。
+#[derive(Debug, Clone)]
+export struct OrgError {
+    kind: String,
+    message: String,
+}
+
+impl OrgError {
+    fn new(kind: String, message: String) -> OrgError {
+        OrgError { kind: kind, message: message }
+    }
+
+    fn route(message: String) -> OrgError {
+        OrgError::new(String::from("route"), message)
+    }
+
+    fn factory(message: String) -> OrgError {
+        OrgError::new(String::from("factory"), message)
+    }
+
+    fn supervision(message: String) -> OrgError {
+        OrgError::new(String::from("supervision"), message)
+    }
+
+    fn journal(message: String) -> OrgError {
+        OrgError::new(String::from("journal"), message)
+    }
+
+    fn render(self) -> String {
+        format!("org/{}: {}", self.kind, self.message)
+    }
+}
+
+/// ? 自动包装：ExpertError → OrgError（专家失败进入内核错误域）。
+impl From<ExpertError> for OrgError {
+    fn from(src: ExpertError) -> OrgError {
+        OrgError::new(String::from("expert"), src.render())
+    }
+}
+
+/// ? 自动包装：String（解析错误）→ OrgError。
+impl From<String> for OrgError {
+    fn from(src: String) -> OrgError {
+        OrgError::new(String::from("parse"), src)
+    }
+}

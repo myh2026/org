@@ -1,0 +1,24 @@
+// ============================================================================
+// probe5.hsl — Registry::load 第一段 native 的返回值检查
+// ============================================================================
+export fn main() -> Result<(), String> {
+    let root: String = String::from("registry");
+    let raw: String = native typescript {
+        try {
+            return $host.fs.read(root + "/index.json");
+        } catch (e) {
+            return "";
+        }
+    };
+    println!("[probe5] raw.len() = {}", raw.len());
+    let ok: bool = native typescript {
+        try {
+            JSON.parse(raw);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    };
+    println!("[probe5] JSON.parse ok = {}", ok);
+    Ok(())
+}

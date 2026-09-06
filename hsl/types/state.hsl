@@ -1,0 +1,255 @@
+// ============================================================================
+// org/types/state.hsl — 内核状态模型：子任务 / 路由 / 资产 / 组织运行态
+// ============================================================================
+// 主控（org.hsl）的真理源。库（registry）与池（pool）的运行时投影在这里
+// 交汇：RoutingDecision 是路由器对子任务的四选一，Asset 是任务结束时
+// 沉淀回库的四类工程资产。
+// ============================================================================
+
+import { StatusReport } from "../contracts/contract.hsl";
+
+/// 子任务：主控分解产物（依赖成 DAG，拓扑序派发）。
+#[derive(Debug, Clone)]
+export struct SubTask {
+    id: u32,
+    goal: String,
+    /// 角色标签（fetch / parse / validate / …，路由输入之一）。
+    role: String,
+    /// 能力标签（与 manifest.capabilities 对齐；B 路径的检索键）。
+    skills: Vec<String>,
+    depends_on: Vec<u32>,
+    priority: u8,
+    done: bool,
+    /// 已派给的专家名（None = 未派发 / 内联）。
+    expert: Option<String>,
+    /// 已发生的 Revise 次数（G7 有界返工的计数器）。
+    revises: u32,
+}
+
+impl SubTask {
+    fn new(id: u32, goal: String, role: String, skills: Vec<String>,
+           depends_on: Vec<u32>, priority: u8) -> SubTask {
+        SubTask {
+            id: id,
+            goal: goal,
+            role: role,
+            skills: skills,
+            depends_on: depends_on,
+            priority: priority,
+            done: false,
+            expert: None,
+            revises: 0,
+        }
+    }
+
+    /// 是否就绪：依赖全部完成（拓扑序派发的判据）。
+    fn ready(self, completed: &Vec<u32>) -> bool {
+        self.depends_on.iter().all(|dep| completed.contains(dep))
+    }
+}
+
+/// 路由四路径（A 内联 / B 复用 / C 生成 / D 暖移交）。
+#[derive(Debug, Clone, PartialEq)]
+export enum RoutePath {
+    /// A：琐碎任务、强依赖主控上下文 —— 无派单开销。
+    Inline,
+    /// B：库中有类型兼容、语义匹配的专家 —— 摊销成本。
+    Reuse { expert: String },
+    /// C：库中无匹配且任务具备复用价值 —— 生成+验收后转为资产。
+    Generate,
+    /// D：请求落在既有专家职责内且规模小 —— 一份移交摘要的成本。
+    WarmHandoff { expert: String },
+}
+
+impl RoutePath {
+    fn label(self) -> String {
+        match self.clone() {
+            RoutePath::Inline => String::from("A:inline"),
+            RoutePath::Reuse { expert: _ } => String::from("B:reuse"),
+            RoutePath::Generate => String::from("C:generate"),
+            RoutePath::WarmHandoff { expert: _ } => String::from("D:warm-handoff"),
+        }
+    }
+
+    fn detail(self) -> String {
+        match self.clone() {
+            RoutePath::Inline => String::from("inline (kernel context)"),
+            RoutePath::Reuse { expert } => format!("reuse {}", expert),
+            RoutePath::Generate => String::from("factory mint"),
+            RoutePath::WarmHandoff { expert } => format!("warm handoff to {}", expert),
+        }
+    }
+}
+
+/// 任务结束沉淀的四类工程资产（核心竞争力的增长率所在）。
+#[derive(Debug, Clone)]
+export enum Asset {
+    NewExpert { name: String, version: String },
+    Fixture { suite: String },
+    Memory { note: String },
+    Patch { expert: String, note: String },
+    FrozenNode { expert: String, node: String },
+}
+
+impl Asset {
+    fn label(self) -> String {
+        match self.clone() {
+            Asset::NewExpert { name, version } => format!("expert {}@{}", name, version),
+            Asset::Fixture { suite } => format!("fixture {}", suite),
+            Asset::Memory { note } => format!("memory: {}", note),
+            Asset::Patch { expert, note } => format!("patch {} :: {}", expert, note),
+            Asset::FrozenNode { expert, node } => format!("frozen {}.{}", expert, node),
+        }
+    }
+}
+
+/// 收货记录：子任务 id + 状态报告（最终交付物的谱系叶子）。
+#[derive(Debug, Clone)]
+export struct Acceptance {
+    task_id: u32,
+    report: StatusReport,
+}
+
+/// 组织运行态（主控 graph 的可变状态；每轮任务一个实例）。
+#[derive(Debug, Clone)]
+export struct OrgState {
+    mission: String,
+    subtasks: Vec<SubTask>,
+    accepted: Vec<Acceptance>,
+    assets: Vec<Asset>,
+    /// 任务记忆（轻档池化：任务历史索引的原料）。
+    memories: Vec<String>,
+    /// 已向用户发出的澄清问题（批量打包，早发重叠人类思考时间）。
+    questions: Vec<String>,
+    /// 已收到的用户回答（scripted 模式来自剧本轨道）。
+    answers: Vec<String>,
+    /// 审查意见复发计数（expert → note → 次数；达到 2 自动升级补丁提案）。
+    recurrence: HashMap<String, u32>,
+    iterations: u32,
+    max_iterations: u32,
+}
+
+impl OrgState {
+    fn new(mission: String) -> OrgState {
+        OrgState {
+            mission: mission,
+            subtasks: Vec::new(),
+            accepted: Vec::new(),
+            assets: Vec::new(),
+            memories: Vec::new(),
+            questions: Vec::new(),
+            answers: Vec::new(),
+            recurrence: HashMap::new(),
+            iterations: 0,
+            max_iterations: MAX_ITERATIONS,
+        }
+    }
+
+    /// 下一个就绪子任务（拓扑序 + 优先级）。
+    fn next_ready(self) -> Option<SubTask> {
+        let completed = self.completed_ids();
+        let pending = self.subtasks.iter().filter(|t| t.done == false);
+        let mut best: Option<SubTask> = None;
+        for t in pending {
+            if t.clone().ready(&completed) {
+                let take = match best.clone() {
+                    Some(b) => b.priority > t.priority,
+                    None => true,
+                };
+                if take {
+                    best = Some(t.clone());
+                }
+            }
+        }
+        best
+    }
+
+    fn completed_ids(self) -> Vec<u32> {
+        let mut out: Vec<u32> = Vec::new();
+        for a in self.accepted.iter() {
+            out.push(a.task_id);
+        }
+        out
+    }
+
+    /// 登记收货（子任务完成 + 报告入谱系）。
+    fn accept(mut self, task_id: u32, report: StatusReport) -> OrgState {
+        for t in self.subtasks.iter_mut() {
+            if t.id == task_id {
+                t.done = true;
+            }
+        }
+        self.accepted.push(Acceptance { task_id: task_id, report: report });
+        self
+    }
+
+    /// 记一次 Revise（有界返工计数）。
+    fn bump_revise(mut self, task_id: u32) -> OrgState {
+        for t in self.subtasks.iter_mut() {
+            if t.id == task_id {
+                t.revises += 1;
+            }
+        }
+        self
+    }
+
+    /// 审查意见复发计数 +1；返回是否达到补丁升级阈值（同一意见第二次出现）。
+    fn record_recurrence(mut self, expert: String, note: String) -> (OrgState, bool) {
+        let key = format!("{}::{}", expert, note);
+        let seen = match self.recurrence.get(key.clone()) {
+            Some(n) => n.clone(),
+            None => 0,
+        };
+        let next = seen + 1;
+        self.recurrence.insert(key, next);
+        let escalate = next >= RECURRENCE_PATCH_THRESHOLD;
+        (self, escalate)
+    }
+
+    fn add_asset(mut self, asset: Asset) -> OrgState {
+        self.assets.push(asset);
+        self
+    }
+
+    /// 记住一条任务记忆（轻档池化：任务历史索引的原料，随运行增长）。
+    fn remember(mut self, note: String) -> OrgState {
+        self.memories.push(note);
+        self
+    }
+
+    /// 某子任务的返工计数（新鲜读取 —— 派单快照上的计数会过期）。
+    fn revises_of(self, task_id: u32) -> u32 {
+        for t in self.subtasks.iter() {
+            if t.id == task_id {
+                return t.revises;
+            }
+        }
+        0
+    }
+}
+
+/// 主循环轮数上限（活锁兜底；G9 精神的运行期镜像）。
+export const MAX_ITERATIONS: u32 = 32;
+
+/// 审查意见复发阈值：同一意见第二次出现 → 修专家本体，不是再退回一次。
+export const RECURRENCE_PATCH_THRESHOLD: u32 = 2;
+
+/// 组织报告（graph Org 的 Ok 侧：交付物 + 资产谱系 + 成本谱系 + 动力学计数）。
+#[derive(Debug, Clone)]
+export struct OrgReport {
+    mission: String,
+    summary: String,
+    deliverables: Vec<String>,
+    assets: Vec<String>,
+    tokens_total: u32,
+    revises_total: u32,
+    model_calls_total: u32,
+    /// 收货子任务数（accepted / total 的分子）。
+    accepted_total: u32,
+    /// 子任务总数。
+    subtasks_total: u32,
+    /// 本期挖掘出的基准题数（journal → fixture，生产即出题）。
+    mined_entries: u32,
+    /// 本期评分卡漂移告警数（静默更新检测）。
+    drift_alerts: u32,
+}
