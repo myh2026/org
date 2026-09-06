@@ -62,7 +62,7 @@ jobs:
             --outfile "dist-bin/${NAME}" cli/org.ts
           ls -lh dist-bin/
 
-      - name: 打包（zip：单文件 + 一行说明）
+      - name: 打包（zip：单文件 + 一行说明）+ sha256 旁车
         run: |
           VERSION="${GITHUB_REF_NAME}"
           mkdir -p pkg
@@ -82,13 +82,18 @@ jobs:
           } > pkg/README.txt
           (cd pkg && zip -qr "../${{ matrix.artifact }}" .)
           mv "${{ matrix.artifact }}" /tmp/
-          ls -lh /tmp/${{ matrix.artifact }}
+          # 生成校验和旁车（官网下载区自动读取展示；本地校验： shasum -a 256 -c <file>.sha256）
+          (cd /tmp && sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256")
+          cat "/tmp/${{ matrix.artifact }}.sha256"
+          ls -lh /tmp/${{ matrix.artifact }}*
 
       - name: 上传构建产物（供 release 汇总）
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: /tmp/${{ matrix.artifact }}
+          path: |
+            /tmp/${{ matrix.artifact }}
+            /tmp/${{ matrix.artifact }}.sha256
           retention-days: 3
 
   # ── 发布（源码包 + dist 快照 + 5 平台二进制） ─────────────────────────
@@ -120,20 +125,28 @@ jobs:
             echo "（未找到 ${VERSION} 的 CHANGELOG 段落，参见 CHANGELOG.md）" > /tmp/release-notes.md
           fi
 
-      - name: 源码与 dist 快照打包（先写 /tmp 再移回，规避 tar 自读自写）
+      - name: 源码与 dist 快照打包（先写 /tmp 再移回，规避 tar 自读自写）+ sha256 旁车
         run: |
           VERSION="${GITHUB_REF_NAME}"
           tar --exclude='.git' --exclude='demo-run' --exclude='.hsl-runs' \
               --exclude='node_modules' --exclude='dist-bin' --exclude='*.tgz' --exclude='*.zip' \
               -czf "/tmp/org-${VERSION}-src.tar.gz" .
           cd dist && zip -qr "/tmp/org-${VERSION}-dist.zip" . && cd -
-          ls -lh /tmp/org-*.tar.gz /tmp/org-*.zip
+          # 校验和旁车（与平台二进制同规格）
+          (cd /tmp && sha256sum org-*.tar.gz org-*-dist.zip > org-checksums-src.txt && \
+            for f in org-*.tar.gz org-*-dist.zip; do sha256sum "$f" > "$f.sha256"; done)
+          cat /tmp/org-checksums-src.txt
+          ls -lh /tmp/org-*
 
-      - name: 创建 GitHub Release（5 平台二进制 + 源码 + dist 快照）
+      - name: 创建 GitHub Release（5 平台二进制 + 源码 + dist 快照 + 全部 sha256 旁车）
         uses: softprops/action-gh-release@v2
         with:
           body_path: /tmp/release-notes.md
           files: |
             release-assets/org-*.zip
+            release-assets/org-*.zip.sha256
             /tmp/org-*.tar.gz
+            /tmp/org-*.tar.gz.sha256
             /tmp/org-*-dist.zip
+            /tmp/org-*-dist.zip.sha256
+            /tmp/org-checksums-src.txt
