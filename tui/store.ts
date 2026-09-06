@@ -78,6 +78,43 @@ export type Card =
       cells: Scorecard["cells"]; axis?: string;
     };
 
+// ---------- 事件流过滤（:filter，视图偏好；不随 run / 清屏 / 重演重置） ----------
+
+export type FilterKey = "all" | "user" | "task" | "factory" | "review" | "direct" | "done" | "dyn";
+
+export const FILTERS: Array<{ k: FilterKey; label: string }> = [
+  { k: "all", label: "全部" },
+  { k: "user", label: "任务" },
+  { k: "task", label: "分解" },
+  { k: "factory", label: "工厂" },
+  { k: "review", label: "裁决" },
+  { k: "direct", label: "直连" },
+  { k: "done", label: "汇总" },
+  { k: "dyn", label: "动态" },
+];
+
+/** 卡片是否属于过滤类（system 提示卡恒可见，由调用方短路）。 */
+export function cardMatchesFilter(card: Card, f: FilterKey): boolean {
+  if (f === "all") return true;
+  switch (f) {
+    case "user": return card.t === "user";
+    case "task": return card.t === "task";
+    case "factory": return card.t === "factory";
+    case "review": return card.t === "review";
+    case "direct": return card.t === "direct";
+    case "done": return card.t === "done";
+    case "dyn": return card.t === "crystal" || card.t === "patch" || card.t === "score";
+  }
+}
+
+/** `:filter <类>`：接受中文标签或英文键（裁决/review），空参复位为全部；未知返回 null。 */
+export function parseFilterArg(arg: string): FilterKey | null {
+  const a = arg.trim().toLowerCase();
+  if (a.length === 0) return "all";
+  const hit = FILTERS.find((f) => f.label === arg.trim() || f.k === a);
+  return hit ? hit.k : null;
+}
+
 // ---------- 状态 ----------
 
 export type Focus = "input" | "sessions" | "experts" | "pool";
@@ -117,6 +154,7 @@ export interface TuiState {
   history: string[];
   historyIdx: number;
   mode: Mode;
+  filter: FilterKey;               // 事件流过滤（:filter）
   model: string;
   engine: EngineState;
   startedAt: number | null;
@@ -149,6 +187,7 @@ export function initialState(partial?: Partial<TuiState>): TuiState {
     history: [],
     historyIdx: -1,
     mode: "team",
+    filter: "all",
     model: "scripted",
     engine: "idle",
     startedAt: null,
@@ -185,6 +224,7 @@ export type Action =
   | { type: "attachSha"; sha: string }
   | { type: "directAnswers"; answers: string[]; turns: number }
   | { type: "setTheme"; theme: ThemeName }
+  | { type: "setFilter"; filter: FilterKey }
   | { type: "toggleHelp"; open?: boolean }
   | { type: "scroll"; deltaLines: number }
   | { type: "scrollTop" }
@@ -664,6 +704,8 @@ export function reducer(state: TuiState, action: Action): TuiState {
     }
     case "setTheme":
       return { ...state, theme: action.theme };
+    case "setFilter":
+      return { ...state, filter: action.filter };
     case "toggleHelp":
       return { ...state, helpOpen: action.open === undefined ? !state.helpOpen : action.open };
     case "scroll":

@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
-  initialState, reducer, withDemoCall,
+  initialState, reducer, withDemoCall, parseFilterArg, FILTERS,
   type TuiState, type Action, type Focus,
 } from "./store.ts";
 import { THEMES, THEME_ORDER, parseThemeName } from "./theme.ts";
@@ -298,6 +298,24 @@ export class App {
         const t = parseThemeName(arg);
         if (!t) { this.dispatch({ type: "notice", text: `主题：${THEME_ORDER.join(" / ")}`, tone: "warn" }); return; }
         this.dispatch({ type: "setTheme", theme: t });
+        return;
+      }
+      case "filter": {
+        const key = parseFilterArg(arg);
+        if (key === null) {
+          this.dispatch({
+            type: "notice",
+            text: `过滤类：${FILTERS.filter((f) => f.k !== "all").map((f) => f.label).join(" / ")}（:filter 复位）`,
+            tone: "warn",
+          });
+          return;
+        }
+        this.dispatch({ type: "setFilter", filter: key });
+        const label = FILTERS.find((f) => f.k === key)?.label ?? "全部";
+        this.dispatch({
+          type: "notice",
+          text: key === "all" ? "事件流过滤已复位（全部）" : `仅显示 ${label} 类卡片（:filter 复位）`,
+        });
         return;
       }
       case "status": {

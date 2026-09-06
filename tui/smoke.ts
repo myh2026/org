@@ -11,7 +11,7 @@
 
 import * as path from "node:path";
 import * as fs from "node:fs";
-import { initialState, reducer, pushEngineEvent } from "./store.ts";
+import { initialState, reducer, pushEngineEvent, cardMatchesFilter, parseFilterArg } from "./store.ts";
 import { renderFrame } from "./frame.ts";
 import { Screen } from "./renderer.ts";
 import { replayRun, readScorecard, startRun, scanWorkspace } from "../lib/engine.ts";
@@ -39,7 +39,7 @@ async function main(): Promise<number> {
   console.log("① renderFrame 纯渲染");
   const base = initialState({ cols: 118, rows: 38, workspace: path.join(ROOT, "demo-run") });
   const f = plain(base);
-  check("标题栏 ORG + 版本", f.includes("ORG — Organization Harness") && f.includes("v0.4.0"));
+  check("标题栏 ORG + 版本", f.includes("ORG — Organization Harness") && f.includes("v0.4.1"));
   check("三区：会话/专家库/池与固化（宽终端）", f.includes("会话") && f.includes("专家库") && f.includes("池与固化"));
   check("空态引导（输入任务回车派单）", f.includes("输入任务回车派单"));
   check("输入栏提示符 ›", f.includes("›"));
@@ -85,6 +85,29 @@ async function main(): Promise<number> {
     });
     const frame2 = plain(st2);
     check("完成卡 model_calls 展示", frame2.includes("model_calls"));
+
+    // ---- ②b :filter 事件流过滤（与官网演示同语义）----
+    console.log("\n②b :filter 事件流过滤");
+    const total = st2.cards.length;
+    check("前置：完整流含审查与任务卡", total > 0 && st2.cards.some((c) => c.t === "review"));
+    const stf = reducer(st2, { type: "setFilter", filter: "review" });
+    const visR = stf.cards.filter((c) => c.t === "system" || cardMatchesFilter(c, stf.filter));
+    check("过滤=裁决只留审查卡", visR.length > 0 && visR.every((c) => c.t === "review" || c.t === "system"), `visible=${visR.length}/${total}`);
+    const pf = plain(stf);
+    check("过滤态渲染：无分解徽标（任务卡被隐藏）", !pf.includes("[A 内联]") && !pf.includes("[C 生成]"));
+    check("过滤态渲染：状态栏显示 filter=裁决", pf.includes("filter=裁决"));
+    const stfEmpty = reducer(st2, { type: "setFilter", filter: "user" });
+    check("空过滤态提示复位路径", plain(stfEmpty).includes(":filter 复位"));
+    const stf2 = reducer(stf, { type: "setFilter", filter: "factory" });
+    const visF = stf2.cards.filter((c) => cardMatchesFilter(c, stf2.filter));
+    check("切换过滤=工厂只留工厂卡", visF.length > 0 && visF.every((c) => c.t === "factory"));
+    const stf3 = reducer(stf2, { type: "setFilter", filter: "all" });
+    check("复位=全部恢复完整流", stf3.filter === "all" && stf3.cards.length === total);
+    check("runStart 不重置过滤偏好", reducer(stf2, { type: "runStart", mode: "team", session: "out-x", userText: "t" }).filter === "factory");
+    check("parseFilterArg：中文/英文键/空参/未知", parseFilterArg("裁决") === "review"
+      && parseFilterArg("review") === "review"
+      && parseFilterArg("") === "all"
+      && parseFilterArg("不存在的类") === null);
   } else {
     check("dist/demo/out-a 快照存在（先跑 org demo）", false, "快照缺失，跳过 ②③");
   }

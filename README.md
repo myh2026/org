@@ -151,7 +151,8 @@ flowchart TB
   （Accept 绿 / Revise 琥珀 / Reject 红 / Escalate 紫）· 固化（❄冻结 ⚡命中）· 补丁
   （版本 bump + git sha + 金丝雀确认）· 直连 · 完成卡（成本衰减 5→1→0）· 系统卡；
 - **输入协议**：任务回车派单（团队模式）· `?专家 问题?` 直连 · `:demo` 全叙事演示 ·
-  `:replay out-…` 历史会话秒开重演（不重跑引擎）· `:score :theme :status :clear :help :quit`；
+  `:replay out-…` 历史会话秒开重演（不重跑引擎）· `:filter 任务|分解|工厂|裁决|直连|汇总|动态`
+  事件流过滤（视图偏好，不随 run 重置）· `:score :theme :status :clear :help :quit`；
 - **三主题**（org-dark / org-light / paper）· 窄终端降级 · 帮助浮层（`?`）· 运行取消（Esc）；
 - **键盘**：Tab 切换分区 · j/k 移动 · g/G 回顶回底 · Ctrl+L 清屏 · Ctrl+C 退出；
 - 实现与规格：`tui/`（零依赖 Line/Span 渲染器 + useReducer 单 store），

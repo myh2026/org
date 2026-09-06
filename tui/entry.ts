@@ -11,9 +11,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { App } from "./app.tsx";
-import { initialState, reducer, pushEngineEvent } from "./store.ts";
+import { initialState, reducer, pushEngineEvent, parseFilterArg } from "./store.ts";
 import { renderFrame } from "./frame.ts";
 import { Screen } from "./renderer.ts";
+import { parseThemeName } from "./theme.ts";
 import { replayRun, scanWorkspace, ensureWorkspace, readScorecard } from "../lib/engine.ts";
 import { ROOT, DEFAULT_WORKSPACE } from "../lib/root.ts";
 
@@ -94,6 +95,19 @@ export function printFrame(p: TuiParsed): number {
       state = reducer(state, { type: "scoreCard", model: sc.model, evidence: sc.evidence_count, cells: sc.cells });
     }
     state = { ...state, currentSession: path.basename(dir), mode: "replay" };
+  }
+  // --print 下支持视图类命令（:filter / :theme）——只改渲染不改状态机；
+  // 运行类命令（:demo/:replay/任务文本）不属于一帧渲染的语义，忽略
+  if (p.command?.startsWith(":")) {
+    const [name, ...rest] = p.command.slice(1).split(/\s+/);
+    const arg = rest.join(" ").trim();
+    if (name === "filter") {
+      const key = parseFilterArg(arg);
+      if (key !== null) state = reducer(state, { type: "setFilter", filter: key });
+    } else if (name === "theme") {
+      const t = parseThemeName(arg);
+      if (t) state = reducer(state, { type: "setTheme", theme: t });
+    }
   }
   process.stdout.write(Screen.toPlainText(renderFrame(state)) + "\n");
   return 0;

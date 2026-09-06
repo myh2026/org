@@ -6,6 +6,7 @@
 // ============================================================================
 
 import type { TuiState } from "../store.ts";
+import { cardMatchesFilter, FILTERS } from "../store.ts";
 import type { Theme } from "../theme.ts";
 import type { Line } from "../text.ts";
 import { renderCard } from "./cards.tsx";
@@ -30,9 +31,20 @@ export function renderThread(state: TuiState, theme: Theme, width: number, heigh
     lines.push([{ t: "" }]);
     lines.push([{ t: "  子智能体可生成 · 可验收 · 可复用 · 可演进", c: "faint" }]);
   }
-  for (const card of state.cards) {
+  // :filter 视图过滤：匹配类卡片按类显示；system 提示卡恒可见
+  // （状态/报错不因过滤丢失）；「匹配为空」时给复位提示（不看 system 卡脸色）
+  const matched = state.cards.filter((c) => cardMatchesFilter(c, state.filter));
+  const visible = state.filter === "all"
+    ? state.cards
+    : [...matched, ...state.cards.filter((c) => c.t === "system")];
+  for (const card of visible) {
     if (lines.length > 0) lines.push([{ t: "" }]); // 卡间空行
     for (const l of renderCard(card, inner)) lines.push(l);
+  }
+  if (matched.length === 0 && state.cards.length > 0) {
+    const label = FILTERS.find((f) => f.k === state.filter)?.label ?? "";
+    lines.push([{ t: "" }]);
+    lines.push([{ t: `  「${label}」过滤下暂无卡片 · 输入 :filter 复位为全部`, c: "dim" }]);
   }
   const totalLines = lines.length;
   const viewH = Math.max(1, height - 1); // 底部留一行跟随提示

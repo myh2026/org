@@ -6,6 +6,7 @@
 // ============================================================================
 
 import type { TuiState } from "../store.ts";
+import { FILTERS } from "../store.ts";
 import type { Theme } from "../theme.ts";
 import type { Line } from "../text.ts";
 import { fitLine, truncate } from "../text.ts";
@@ -44,9 +45,14 @@ export function renderStatus(state: TuiState, theme: Theme, width: number): Line
     ? { t: `◌ ${state.mode} · ${state.model} · 已取消`, c: "faint" }
     : { t: `○ ${state.mode} · ${state.model} · idle`, c: "ok" };
   const ws = truncate(shortWorkspace(state.workspace), Math.max(6, Math.floor(inner / 3)));
+  // :filter 激活时在状态栏右侧前置过滤徽标（视图偏好可观测）
+  const filterLabel = FILTERS.find((f) => f.k === state.filter && f.k !== "all")?.label;
+  const right: Line = [
+    ...(filterLabel ? [{ t: `filter=${filterLabel} · `, c: "info" } as const] : []),
+    { t: `${ws} · ? 帮助`, c: "faint" },
+  ];
   const left = engineLabel;
-  const right = { t: `${ws} · ? 帮助`, c: "faint" };
-  return fitLine([left, { t: "  " }, right], inner);
+  return fitLine([left, { t: "  " }, ...right], inner);
 }
 
 export function renderHelp(state: TuiState, theme: Theme, width: number, height: number): Line[] {
@@ -57,6 +63,7 @@ export function renderHelp(state: TuiState, theme: Theme, width: number, height:
     ["?专家 问题?", "直连指定专家（记账 + 纪要回写）"],
     [":demo", "三连跑演示：铸专家 → 复用+补丁 → 蓝绿"],
     [":replay <out-…>", "重演历史会话（事件流秒开）"],
+    [":filter [类]", "事件流过滤：任务/分解/工厂/裁决/直连/汇总/动态"],
     [":score [axis]", "模型评分卡（证据归因）"],
     [":theme dark|light|paper", "切换主题"],
     [":status", "刷新工作区快照"],
