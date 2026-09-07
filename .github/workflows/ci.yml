@@ -80,3 +80,42 @@ jobs:
           else
             echo "dist/ 无变化，跳过回写"
           fi
+
+  # ── 三平台原生冒烟（Windows / macOS 真实执行） ────────────────────────────
+  # ubuntu job 覆盖逻辑正确性与 linux 产物；release 的五平台产物由 ubuntu
+  # 交叉编译产出。本 job 补齐最后一块：在真实 macOS / Windows 运行器上组装
+  # 当前平台单二进制并真实执行 —— Windows 路径语义、macOS(arm64) 运行时、
+  # TUI 帧渲染的平台回归都在这里拦截。
+  native-smoke:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            bin: build/org
+          - os: windows-latest
+            bin: build/org.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: HSL 工具链就位（vendored 优先）
+        run: bun scripts/setup-hsl.ts
+
+      - name: 组装当前平台单二进制（无参数 = 仅宿主平台）
+        run: bun scripts/build-bin.ts
+
+      - name: 原生执行冒烟（check / demo / TUI 帧）
+        shell: bash
+        run: |
+          set -o pipefail
+          BIN="${{ matrix.bin }}"
+          "$BIN" check | tail -2
+          "$BIN" demo | tail -3
+          "$BIN" tui --print > frame.txt && head -3 frame.txt
+          test -s frame.txt && echo "✓ TUI 帧非空（原生 ${{ matrix.os }}）"
