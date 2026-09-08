@@ -1,1 +1,0 @@
-{"accepted":3,"subtasks":3,"deliverables":3,"assets":3,"asset_labels":["frozen notice-parser.norm_date","patch record-validator :: remedy: count date_status=unparsed as valid (flagged, not excluded)","memory: task memory index: 3 entries"],"tokens_total":480,"revises_total":1,"model_calls_total":1,"mined_entries":4,"drift_alerts":0}

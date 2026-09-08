@@ -1054,7 +1054,12 @@ fn read_report_artifact(task_id: u32) -> StatusReport {
         const x = parseFloat(coverage_raw);
         return Number.isFinite(x) ? x : 0.0;
     };
-    let mut report = StatusReport::new(task_id, String::from("(validation verdict artifact)"), coverage);
+    // deliverable 契约（v0.4.6，issue #6 连带）：磁盘车道专家可在 acceptance
+    // 工件里显式声明交付物（如 parse 专家的记录数组 —— 下游 validate 的
+    // payload 就来自这里）。缺省保持占位符（诚实边界：不编造数据）。
+    let deliverable = fields.get(String::from("deliverable"))
+        .unwrap_or(String::from("(validation verdict artifact)"));
+    let mut report = StatusReport::new(task_id, deliverable, coverage);
     report.notes.push(fields.get(String::from("summary")).unwrap_or(String::new()));
     report.notes.push(fields.get(String::from("note")).unwrap_or(String::new()));
     report

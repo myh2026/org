@@ -1,5 +1,5 @@
 // ============================================================================
-// org/lib/engine.ts — 引擎桥：CLI 与 TUI 共用（v0.4.5，规格书 §4）
+// org/lib/engine.ts — 引擎桥：CLI 与 TUI 共用（v0.4.6，规格书 §4）
 // ----------------------------------------------------------------------------
 // 主路径：spawn `bun <dhv-ts> run <entry> --workspace --task --model --fixture
 // --out --allow bun,node,ls,cat,grep,diff,git`（与 cli/org.ts runHsl 同参），

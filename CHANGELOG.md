@@ -1,5 +1,46 @@
 # CHANGELOG
 
+## v0.4.6（2026-09-08）
+
+**B 路径执行面：导入 harness 被任务派单真实执行（issue #6）**。`org import`
+注册的 harness 此前只能直连问答（`org ask`）——任务派单（`org run` / demo
+全叙事）命中 B 路径时，`run_expert` 硬编码 `registry/experts/` + `factory/fixtures/`
+约定寻址，无视注册表登记的 `entry`/`fixture` 字段，导入专家命中即
+「入口文件不存在」。本版修复后：**导入的 harness 经嵌套解释器车道被
+find_reusable 真实派单执行，交付物经 deliverable 契约流转下游子任务**。
+
+### 修复
+
+- **派单寻址注册表优先**（pipeline.hsl `resolve_dispatch_paths`）：按名
+  加载磁盘注册表 → 命中取 manifest 登记的 `entry_path`；未登记回退约定
+  车道（mint Exam 前未注册场景兼容）。`run_expert` 全调用面（B 路径 Reuse /
+  C 路径 Generate / D 路径 WarmHandoff / 补丁 smoke）统一走解析器。
+- **manifest.fixture 字段二相解析**（`run_fixture_of`，按 source 分相）：
+  `import` → fixture 字段即嵌套 run 剧本（tracks 形态）直接可用；
+  `factory` → fixture 字段是验收样本（TaskSpec 形态），run 剧本走约定
+  `factory/fixtures/<name>.fixture.json`。语义错配会把样本当剧本传——
+  金丝雀 / N 版本冗余同规则修复（promotion.hsl）。
+- **工单序列化卫生**（pipeline.hsl `spec_to_json`）：goal / acceptance /
+  payload / feedback 一律 `json_escape` 后按 JSON 字符串嵌入。原先 payload
+  裸插值——纯文本负载（fetch/parse 角色的 raw 材料）会嵌坏整个
+  current-spec.json，嵌套 harness 报「工单不是合法 JSON」。字符串形态与
+  裸 JSON 嵌入在 `$host.json.fields` 解析后字段值同构，既有 harness 的
+  `JSON.parse(payload)` 语义不变。
+- **deliverable 契约**（org.hsl `read_report_artifact`）：磁盘车道专家可在
+  acceptance 工件声明 `deliverable` 字段（如 parse 专家的记录数组）——下游
+  子任务的 payload 从这里机械编接（`work/parse-output.json`）；缺省保持
+  占位符（诚实边界：不编造数据）。
+- **mint Exam 显式寻址**：验收阶段新专家尚未注册，若注册表恰有同名导入
+  专家，按名解析会劫持寻址跑错文件——Exam 改为显式约定车道。
+
+### 新增
+
+- 测试：tests/import.test.ts 新增「B 路径执行面」组 3 用例（端到端
+  派单执行 + 交付物流转 / 工单序列化卫生 / uses 计数跟进）；全套 104
+  用例全绿。
+- 文档：README「B 路径执行面」段落（磁盘车道信封契约：输入 current-spec.json /
+  输出 acceptance.json + deliverable 字段）。
+
 ## v0.4.5（2026-09-08）
 
 **剧本联动：导入即能用（零摩擦消费链）**。`org import` 自动生成占位剧本

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // ============================================================================
-// org/cli/org.ts — ORG 命令行（v0.4.5）
+// org/cli/org.ts — ORG 命令行（v0.4.6）
 // ----------------------------------------------------------------------------
 //   org run --task "..."          团队模式派单（监督回路全流程）
 //   org demo                      全叙事演示：铸专家 → 用户选取保留 → 复用+补丁+金丝雀
@@ -29,7 +29,7 @@ import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          loadRegistryIndex, setRetained, keepAllCandidates,
          importHarness, listContextUsage, renderContextMeter, expertFixtureOf } from "../lib/engine.ts";
 
-const VERSION = "0.4.5";
+const VERSION = "0.4.6";
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const HANDOFF_ENTRY = path.join(ROOT, "hsl/pool/handoff.hsl");

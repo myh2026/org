@@ -256,3 +256,122 @@ describe("剧本联动（导入即能用：占位剧本 + 自动发现，v0.4.5�
     expect((r.stdout + r.stderr)).not.toContain("使用导入剧本");
   });
 });
+
+// ============================================================================
+// B 路径执行面（v0.4.6，issue #6）：导入 harness 被任务派单真实执行
+// ----------------------------------------------------------------------------
+// v0.4.5 前的断层：import 注册的 harness 在 registry/harnesses/，但派单执行
+// (run_expert) 硬编码 registry/experts/ 约定 —— B 路径命中导入专家必然
+// 「入口文件不存在」。v0.4.6 修复后：注册表登记优先寻址 + 工单序列化卫生
+// + deliverable 契约（磁盘车道交付物流转下游）。
+// ============================================================================
+import { runOrgRun, eventsOf } from "./helpers";
+
+/** 高亲和导入 harness：机械解析 raw/notices.txt，经 deliverable 契约交付记录。 */
+const BPATH_HARNESS = `/// 结构化解析公告为记录：标题、日期、部门、分类（结构化解析公告为记录·标题·日期·部门·分类·导入高亲和专家）
+#[capability(parse)]
+export fn main() -> Result<(), String> {
+    let spec_json: String = native typescript {
+        try {
+            return $host.fs.read("factory/current-spec.json");
+        } catch (e) {
+            return "";
+        }
+    };
+    if spec_json.len() == 0 {
+        return Err(String::from("factory/current-spec.json 缺失（工单未落盘）"));
+    }
+    let records: String = native typescript {
+        let raw = "";
+        try { raw = $host.fs.read("raw/notices.txt"); } catch (e) { raw = ""; }
+        const out = [];
+        for (const block of raw.split("=== NOTICE")) {
+            if (block.trim().length === 0) continue;
+            const rec = { title: "", date: "", date_status: "unparsed", dept: "", category: "notice" };
+            for (const line of block.split("\\n")) {
+                let m = /^标题[:：]\\s*(.+)$/.exec(line.trim());
+                if (m) rec.title = m[1].trim();
+                m = /^日期[:：]\\s*(.+)$/.exec(line.trim());
+                if (m) {
+                    const v = m[1].trim();
+                    if (/^\\d{4}-\\d{2}-\\d{2}$/.test(v)) { rec.date = v; rec.date_status = "ok"; }
+                    else rec.date = v;
+                }
+                m = /^部门[:：]\\s*(.+)$/.exec(line.trim());
+                if (m) rec.dept = m[1].trim();
+            }
+            if (rec.title.includes("公告")) rec.category = "announcement";
+            if (rec.title.length > 0) out.push(rec);
+        }
+        return JSON.stringify(out);
+    };
+    let summary: String = native typescript {
+        const recs = JSON.parse(records);
+        const valid = recs.filter((r) => r.title && r.dept).length;
+        const cov = recs.length > 0 ? valid / recs.length : 0;
+        const body = JSON.stringify({
+            coverage: cov, valid: valid, total: recs.length,
+            summary: "bpath-parse: " + valid + "/" + recs.length + " records",
+            note: "B-path disk lane, deliverable declared",
+            deliverable: JSON.stringify(recs),
+        });
+        $host.artifacts.write("acceptance.json", body);
+        return "parsed " + recs.length + " records";
+    };
+    println!("[bpath-parse] {} via B path", summary);
+    Ok(())
+}
+`;
+
+describe("B 路径执行面（导入 harness 被真实派单执行，v0.4.6）", () => {
+  test("端到端：task#2 route B:reuse 派单导入专家 → 真实执行 → 交付物流转下游", () => {
+    const ws = makeWorkspace("bpath-e2e");
+    const src = writeSample(TEST_RUN, "bpath-parse.hsl", BPATH_HARNESS);
+    const imp = runOrg(["import", src, "--workspace", ws]);
+    if (!imp.ok) console.error(imp.stdout + imp.stderr);
+    expect(imp.ok).toBe(true);
+
+    const out = path.join(ws, "out-bpath");
+    const r = runOrgRun(ws, out);
+    if (!r.ok) console.error(r.stdout + r.stderr);
+    expect(r.ok).toBe(true);
+    expect(r.stdout).toContain("accepted 3 / 3 subtasks");
+
+    // 派单事件铁证：路由 B 路径 + 复用通道指向导入专家
+    const events = eventsOf(out);
+    const routes = events.filter((e) => e.name === "journal" && e.data?.name === "route");
+    expect(routes.some((e) => String(e.data?.detail).includes("B:reuse"))).toBe(true);
+    const dispatches = events.filter((e) => e.name === "journal" && e.data?.name === "dispatch");
+    expect(dispatches.some((e) => String(e.data?.detail).includes("reuse bpath-parse"))).toBe(true);
+
+    // deliverable 契约：磁盘车道交付物 = 真实解析记录（非占位符），
+    // 下游 validate 的 payload 就来自这份文件
+    const parseOut = fs.readFileSync(path.join(ws, "work/parse-output.json"), "utf-8");
+    const records = JSON.parse(parseOut) as Array<Record<string, unknown>>;
+    expect(records.length).toBeGreaterThanOrEqual(4);
+    expect(records.every((x) => typeof x.title === "string" && x.title.length > 0)).toBe(true);
+  });
+
+  test("工单序列化卫生：current-spec.json 始终合法 JSON（payload 转义嵌入）", () => {
+    const ws = makeWorkspace("bpath-spec-hygiene");
+    const src = writeSample(TEST_RUN, "bpath-parse.hsl", BPATH_HARNESS);
+    expect(runOrg(["import", src, "--workspace", ws]).ok).toBe(true);
+    const r = runOrgRun(ws, path.join(ws, "out-bpath"));
+    expect(r.ok).toBe(true);
+    // 任务结束后盘上工单是合法 JSON；payload 是字符串字段（转义嵌入），
+    // 既有 harness 的 JSON.parse(payload) 语义不变
+    const spec = readJson(path.join(ws, "factory/current-spec.json"));
+    expect(typeof spec.payload).toBe("string");
+    expect(() => JSON.parse(String(spec.payload))).not.toThrow();
+  });
+
+  test("uses 计数：B 路径派单一次 → 注册表 uses+1（治理账本跟进）", () => {
+    const ws = makeWorkspace("bpath-uses");
+    const src = writeSample(TEST_RUN, "bpath-parse.hsl", BPATH_HARNESS);
+    expect(runOrg(["import", src, "--workspace", ws]).ok).toBe(true);
+    expect(Number(indexEntry(ws, "bpath-parse")!.uses)).toBe(0);
+    const r = runOrgRun(ws, path.join(ws, "out-bpath"));
+    expect(r.ok).toBe(true);
+    expect(Number(indexEntry(ws, "bpath-parse")!.uses)).toBe(1);
+  });
+});

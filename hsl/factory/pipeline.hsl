@@ -16,7 +16,7 @@
 import { TaskSpec } from "../contracts/contract.hsl";
 import { OrgError } from "../types/errors.hsl";
 import { ExpertManifest, PatchRecord } from "../registry/manifest.hsl";
-import { Registry } from "../registry/manifest.hsl";
+import { Registry, json_escape } from "../registry/manifest.hsl";
 import { ask } from "../providers/model.hsl";
 import { MINT_SPEC_PROMPT, MINT_SOURCE_PROMPT, MINT_SAMPLE_PROMPT } from "../config/resources.hsl";
 
@@ -137,7 +137,11 @@ export graph Factory(goal: String, skills: Vec<String>) -> Result<ExpertManifest
             MintStage::FixtureExam => {
                 println!("[factory] stage=Exam");
                 let sample = sample_spec(spec.clone())?;
-                let out = run_expert(spec.name.clone(), sample, String::from("factory/mint-out"));
+                // 显式约定车道（不走 resolve_dispatch_paths）：此时新专家尚未注册，
+                // 若注册表恰有同名导入专家，按名解析会劫持 Exam 寻址跑错文件。
+                let entry = format!("registry/experts/{}.hsl", spec.name);
+                let fixture = format!("factory/fixtures/{}.fixture.json", spec.name);
+                let out = run_expert_at(entry, fixture, sample, String::from("factory/mint-out"));
                 // 行为闸门：样本必须过覆盖率线（验收语义 ≠ 执行语义）
                 gate.exam_ok = out.ok && read_acceptance_coverage(String::from("factory/mint-out"));
                 gate.exam_log = out.output;
@@ -318,11 +322,63 @@ fn contains_flow_keyword(text: String) -> bool {
         || text.contains("loop") || text.contains("match ") || text.contains("fn main")
 }
 
-/// 验收样本落盘 + 嵌套执行 minted 专家（真实闸门：子进程解释器）。
+/// 派单寻址结果（run_expert 的解析产物）。
+#[derive(Debug, Clone)]
+struct DispatchPaths {
+    /// harness 入口（相对工作区）。
+    entry: String,
+    /// 嵌套 run 的剧本文件（--fixture；相对工作区）。
+    run_fixture: String,
+}
+
+/// manifest.fixture 字段的二相解析（source 分相）：
+///   source=import    → fixture 字段是嵌套 run 剧本（tracks 形态）→ 直接可用；
+///   source=factory   → fixture 字段是验收样本（TaskSpec 形态，factory/samples/）
+///                      → 不可作 --fixture，run 剧本走约定 factory/fixtures/。
+/// 语义错配（把样本当剧本传）对机械专家零轨道场景恰好无害，但任何消费
+/// $host.fixture 轨道的专家会静默拿不到剧本 —— 必须按 source 分相。
+export fn run_fixture_of(manifest: ExpertManifest) -> String {
+    if manifest.source == String::from("import") {
+        manifest.fixture_path.clone()
+    } else {
+        format!("factory/fixtures/{}.fixture.json", manifest.name)
+    }
+}
+
+/// 派单寻址（v0.4.6）：注册表登记优先，未登记回退约定车道。
+/// 背景：导入专家（org import）的 harness 与剧本都登记在 registry/harnesses/，
+/// 原先 run_expert 硬编码 registry/experts/ + factory/fixtures/ 约定 —— B/D
+/// 路径派单导入专家必然「入口文件不存在」（issue #6 实测复现）。
+/// 注册表从磁盘新鲜加载（note_use / 补丁合入都可能改版本，内存态不可信）。
+fn resolve_dispatch_paths(expert: String) -> DispatchPaths {
+    let conventional = DispatchPaths {
+        entry: format!("registry/experts/{}.hsl", expert),
+        run_fixture: format!("factory/fixtures/{}.fixture.json", expert),
+    };
+    let loaded = Registry::load(String::from("registry"));
+    match loaded {
+        Ok(reg) => {
+            let found = reg.find_by_name(expert.clone());
+            match found {
+                Some(m) => {
+                    // 登记命中：entry 尊重注册表（import 在 harnesses/，factory
+                    // 与约定同址）；run 剧本按 source 分相（见 run_fixture_of）。
+                    let fixture = run_fixture_of(m.clone());
+                    DispatchPaths { entry: m.entry_path.clone(), run_fixture: fixture }
+                },
+                None => conventional,
+            }
+        },
+        Err(_) => conventional,
+    }
+}
+
+/// 验收样本落盘 + 嵌套执行专家（真实闸门：子进程解释器）。
+/// 寻址：注册表登记优先（导入专家 → registry/harnesses/），未登记回退约定
+/// （mint Exam 时新专家尚未注册 —— 此时约定车道正是刚写入的文件）。
 export fn run_expert(expert: String, spec: TaskSpec, out_dir: String) -> ShellFlat {
-    let entry = format!("registry/experts/{}.hsl", expert);
-    let fixture = format!("factory/fixtures/{}.fixture.json", expert);
-    run_expert_at(entry, fixture, spec, out_dir)
+    let paths = resolve_dispatch_paths(expert.clone());
+    run_expert_at(paths.entry.clone(), paths.run_fixture.clone(), spec, out_dir)
 }
 
 /// 按显式 entry/fixture 执行（金丝雀双跑同晶专家的旧版本归档用）。
@@ -598,15 +654,22 @@ fn commit_registry(message: String) -> bool {
 }
 
 /// TaskSpec → JSON（current-spec.json 的写盘形态）。
+/// 序列化卫生（v0.4.6，issue #6 连带）：goal/acceptance/payload/feedback 一律
+/// json_escape 后按 JSON 字符串嵌入。原先 payload 裸插值 —— 纯文本负载
+/// （fetch/parse 角色的 raw 材料、上游占位交付物）会直接嵌坏整个工单文件，
+/// 嵌套 harness 报「工单不是合法 JSON」。字符串形态与裸 JSON 嵌入在
+/// $host.json.fields 解析后的字段值同构（fields 对对象/数组本来就 JSON 化），
+/// 既有 harness 的 JSON.parse(payload) 语义不变。
 fn spec_to_json(spec: TaskSpec) -> String {
     let mut fb_items: Vec<String> = Vec::new();
     for f in spec.feedback.iter() {
-        fb_items.push(format!("\"{}\"", f));
+        fb_items.push(format!("\"{}\"", json_escape(f.clone())));
     }
     let fb = fb_items.join(",");
     format!(
-        "{{\"task_id\":{},\"goal\":\"{}\",\"acceptance\":\"{}\",\"payload\":{},\"feedback\":[{}]}}",
-        spec.task_id, spec.goal, spec.acceptance, spec.payload, fb
+        "{{\"task_id\":{},\"goal\":\"{}\",\"acceptance\":\"{}\",\"payload\":\"{}\",\"feedback\":[{}]}}",
+        spec.task_id, json_escape(spec.goal.clone()), json_escape(spec.acceptance.clone()),
+        json_escape(spec.payload.clone()), fb
     )
 }
 

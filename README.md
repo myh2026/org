@@ -19,7 +19,7 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **当前状态**：v0.4.5 可运行实现。新增 **剧本联动（导入即能用：`org import` 自动生成占位剧本，`org ask` / `org handoff` 剧本自动发现 —— 零参数直连，`--model deepseek` 换真实回答）**；**工具库治理三动作：导入你自己的 harness（`org import`）+ 选取保留（`org keep` / `org drop`）** —— 工厂产出是候选，用户选取转正后才参与 B 路径自动复用，导入即保留即刻可复用，动作进 git 账本；直连会话新增 **上下文窗口计量（Codex 风格 meter，`[ctx]` 每轮可见）**。另有 **OpenCode 级终端前端（`org tui`）** 与 **Windows/macOS/Linux 五目标单二进制分发**（无 bun 环境全功能）。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 101 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
+> **当前状态**：v0.4.6 可运行实现。新增 **B 路径执行面（导入 harness 被任务派单真实执行：注册表登记优先寻址 + 工单序列化卫生 + deliverable 交付物契约）**；**剧本联动（导入即能用：`org import` 自动生成占位剧本，`org ask` / `org handoff` 剧本自动发现 —— 零参数直连，`--model deepseek` 换真实回答）**；**工具库治理三动作：导入你自己的 harness（`org import`）+ 选取保留（`org keep` / `org drop`）** —— 工厂产出是候选，用户选取转正后才参与 B 路径自动复用，导入即保留即刻可复用，动作进 git 账本；直连会话新增 **上下文窗口计量（Codex 风格 meter，`[ctx]` 每轮可见）**。另有 **OpenCode 级终端前端（`org tui`）** 与 **Windows/macOS/Linux 五目标单二进制分发**（无 bun 环境全功能）。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 104 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
 
 ## ✨ 为什么是 ORG
 
@@ -242,6 +242,19 @@ v0.1.0 补充一条工程事实：**C 路径是记忆化的**——注册表已�
 
 「哪些 harness 值得留下来」是用户的决策权，不是系统的默认行为——导入、选取、反悔全部
 git 留痕，构成资产层的增长率账本。
+
+**B 路径执行面（v0.4.6，导入 harness 被真实派单执行）**：`org import` 注册的 harness 不只
+能直连问答——任务派单（`org run` / demo 全叙事）命中 B 路径（`find_reusable` 能力交集 +
+语义亲和）时，**导入的 harness 经嵌套解释器车道真实执行**。派单寻址注册表登记优先
+（`registry/harnesses/`，不再假设 `registry/experts/` 约定），补丁金丝雀 / N 版本冗余的
+run 剧本同规则分相解析。磁盘车道信封契约（导入 harness 作者须知）：
+
+- **输入**：`factory/current-spec.json` 工单（goal / acceptance / payload / feedback；
+  payload 为字符串字段——上游交付物或 raw 材料原文，JSON 语义由 harness 自行判定）。
+- **输出**：`$host.artifacts.write("acceptance.json", …)` 验收工件——`coverage`（0..1）、
+  `summary`、`note` 之外可声明 **`deliverable` 字段**（如 parse 专家的记录数组 JSON）：
+  交付物经 `work/parse-output.json` 机械编接流转下游子任务（缺省占位符 `(validation
+  verdict artifact)`，不编造数据）。
 
 **上下文窗口计量（v0.4.4，Codex 风格）**：直连会话每轮把全部历史织入提示词——上下文
 占用随轮次单调增长，现在**可见**：每轮问答后打印 `[ctx] 窗口占用 ▓░░ 8.4k/131.0k（6.4%）`

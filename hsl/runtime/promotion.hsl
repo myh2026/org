@@ -20,7 +20,7 @@
 import { TaskSpec } from "../contracts/contract.hsl";
 import { OrgError } from "../types/errors.hsl";
 import { ExpertManifest, Registry } from "../registry/manifest.hsl";
-import { run_expert_at, read_run_ok, read_acceptance_details } from "../factory/pipeline.hsl";
+import { run_expert_at, read_run_ok, read_acceptance_details, run_fixture_of } from "../factory/pipeline.hsl";
 
 /// 金丝雀裁决（影子对比的出口）。
 #[derive(Debug, Clone, PartialEq)]
@@ -43,10 +43,12 @@ export async fn canary_check(
     let sample = load_canary_sample(manifest_new.fixture_path.clone())?;
     let name = manifest_new.name.clone();
 
-    // 双跑：旧版（归档）与新版（盘上当前），产物目录隔离
+    // 双跑：旧版（归档）与新版（盘上当前），产物目录隔离。
+    // run 剧本按 source 分相（导入专家的剧本在 registry/harnesses/，
+    // 约定 factory/fixtures/ 只对 factory 产物成立 —— issue #6 同根修复）。
     let old_entry = format!("registry/experts/{}@{}.hsl", name, from_version);
     let new_entry = manifest_new.entry_path.clone();
-    let fixture = format!("factory/fixtures/{}.fixture.json", name);
+    let fixture = run_fixture_of(manifest_new.clone());
     let old_ok = run_side(old_entry.clone(), fixture.clone(), sample.clone(), String::from("factory/canary-old"));
     let new_ok = run_side(new_entry.clone(), fixture.clone(), sample.clone(), String::from("factory/canary-new"));
 
@@ -123,8 +125,9 @@ export struct RedundancyVerdict {
 /// 分歧时调用方应升级仲裁（Escalate 语义），一致时置信度加成。
 export async fn redundant_dispatch(a: ExpertManifest, b: ExpertManifest, spec: TaskSpec)
     -> Result<RedundancyVerdict, OrgError> {
-    let fixture_a = format!("factory/fixtures/{}.fixture.json", a.name);
-    let fixture_b = format!("factory/fixtures/{}.fixture.json", b.name);
+    // run 剧本按 source 分相（导入专家剧本在 harnesses/，issue #6 同根）
+    let fixture_a = run_fixture_of(a.clone());
+    let fixture_b = run_fixture_of(b.clone());
     let ok_a = run_side(a.entry_path.clone(), fixture_a, spec.clone(), String::from("factory/redundancy-a"));
     let ok_b = run_side(b.entry_path.clone(), fixture_b, spec.clone(), String::from("factory/redundancy-b"));
     let da = read_acceptance_details(String::from("factory/redundancy-a"));

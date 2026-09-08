@@ -1,3 +1,0 @@
-direct session with notice-parser [demo] turn 1 :: 上周抓取任务里的字段映射规则是什么？ -> 上周抓取任务的字段映射规则：标题/日期/部门取自块内「字段: 值」行；分类由标题关键词判定（公告→announcement，通知→notice）；日期经 norm_date 判定节点归一化为 ISO 8601，无法解析的保留原文并标注 date_status=unparsed。该判定节点已固化，命中 memo 时零模型调用。
-direct session with notice-parser [demo] turn 2 :: 那日期无法解析时怎么处理？ -> 日期无法解析时保留原文并在记录里标注 date_status=unparsed（不静默丢弃）；补丁 v1.0.1 之后这些标注记录计入覆盖（flagged, not excluded），由校验专家以 flagged 语义验收。
-handoff session with notice-parser :: 帮我把上周公告解析规则整理成一句话给新同事 -> 一句话版：公告按「=== NOTICE」切块，取标题/日期/部门三字段，分类看标题关键词，日期归一化为 ISO 8601（解析不了就保留原文并标注 unparsed）。
