@@ -1,2 +1,2 @@
-{"seq":0,"ts":"2026-09-08T13:31:48.746Z","name":"run_start","data":{"entry":"/home/runner/work/org/org/demo-run/registry/experts/record-validator.hsl","model":"scripted","task":"校验记录完整性并产出验收结论","scale":"microkernel"}}
-{"seq":1,"ts":"2026-09-08T13:31:48.761Z","name":"run_end","data":{"elapsed_ms":15,"ok":true}}
+{"seq":0,"ts":"2026-09-08T13:37:00.603Z","name":"run_start","data":{"entry":"/home/z/repos/org/demo-run/registry/experts/record-validator.hsl","model":"scripted","task":"校验记录完整性并产出验收结论","scale":"microkernel"}}
+{"seq":1,"ts":"2026-09-08T13:37:00.616Z","name":"run_end","data":{"elapsed_ms":13,"ok":true}}

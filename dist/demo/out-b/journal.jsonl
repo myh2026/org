@@ -1,23 +1,23 @@
-1|2026-09-08T13:31:48.138Z|1:decompose|kernel|open|抓取某站点近一周公告，输出结构化表格
-2|2026-09-08T13:31:48.142Z|1:decompose|kernel|decompose|抓取某站点近一周公告，输出结构化表格
-3|2026-09-08T13:31:48.146Z|1:decompose|kernel|clarify|输出字段偏好：标题、日期、部门、分类？
-4|2026-09-08T13:31:48.146Z|1:decompose|kernel|clarify|日期格式用 ISO 8601 还是保留原文？
-5|2026-09-08T13:31:48.146Z|1:decompose|kernel|answer|字段偏好：标题、日期、部门、分类
-6|2026-09-08T13:31:48.147Z|1:decompose|kernel|answer|日期用 ISO 8601，无法解析的保留原文并标注
-7|2026-09-08T13:31:48.150Z|2:route|router|route|task#1 fetch -> A:inline
-8|2026-09-08T13:31:48.151Z|3:supervise|pool|dispatch|task#1 channel=inline (kernel context)
-9|2026-09-08T13:31:48.152Z|3:supervise|supervisor|review|task#1 fetch verdict=Accept coverage=1.00
-10|2026-09-08T13:31:48.155Z|3:supervise|pool|worker-done|task#1 coverage=1.00 tokens=0
-11|2026-09-08T13:31:48.156Z|2:route|router|route|task#2 parse -> B:reuse
-12|2026-09-08T13:31:48.157Z|3:supervise|pool|dispatch|task#2 channel=reuse notice-parser
-13|2026-09-08T13:31:48.173Z|3:supervise|supervisor|review|task#2 parse verdict=Accept coverage=1.00
-14|2026-09-08T13:31:48.176Z|3:supervise|pool|worker-done|task#2 coverage=1.00 tokens=480
-15|2026-09-08T13:31:48.177Z|2:route|router|route|task#3 validate -> B:reuse
-16|2026-09-08T13:31:48.177Z|3:supervise|pool|dispatch|task#3 channel=reuse record-validator
-17|2026-09-08T13:31:48.246Z|3:supervise|supervisor|review|task#3 validate verdict=Revise coverage=0.80
-18|2026-09-08T13:31:48.250Z|2:route|supervisor|patch|意见复发两次，升级补丁提案：remedy: count date_status=unparsed as valid (flagged, not excluded)
-19|2026-09-08T13:31:48.481Z|2:route|supervisor|canary|影子对比一致 → 金丝雀确认 record-validator@1.0.1（蓝绿生效）
-20|2026-09-08T13:31:48.482Z|3:supervise|supervisor|re-dispatch|task#3 revise #1: remedy: count date_status=unparsed as valid (flagged, not excluded)
-21|2026-09-08T13:31:48.482Z|3:supervise|pool|dispatch|task#3 channel=reuse record-validator
-22|2026-09-08T13:31:48.543Z|3:supervise|supervisor|review|task#3 validate verdict=Accept coverage=1.00
-23|2026-09-08T13:31:48.544Z|3:supervise|pool|worker-done|task#3 coverage=1.00 tokens=0
+1|2026-09-08T13:36:59.496Z|1:decompose|kernel|open|抓取某站点近一周公告，输出结构化表格
+2|2026-09-08T13:36:59.505Z|1:decompose|kernel|decompose|抓取某站点近一周公告，输出结构化表格
+3|2026-09-08T13:36:59.513Z|1:decompose|kernel|clarify|输出字段偏好：标题、日期、部门、分类？
+4|2026-09-08T13:36:59.540Z|1:decompose|kernel|clarify|日期格式用 ISO 8601 还是保留原文？
+5|2026-09-08T13:36:59.542Z|1:decompose|kernel|answer|字段偏好：标题、日期、部门、分类
+6|2026-09-08T13:36:59.544Z|1:decompose|kernel|answer|日期用 ISO 8601，无法解析的保留原文并标注
+7|2026-09-08T13:36:59.548Z|2:route|router|route|task#1 fetch -> A:inline
+8|2026-09-08T13:36:59.550Z|3:supervise|pool|dispatch|task#1 channel=inline (kernel context)
+9|2026-09-08T13:36:59.553Z|3:supervise|supervisor|review|task#1 fetch verdict=Accept coverage=1.00
+10|2026-09-08T13:36:59.557Z|3:supervise|pool|worker-done|task#1 coverage=1.00 tokens=0
+11|2026-09-08T13:36:59.559Z|2:route|router|route|task#2 parse -> B:reuse
+12|2026-09-08T13:36:59.560Z|3:supervise|pool|dispatch|task#2 channel=reuse notice-parser
+13|2026-09-08T13:36:59.580Z|3:supervise|supervisor|review|task#2 parse verdict=Accept coverage=1.00
+14|2026-09-08T13:36:59.583Z|3:supervise|pool|worker-done|task#2 coverage=1.00 tokens=480
+15|2026-09-08T13:36:59.585Z|2:route|router|route|task#3 validate -> B:reuse
+16|2026-09-08T13:36:59.586Z|3:supervise|pool|dispatch|task#3 channel=reuse record-validator
+17|2026-09-08T13:36:59.720Z|3:supervise|supervisor|review|task#3 validate verdict=Revise coverage=0.80
+18|2026-09-08T13:36:59.721Z|2:route|supervisor|patch|意见复发两次，升级补丁提案：remedy: count date_status=unparsed as valid (flagged, not excluded)
+19|2026-09-08T13:37:00.102Z|2:route|supervisor|canary|影子对比一致 → 金丝雀确认 record-validator@1.0.1（蓝绿生效）
+20|2026-09-08T13:37:00.103Z|3:supervise|supervisor|re-dispatch|task#3 revise #1: remedy: count date_status=unparsed as valid (flagged, not excluded)
+21|2026-09-08T13:37:00.103Z|3:supervise|pool|dispatch|task#3 channel=reuse record-validator
+22|2026-09-08T13:37:00.202Z|3:supervise|supervisor|review|task#3 validate verdict=Accept coverage=1.00
+23|2026-09-08T13:37:00.203Z|3:supervise|pool|worker-done|task#3 coverage=1.00 tokens=0
