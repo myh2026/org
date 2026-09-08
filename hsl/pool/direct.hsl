@@ -17,6 +17,7 @@ import { AccessMode, CapabilityPolicy } from "../policy/capability.hsl";
 import { ExpertError } from "../types/errors.hsl";
 import { ExpertManifest, Registry } from "../registry/manifest.hsl";
 import { ask } from "../providers/model.hsl";
+import { json_escape } from "../registry/manifest.hsl";
 
 /// 直连会话（一次 org ask = 一轮问答；多轮 = 账本上的多行）。
 /// ctx_tokens：本轮提示词+回答的上下文占用估算（Codex 风格窗口计量）。
@@ -155,7 +156,7 @@ export async fn direct(expert: String, session_id: String, question: String) -> 
     let ctx_tokens = estimate_context(m.description.clone(), history.clone(), question.clone(), answer.clone());
     let ledger_line = format!(
         "{{\"expert\":\"{}\",\"session\":\"{}\",\"turn\":{},\"question\":\"{}\",\"tokens\":{},\"ctx_tokens\":{},\"accepted\":1}}\n",
-        expert, session_id, turn, question, tokens, ctx_tokens
+        json_escape(expert), json_escape(session_id), turn, json_escape(question), tokens, ctx_tokens
     );
     let _ = native typescript {
         let prev = "";
@@ -282,7 +283,7 @@ fn append_session(expert: String, session_id: String, turn: u32, question: Strin
     let path = format!("runtime/sessions/{}/{}.jsonl", expert, session_id);
     let line = format!(
         "{{\"turn\":{},\"question\":\"{}\",\"answer\":\"{}\",\"tokens\":{},\"ctx_tokens\":{}}}\n",
-        turn, question, answer, tokens, ctx_tokens
+        turn, json_escape(question), json_escape(answer), tokens, ctx_tokens
     );
     let _ = native typescript {
         let prev = "";

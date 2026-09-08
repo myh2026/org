@@ -453,14 +453,26 @@ export function contextUsageOf(ws: string, expert: string, session: string, desc
   let billed = 0;
   let qaChars = 0;
   let turns = 0;
-  for (const line of raw.split("\n")) {
-    if (line.trim().length === 0) continue;
+  // 记录边界重组：历史账本存在 format! 裸插值形态（多行 answer 带字面换行，
+  // 一条记录跨多行）。按 "\n{"turn": 重组后逐条解析：先标准 JSON，
+  // 再退回字段定长布局的修复式（兼容存量坏账本，统计不再漏记）。
+  const segments = raw.split(/\n(?=\{"turn":)/);
+  for (const seg of segments) {
+    const t = seg.trim();
+    if (t.length === 0) continue;
+    let o: { question?: string; answer?: string; tokens?: number } | null = null;
     try {
-      const o = JSON.parse(line) as { question?: string; answer?: string; tokens?: number };
-      turns += 1;
-      billed += Number(o.tokens ?? 0);
-      qaChars += (o.question ?? "").length + (o.answer ?? "").length;
-    } catch { /* 坏行容忍 */ }
+      o = JSON.parse(t) as { question?: string; answer?: string; tokens?: number };
+    } catch {
+      const m = t.match(
+        /^\{"turn":\d+,"question":"([\s\S]*?)","answer":"([\s\S]*)","tokens":(\d+),"ctx_tokens":\d+\}$/,
+      );
+      if (m) o = { question: m[1], answer: m[2], tokens: Number(m[3]) };
+    }
+    if (!o) continue; // 坏行容忍
+    turns += 1;
+    billed += Number(o.tokens ?? 0);
+    qaChars += (o.question ?? "").length + (o.answer ?? "").length;
   }
   const context = estimateTokens(description) + Math.ceil(qaChars / 3) + 32 * turns;
   return { expert, session, turns, billed, context, window: CONTEXT_WINDOW_TOKENS };
