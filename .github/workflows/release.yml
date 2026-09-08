@@ -56,6 +56,12 @@ jobs:
         with:
           bun-version: latest
 
+      # payload 前置再生（防陈旧内嵌）：单二进制经 build/payload.json 内嵌
+      # hsl/toolchain/demo-ws/fixtures 源 —— 编译前再生，不依赖提交纪律
+      # （v0.4.6 发布曾因 tag 树上 payload 陈旧，二进制内嵌旧版源码）。
+      - name: payload 再生（内嵌源与仓库同步）
+        run: bun scripts/build-bin.ts --payload-only
+
       - name: 编译 ${{ matrix.target }}
         run: |
           NAME="org"
