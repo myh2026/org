@@ -207,3 +207,52 @@ describe("上下文窗口计量（Codex 风格）", () => {
     expect(r.stdout).toMatch(/ctx ▓░+/);
   });
 });
+
+describe("剧本联动（导入即能用：占位剧本 + 自动发现，v0.4.5）", () => {
+  test("导入生成占位剧本：manifest.fixture 指向存在文件 + direct/handoff 双轨道", () => {
+    const ws = makeWorkspace("fixgen");
+    const src = writeSample(TEST_RUN, "fixgen-probe.hsl");
+    expect(runOrg(["import", src, "--workspace", ws]).ok).toBe(true);
+    const e = indexEntry(ws, "fixgen-probe")!;
+    expect(String(e.fixture)).toBe("registry/harnesses/fixgen-probe.fixture.json");
+    const fx = readJson(path.join(ws, "registry/harnesses/fixgen-probe.fixture.json"));
+    const tracks = Object.keys(fx.tracks as Record<string, string[]>);
+    expect(tracks).toContain("direct:fixgen-probe");
+    expect(tracks).toContain("handoff:fixgen-probe");
+    expect((fx.tracks as Record<string, string[]>)["direct:fixgen-probe"]!.length).toBeGreaterThanOrEqual(3);
+  });
+
+  test("零参数 ask：不传 --fixture 自动发现占位剧本（占位应答 + 记账 + ctx meter）", () => {
+    const ws = makeWorkspace("fixask");
+    const src = writeSample(TEST_RUN, "fixask-probe.hsl");
+    expect(runOrg(["import", src, "--workspace", ws]).ok).toBe(true);
+    const r = runOrg(["ask", "fixask-probe", "这是什么工具？", "--workspace", ws]);
+    if (!r.ok) console.error(r.stdout + r.stderr);
+    expect(r.ok).toBe(true);
+    expect(r.stdout).toContain("使用导入剧本");
+    expect(r.stdout).toContain("占位剧本应答");
+    expect(r.stdout).toContain("[ctx] 窗口占用");
+    // 会话账本落盘（零摩擦链路的完整闭环）
+    expect(exists(path.join(ws, "runtime/sessions/fixask-probe/default.jsonl"))).toBe(true);
+  });
+
+  test("handoff 同规则：自动发现 handoff:<name> 占位轨道", () => {
+    const ws = makeWorkspace("fixhand");
+    const src = writeSample(TEST_RUN, "fixhand-probe.hsl");
+    expect(runOrg(["import", src, "--workspace", ws]).ok).toBe(true);
+    const r = runOrg(["handoff", "fixhand-probe", "--task", "总结一句话", "--workspace", ws]);
+    if (!r.ok) console.error(r.stdout + r.stderr);
+    expect(r.ok).toBe(true);
+    expect(r.stdout).toContain("占位剧本应答");
+  });
+
+  test("显式 --fixture 优先于自动发现（fixtureExplicit 语义）", () => {
+    const ws = makeWorkspace("fixexplicit");
+    const src = writeSample(TEST_RUN, "fixexp-probe.hsl");
+    expect(runOrg(["import", src, "--workspace", ws]).ok).toBe(true);
+    // 显式传 stock fixture：其中没有 direct:fixexp-probe 轨道 → 失败可证显式优先
+    const r = runOrg(["ask", "fixexp-probe", "q", "--workspace", ws, "--fixture", path.join(ROOT, "fixtures/run-notices.json")]);
+    expect(r.ok).toBe(false);
+    expect((r.stdout + r.stderr)).not.toContain("使用导入剧本");
+  });
+});

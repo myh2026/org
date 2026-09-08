@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // ============================================================================
-// org/cli/org.ts — ORG 命令行（v0.4.4）
+// org/cli/org.ts — ORG 命令行（v0.4.5）
 // ----------------------------------------------------------------------------
 //   org run --task "..."          团队模式派单（监督回路全流程）
 //   org demo                      全叙事演示：铸专家 → 用户选取保留 → 复用+补丁+金丝雀
@@ -27,9 +27,9 @@ import * as path from "node:path";
 import { ROOT, DEFAULT_WORKSPACE } from "../lib/root.ts";
 import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          loadRegistryIndex, setRetained, keepAllCandidates,
-         importHarness, listContextUsage, renderContextMeter } from "../lib/engine.ts";
+         importHarness, listContextUsage, renderContextMeter, expertFixtureOf } from "../lib/engine.ts";
 
-const VERSION = "0.4.4";
+const VERSION = "0.4.5";
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const HANDOFF_ENTRY = path.join(ROOT, "hsl/pool/handoff.hsl");
@@ -79,6 +79,7 @@ interface Args {
   name: string;
   description: string;
   capabilities: string[];
+  fixtureExplicit: boolean;
   rest: string[];
 }
 
@@ -98,6 +99,7 @@ function parseArgs(argv: string[]): Args {
     name: "",
     description: "",
     capabilities: [],
+    fixtureExplicit: false,
     rest: [],
   };
   let i = 1;
@@ -105,7 +107,7 @@ function parseArgs(argv: string[]): Args {
     const v = argv[i]!;
     if (v === "--task") a.task = argv[++i] ?? "";
     else if (v === "--workspace") a.workspace = path.resolve(argv[++i] ?? ".");
-    else if (v === "--fixture") a.fixture = path.resolve(argv[++i] ?? ".");
+    else if (v === "--fixture") { a.fixture = path.resolve(argv[++i] ?? "."); a.fixtureExplicit = true; }
     else if (v === "--model") a.model = argv[++i] ?? "scripted";
     else if (v === "--out") a.out = path.resolve(argv[++i] ?? ".");
     else if (v === "--run") a.runDir = path.resolve(argv[++i] ?? ".");
@@ -431,9 +433,19 @@ async function cmdAsk(a: Args): Promise<number> {
   };
   if (turns.length === 1) env.ORG_ASK_QUESTION = turns[0]!;
   else env.ORG_ASK_TURNS = JSON.stringify(turns);
+  // 剧本自动发现：导入 harness 自带占位剧本（manifest.fixture）—— 不传
+  // --fixture 也能立即 scripted 问答（零摩擦）；显式 --fixture 优先。
+  let fixture = a.fixture;
+  if (!a.fixtureExplicit) {
+    const found = expertFixtureOf(a.workspace, expert);
+    if (found) {
+      fixture = found;
+      console.log(`ℹ 使用导入剧本 ${path.relative(a.workspace, found)}（占位应答 · --model deepseek 换真实回答）`);
+    }
+  }
   const r = await runHsl(DIRECT_ENTRY, {
     workspace: a.workspace, task: `(direct) ${turns.join(" / ")}`, model: a.model,
-    fixture: a.fixture, out, env,
+    fixture, out, env,
   });
   process.stdout.write(r.out);
   return r.ok ? 0 : 1;
@@ -447,9 +459,18 @@ async function cmdHandoff(a: Args): Promise<number> {
   }
   ensureWorkspace(a.workspace);
   const out = a.out || path.join(a.workspace, "out-handoff");
+  // 剧本自动发现（与 cmdAsk 同规则）：导入 harness 的 handoff:<name> 占位轨道
+  let fixture = a.fixture;
+  if (!a.fixtureExplicit) {
+    const found = expertFixtureOf(a.workspace, expert);
+    if (found) {
+      fixture = found;
+      console.log(`ℹ 使用导入剧本 ${path.relative(a.workspace, found)}（占位应答 · --model deepseek 换真实回答）`);
+    }
+  }
   const r = await runHsl(HANDOFF_ENTRY, {
     workspace: a.workspace, task: `(handoff) ${a.task}`, model: a.model,
-    fixture: a.fixture, out,
+    fixture, out,
     env: { ORG_HANDOFF_EXPERT: expert, ORG_HANDOFF_TASK: a.task },
   });
   process.stdout.write(r.out);
@@ -496,7 +517,8 @@ async function cmdImport(a: Args): Promise<number> {
     console.log(`  描述：${r.description}`);
     console.log(`  能力：${r.capabilities.join(", ")}`);
     console.log(`  入库：${path.relative(process.cwd(), r.file)}（source=import · retained=true · B 路径即刻可复用）`);
-    console.log("  下一步：org status 查看 · org ask " + r.name + ' "…" 直连 · org drop ' + r.name + " 取消保留");
+    console.log(`  剧本：${path.relative(process.cwd(), r.fixture)}（scripted 占位应答 · org ask ${r.name} "…" 零参数直连）`);
+    console.log("  下一步：org status 查看 · org ask " + r.name + ' "…" 直连（占位剧本 · --model deepseek 换真实回答） · org drop ' + r.name + " 取消保留");
     return 0;
   } catch (err) {
     console.error(`✗ 导入失败：${(err as Error).message}`);

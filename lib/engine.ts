@@ -1,5 +1,5 @@
 // ============================================================================
-// org/lib/engine.ts — 引擎桥：CLI 与 TUI 共用（v0.4.4，规格书 §4）
+// org/lib/engine.ts — 引擎桥：CLI 与 TUI 共用（v0.4.5，规格书 §4）
 // ----------------------------------------------------------------------------
 // 主路径：spawn `bun <dhv-ts> run <entry> --workspace --task --model --fixture
 // --out --allow bun,node,ls,cat,grep,diff,git`（与 cli/org.ts runHsl 同参），
@@ -300,6 +300,7 @@ export interface ImportResult {
   description: string;
   capabilities: string[];
   checkOutput: string;
+  fixture: string;            // 随导入生成的占位剧本（direct:/handoff: 轨道）
 }
 
 /** 校验 harness 名（与专家名同域：小写字母/数字/连字符）。 */
@@ -376,6 +377,16 @@ export async function importHarness(
   const dest = path.join(harnessDir, `${name}.hsl`);
   fs.copyFileSync(file, dest);
 
+  // 剧本联动（导入即能用）：占位剧本 direct:<name>（3 轮）+ handoff:<name>（1 轮）
+  // 轨道 —— scripted 模式 org ask/handoff 立即可问答（记账/会话账本/ctx meter
+  // 全链路可验证）；真实回答切 --model deepseek（fixture 不参与真实模式）。
+  const placeholder = `[imported harness ${name}] 占位剧本应答（导入时自动生成，供 scripted 链路验证）。真实回答请 --model deepseek。`;
+  const fixtureRel = `registry/harnesses/${name}.fixture.json`;
+  fs.writeFileSync(
+    path.join(ws, fixtureRel),
+    JSON.stringify({ tracks: { [`direct:${name}`]: [placeholder, placeholder, placeholder], [`handoff:${name}`]: [placeholder] } }, null, 2) + "\n",
+  );
+
   // 注册：index.json + 每专家副本（与 setRetained 双写形态一致）
   const entry: Record<string, unknown> = {
     name,
@@ -388,7 +399,7 @@ export async function importHarness(
     eval_score: 0.0,   // 诚实边界：未评估（不是 1.0 —— 导入 ≠ 已验证）
     pass_rate: 0.0,
     entry: `registry/harnesses/${name}.hsl`,
-    fixture: "",
+    fixture: fixtureRel,
     uses: 0,
     retained: true,    // 用户导入 = 用户保留（区别于 factory 候选）
     provenance: [{ imported_from: path.basename(file), at: new Date().toISOString() }],
@@ -401,6 +412,7 @@ export async function importHarness(
   return {
     name, version: "0.1.0", file: dest,
     description, capabilities, checkOutput: checkRes.out.trim(),
+    fixture: path.join(ws, fixtureRel),
   };
 }
 
@@ -488,6 +500,18 @@ export function renderContextMeter(usage: { context: number; window: number }): 
   const bar = "▓".repeat(filled) + "░".repeat(cells - filled);
   const fmt = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
   return `${bar} ${fmt(usage.context)}/${fmt(usage.window)}（${(pct * 100).toFixed(1)}%）`;
+}
+
+/** 直连剧本自动发现（导入 harness 的零摩擦消费链）：专家 manifest 的
+ *  fixture 字段（相对工作区）存在即返回绝对路径；否则 null（调用方回退
+ *  STOCK_FIXTURE）。CLI org ask 与 TUI ?专家 共用 —— 导入的 harness
+ *  不传 --fixture 也能立即 scripted 问答。 */
+export function expertFixtureOf(ws: string, expert: string): string | null {
+  const hit = loadRegistryIndex(ws).find((m) => m.name === expert);
+  const rel = hit ? String((hit as Record<string, unknown>).fixture ?? "") : "";
+  if (!rel) return null;
+  const abs = path.join(ws, rel);
+  return fs.existsSync(abs) ? abs : null;
 }
 
 // ---------- 产物读取 ----------
@@ -881,7 +905,11 @@ export function startRun(opts: RunOptions): RunHandle {
       ensureWorkspace(opts.workspace);
       fs.mkdirSync(outDir, { recursive: true });
       const entryFile = opts.entry === "direct" ? DIRECT_ENTRY : HSL_ENTRY;
-      const fixture = opts.fixture ?? STOCK_FIXTURE;
+      // 直连剧本自动发现：导入 harness 自带占位剧本（manifest.fixture）——
+      // TUI ?专家 不传 fixture 也能立即 scripted 问答（零摩擦消费链）
+      const fixture = opts.fixture
+        ?? (opts.entry === "direct" && opts.expert ? expertFixtureOf(opts.workspace, opts.expert) : null)
+        ?? STOCK_FIXTURE;
       const args = [
         "run", entryFile,
         "--workspace", opts.workspace,

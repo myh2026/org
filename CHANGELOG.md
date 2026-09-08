@@ -1,5 +1,26 @@
 # CHANGELOG
 
+## v0.4.5（2026-09-08）
+
+**剧本联动：导入即能用（零摩擦消费链）**。`org import` 自动生成占位剧本
+（`registry/harnesses/<name>.fixture.json`：`direct:<name>` 3 轮 +
+`handoff:<name>` 1 轮轨道）；`org ask` / `org handoff` / TUI `?专家`
+不传 `--fixture` 时按 manifest.fixture 字段自动发现 —— 导入的 harness
+零参数即可 scripted 问答（记账 / 会话账本 / `[ctx]` 计量全链路可验证），
+真实回答切 `--model deepseek`。显式 `--fixture` 优先（fixtureExplicit 语义）。
+
+### 新增
+
+- **占位剧本生成**（engine.ts importHarness）：direct/handoff 双轨道
+  随导入落盘；manifest `fixture` 字段登记相对路径（导入命令输出含剧本行）。
+- **剧本自动发现**（engine.ts `expertFixtureOf`）：CLI ask/handoff 与
+  TUI 直连（startRun direct 路径）共用；自动发现时打印 `ℹ 使用导入剧本 …`
+  提示（含 deepseek 切换指引）。
+- **CLI `--fixture` 显式语义**（fixtureExplicit）：显式传参优先于自动发现
+  —— 用户显式指定不被静默覆盖。
+- 测试：tests/import.test.ts 新增「剧本联动」组 4 用例（剧本生成/零参数
+  ask/handoff 同规则/显式优先）；全套 101 用例全绿。
+
 ## v0.4.4（2026-09-08）
 
 **工具库治理第三动作 `org import`（导入你自己的 harness）+ 上下文窗口计量（Codex 风格）**。
