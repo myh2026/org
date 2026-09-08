@@ -208,7 +208,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     expect(logs.length).toBeGreaterThan(5);
     const joined = logs.map((l) => l.line).join("\n");
     expect(joined).toContain("dhv-ts");            // banner（工具链身份行）
-    expect(joined).toContain("hsl/pool/direct.hsl"); // 配置行（入口）
+    expect(joined).toMatch(/hsl[\\/]pool[\\/]direct\.hsl/); // 配置行（入口，路径分隔符平台无关）
     expect(joined).toContain("[direct]");           // 回答头行
     expect(joined).toContain("harness 返回 Ok");    // 收尾行
     // done：AskOutcome 整体
