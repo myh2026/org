@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
 // ============================================================================
-// org/cli/org.ts — ORG 命令行（v0.4.6）
+// org/cli/org.ts — ORG 命令行（v0.4.7）
 // ----------------------------------------------------------------------------
 //   org run --task "..."          团队模式派单（监督回路全流程）
 //   org demo                      全叙事演示：铸专家 → 用户选取保留 → 复用+补丁+金丝雀
 //                                 → 蓝绿验证 → 多轮直连 → 暖移交
 //   org ask <expert> "q" [--session id] [--turns "q1","q2"]
 //                                 直连指定专家（记账 + 纪要回写 + 会话账本）
+//   org web [--port N]            Web GUI 原型（Bun.serve 零依赖：会话侧栏 +
+//                                 对话视图 + 观测元数据；实现见 web/entry.ts）
 //   org handoff <expert> --task "..."   转接模式（主控移交摘要 → 专家代答）
 //   org keep <expert...>          工具库治理：选取保留 harness（候选 → 转正）
 //   org drop <expert...>          工具库治理：取消保留（不再参与 B 路径自动复用）
@@ -29,7 +31,7 @@ import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          loadRegistryIndex, setRetained, keepAllCandidates,
          importHarness, listContextUsage, renderContextMeter, expertFixtureOf } from "../lib/engine.ts";
 
-const VERSION = "0.4.6";
+const VERSION = "0.4.7";
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const HANDOFF_ENTRY = path.join(ROOT, "hsl/pool/handoff.hsl");
@@ -732,6 +734,17 @@ async function cmdTui(a: Args): Promise<number> {
   return tuiMain(args);
 }
 
+// ---- Web GUI 原型（Bun.serve 零依赖；实现见 web/entry.ts） ----
+// 进程内加载（与 cmdTui 同模式：bun compile 会把 web/ 静态打进单文件）
+async function cmdWeb(a: Args): Promise<number> {
+  const { webMain } = await import("../web/entry.ts");
+  const args: string[] = [];
+  if (a.workspace) args.push("--workspace", a.workspace);
+  if (a.model && a.model !== "scripted") args.push("--model", a.model);
+  args.push(...a.rest); // --port N 由此转交（parseArgs 不认识的旗标进 rest）
+  return webMain(args);
+}
+
 async function main(): Promise<number> {
   const [cmd, ...rest] = process.argv.slice(2);
   const a = parseArgs([cmd ?? "help", ...rest]);
@@ -748,6 +761,7 @@ async function main(): Promise<number> {
     case "replay": return cmdReplay(a);
     case "check": return cmdCheck();
     case "tui": return cmdTui(a);
+    case "web": return cmdWeb(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -779,6 +793,9 @@ async function main(): Promise<number> {
       dhv check 全部 HSL 源码（hsl/ 源码 + dist/ 产物中的铸出专家）
   org tui [--workspace DIR] [":demo"|":replay out-…"]
       组织驾驶舱（OpenCode 级终端前端）：三区布局 · 事件卡片流 · 四态裁决徽标
+  org web [--port N] [--workspace DIR]
+      Web GUI 原型（Bun.serve 零依赖，默认 4600）：专家卡 + 会话侧栏 + 对话
+      视图（观测元数据 tokens/耗时/ctx 窗口计量；scripted 占位剧本秒回）
 
 仓库布局：hsl/ = HSL 源码；toolchain/dhv-ts = 内嵌解释器（vendored）；
           demo-run/ = 本地构建目录（git 忽略）；dist/ = 编译产物（入库）

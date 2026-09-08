@@ -1,5 +1,47 @@
 # CHANGELOG
 
+## v0.4.7（2026-09-08）
+
+**Web GUI 原型：`org web` 子命令（issue #10 路线图 1-3 点）**。Bun.serve 起
+零依赖轻量 HTTP（默认端口 4600，`--port N` 覆盖，避开本机 3000/3030/5000），
+单页内联 HTML（无静态文件 / 无第三方依赖，原生 fetch 交互，深色琥珀主题）。
+GUI 只是薄渲染层 —— 逻辑全部复用 CLI 同一代码路径；orgAgent 图形界面长在
+产品仓库里。
+
+### 新增
+
+- **`org web [--port N] [--workspace DIR]`**（web/entry.ts，CLI 进程内
+  import，与 tui 同模式）：三区布局 —— 左侧专家卡（★ 保留 / ○ 候选 /
+  import 徽标）+ 会话侧栏（id / 轮数 / 相对时间 / 首问预览，点击装载历史）；
+  主区对话视图（消息气泡 + 观测元数据行 tokens / 耗时 / `[ctx]` 窗口计量
+  进度条）+ 底部输入框（选专家 + 提问 + 新会话）；顶部 org status 摘要条。
+- **只读面**：`GET /api/status`（专家清单 loadRegistryIndex + 会话上下文
+  占用 listContextUsage，与 org status 同数据源；读命令遵循 demo-run 活
+  数据优先 / dist/demo 快照兜底）· `GET /api/sessions?expert=X`（会话列表）·
+  `GET /api/session/<E>/<S>`（逐轮 question/answer/tokens/ctx_tokens）。
+- **账本健壮解析**（parseLedgerRaw）：org 的 append_session 用 format!
+  裸插值，多行 answer 带字面换行落盘破坏逐行 JSON —— 先按 `\n{"turn":`
+  记录边界重组，逐条先试标准 JSON.parse，失败再用字段定长布局的修复式
+  正则兜底（兼容 v0.4.6 前存量坏账本）。
+- **交互面 `POST /api/ask`**：进程内直连（DIRECT_ENTRY + ORG_ASK_EXPERT/
+  SESSION/QUESTION env + expertFixtureOf 剧本自动发现 + dhvRun 双车道，
+  不 spawn CLI 自身）；stdout 解析 `[direct]` 行 → answer 正文（多行，
+  止于 `[ctx]` 行）→ `harness 返回 Ok（Y ms）`；响应
+  `{ok, answer, tokens, ctxLine, durationMs, turn, logs}`；ask 单飞队列
+  （串行锁）防并发互踩 workspace/out-ask；model 缺省 scripted（占位
+  剧本秒回）。
+- **安全**：服务只听 127.0.0.1（本地 GUI 原型）；expert/session 名白名单
+  正则（防路径穿越）。
+- 测试：tests/web.test.ts 14 用例（端到端：页面/状态/会话列表/ask 两轮
+  ctx 单调增长/防呆 400/404；纯函数：账本双形态解析、stdout 单/多轮形态
+  解析）；全套 118 用例全绿（原 104 零回归）。
+- 文档：README「Web GUI 原型」段落 + 快速开始 `org web` 步骤。
+
+### 已知边界
+
+- issue #10 路线图第 4 点（事件总线 WebSocket 拓扑观测高亮）未做。
+- ask 长任务无流式（SSE/流式回传是后续项；当前一次性响应）。
+
 ## v0.4.6（2026-09-08）
 
 **B 路径执行面：导入 harness 被任务派单真实执行（issue #6）**。`org import`

@@ -1,6 +1,6 @@
 {
   "name": "org-harness",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "repository": {
     "type": "git",
     "url": "https://github.com/myh2026/org"
@@ -19,7 +19,8 @@
     "score": "bun cli/org.ts score",
     "handoff": "bun cli/org.ts handoff",
     "tui": "bun tui/main.tsx",
-    "tui:smoke": "bun tui/smoke.ts"
+    "tui:smoke": "bun tui/smoke.ts",
+    "web": "bun cli/org.ts web"
   },
   "type": "module",
   "devDependencies": {
