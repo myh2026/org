@@ -119,3 +119,43 @@ jobs:
           "$BIN" demo | tail -3
           "$BIN" tui --print > frame.txt && head -3 frame.txt
           test -s frame.txt && echo "✓ TUI 帧非空（原生 ${{ matrix.os }}）"
+
+  # ── 跨平台机制级测试（Windows / macOS 跑全量 84 用例） ─────────────────────
+  # 补齐 Windows/macOS 上的机制级测试覆盖：此前 native-smoke 只做单二进制冒烟
+  # （check / demo / TUI 帧），84 个机制级测试（结构闸门 / README 走读 / 动力
+  # 学点火）从未在非 linux 平台跑过，路径语义与运行时差异只能靠单二进制车道
+  # 间接暴露。本 job 在真实 macOS / Windows 运行器上以 bun 车道完整执行
+  # check + bun test + TUI 冒烟。linux 已由 verify job 覆盖，故矩阵不含
+  # ubuntu（且避免 dist/ 产物回写 git push 的矩阵并发冲突，本 job 无任何
+  # 回写步骤）。
+  cross-platform-tests:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # 幂等：仓库已 vendored toolchain/dhv-ts，此步通常直接命中退出
+      - name: HSL 工具链就位（vendored 优先）
+        shell: bash
+        run: bun scripts/setup-hsl.ts
+
+      - name: dhv check 全部 HSL 源码（hsl/ + probe/ + dist/ 铸出专家）
+        shell: bash
+        run: bun cli/org.ts check
+
+      - name: 机制级测试（结构闸门 / README 走读 / 动力学点火）
+        shell: bash
+        run: bun test tests/
+
+      # TUI：离屏冒烟（纯渲染 + 事件管线 + 进程内桥真实执行），无 TTY 可跑
+      - name: TUI 冒烟（离屏 20 断言 + 进程内引擎桥）
+        shell: bash
+        run: bun tui/smoke.ts
