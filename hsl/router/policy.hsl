@@ -11,7 +11,7 @@
 // ============================================================================
 
 import { RoutePath, SubTask } from "../types/state.hsl";
-import { ExpertManifest, Registry } from "../registry/manifest.hsl";
+import { ExpertManifest, Registry, duty_words } from "../registry/manifest.hsl";
 import { OrgError } from "../types/errors.hsl";
 
 /// 路由决策输入（池侧视角：在岗实例影响 D 路径可用性）。
@@ -58,8 +58,8 @@ export fn route(subtask: SubTask, ctx: RouteContext) -> Result<RoutePath, OrgErr
         return Ok(RoutePath::Inline);
     }
 
-    // B 复用：注册表命中
-    let found = ctx.registry.find(subtask.goal.clone(), &subtask.skills);
+    // B 复用：注册表命中（只命中用户保留资产 —— factory 候选需 org keep 转正）
+    let found = ctx.registry.find_reusable(subtask.goal.clone(), &subtask.skills);
     match found {
         Some(manifest) => {
             return Ok(RoutePath::Reuse { expert: manifest.name });
@@ -95,11 +95,12 @@ fn warm_duty_hit(subtask: SubTask, ctx: RouteContext) -> Option<String> {
     best
 }
 
-/// 职责域重合度（goal 与描述的词面重合计数）。
+/// 职责域重合度（goal 与描述的词面重合计数；CJK 三元滑窗参 duty_words ——
+/// 闸门判定用 3 字连续子串，强度与整词匹配等价，2 字杂散重合不触发）。
 fn duty_affinity(manifest: ExpertManifest, goal: String) -> u32 {
-    let words = goal.split(" ");
+    let words = duty_words(goal);
     let mut score: u32 = 0;
-    for w in words {
+    for w in words.iter() {
         if w.len() >= 2 && manifest.description.contains(w.as_str()) {
             score += 1;
         }

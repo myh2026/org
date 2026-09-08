@@ -1,14 +1,16 @@
 #!/usr/bin/env bun
 // ============================================================================
-// org/cli/org.ts — ORG 命令行（v0.4.2）
+// org/cli/org.ts — ORG 命令行（v0.4.3）
 // ----------------------------------------------------------------------------
 //   org run --task "..."          团队模式派单（监督回路全流程）
-//   org demo                      全叙事演示：铸专家 → 复用+补丁+金丝雀 → 蓝绿
-//                                 验证 → 多轮直连 → 暖移交
+//   org demo                      全叙事演示：铸专家 → 用户选取保留 → 复用+补丁+金丝雀
+//                                 → 蓝绿验证 → 多轮直连 → 暖移交
 //   org ask <expert> "q" [--session id] [--turns "q1","q2"]
 //                                 直连指定专家（记账 + 纪要回写 + 会话账本）
 //   org handoff <expert> --task "..."   转接模式（主控移交摘要 → 专家代答）
-//   org status                    库 / 池 / 资产状态
+//   org keep <expert...>          工具库治理：选取保留 harness（候选 → 转正）
+//   org drop <expert...>          工具库治理：取消保留（不再参与 B 路径自动复用）
+//   org status                    库 / 池 / 资产状态（★ 保留 · ○ 候选）
 //   org score [--axis a]          模型评分卡与证据来源
 //   org replay --run <dir>        确定性重放某次历史运行（journal 时间线）
 //   org check                     dhv check 全部 HSL 源
@@ -21,9 +23,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ROOT, DEFAULT_WORKSPACE } from "../lib/root.ts";
-import { dhvRun, assertWorkspaceNotTemplate } from "../lib/engine.ts";
+import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
+         loadRegistryIndex, setRetained, keepAllCandidates } from "../lib/engine.ts";
 
-const VERSION = "0.4.2";
+const VERSION = "0.4.3";
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const HANDOFF_ENTRY = path.join(ROOT, "hsl/pool/handoff.hsl");
@@ -156,9 +159,11 @@ async function cmdDemo(a: Args): Promise<number> {
   console.log("╚════════════════════════════════════════════════════════════════╝");
   console.log(`  工作区 ${ws}（git 注册表） · 任务「${task}」 · 模式 ${a.model}\n`);
 
-  // 工作区重置（演示可重复）；模板目录只读守卫（防叙事污染，见 engine.ts）
+  // 工作区重置（演示可重复）；模板目录只读守卫 + 非工作区目录拒绝删除
+  // （rmSync 脚枪防线：指错目录不再静默删光，见 engine.ts assertSafeResetWorkspace）
   try {
     assertWorkspaceNotTemplate(ws);
+    assertSafeResetWorkspace(ws);
   } catch (err) {
     console.error(`✗ ${(err as Error).message}`);
     return 2;
@@ -173,6 +178,18 @@ async function cmdDemo(a: Args): Promise<number> {
       id: "A", label: "run A · 现场铸专家（工厂闸门）+ 过程审查（返工）+ 固化起步",
       out: path.join(ws, "out-a"),
       fn: () => runHsl(HSL_ENTRY, { workspace: ws, task, model: a.model, fixture: a.fixture, out: path.join(ws, "out-a") }),
+    },
+    {
+      // 用户选取（工具库治理）：工厂产出是候选（retained=false），B 路径只
+      // 复用用户保留的资产。scripted 演示自动全选（真实用户用 org keep 挑选）。
+      id: "K", label: "用户选取 · harness 候选转正保留（org keep；scripted 自动全选）",
+      out: "",
+      fn: async () => {
+        const picked = keepAllCandidates(ws);
+        const line = picked.length > 0 ? picked.join(", ") : "（无候选 —— 存量资产均已保留）";
+        console.log(`    ★ 保留 ${line}（未保留候选不参与 B 路径自动复用）`);
+        return { ok: true, out: "" };
+      },
     },
     {
       id: "B", label: "run B · 复用资产（零工厂）+ 意见复发 → 补丁合入 → 金丝雀影子晋升",
@@ -437,6 +454,52 @@ function defaultWorkspace(a: Args): string {
   return a.workspace;
 }
 
+// ---- 工具库治理：用户选取保留（实现见 lib/engine.ts，CLI/TUI 共用） ----
+
+async function cmdKeep(a: Args): Promise<number> {
+  return cmdRetain(a, true);
+}
+
+async function cmdDrop(a: Args): Promise<number> {
+  return cmdRetain(a, false);
+}
+
+async function cmdRetain(a: Args, retained: boolean): Promise<number> {
+  const names = a.rest;
+  const action = retained ? "keep（选取保留）" : "drop（取消保留）";
+  if (names.length === 0) {
+    console.error(`用法：org ${retained ? "keep" : "drop"} <expert> [expert2 ...] [--workspace DIR]`);
+    const experts = loadRegistryIndex(a.workspace);
+    if (experts.length > 0) {
+      const list = experts.map((m) => `  ${m.retained === false ? "○" : "★"} ${m.name}@${m.version} [${m.source}]`);
+      console.error(`当前注册表：\n${list.join("\n")}`);
+    }
+    return 2;
+  }
+  // dist/demo 是入库快照（只读）—— 写入会污染编译产物层
+  if (path.resolve(a.workspace) === path.join(ROOT, "dist", "demo")) {
+    console.error("✗ dist/demo 是入库快照（只读）。请对真实工作区操作：org demo 后用 demo-run，或 --workspace <dir>");
+    return 2;
+  }
+  if (!fs.existsSync(path.join(a.workspace, "registry/index.json"))) {
+    console.error(`✗ 工作区 ${a.workspace} 无注册表（先 org demo / org run）`);
+    return 2;
+  }
+  const { kept, missing } = setRetained(a.workspace, names, retained);
+  if (kept.length > 0) {
+    const mark = retained ? "★" : "○";
+    console.log(`${mark} ${action}：${kept.join(", ")}（git 留痕）`);
+    console.log(retained
+      ? "  候选已转正：B 路径自动复用从下一轮派单开始命中。"
+      : "  已取消保留：B 路径不再自动复用（显式寻址 ?专家 与 C 路径记忆化派单仍可用）。");
+  }
+  if (missing.length > 0) {
+    console.error(`✗ 未在注册表找到：${missing.join(", ")}`);
+    return 1;
+  }
+  return 0;
+}
+
 async function cmdStatus(a: Args): Promise<number> {
   const ws = defaultWorkspace(a);
   console.log(`ORG status · 工作区 ${ws}\n`);
@@ -444,9 +507,15 @@ async function cmdStatus(a: Args): Promise<number> {
   const index = path.join(ws, "registry/index.json");
   if (fs.existsSync(index)) {
     const experts = JSON.parse(fs.readFileSync(index, "utf-8")) as Array<Record<string, unknown>>;
+    const candidates = experts.filter((m) => m.source === "factory" && m.retained === false);
     console.log("registry（磁盘资产层）：");
     for (const m of experts) {
-      console.log(`  ${m.name}@${m.version} [${m.source}] eval=${m.eval_score} uses=${m.uses} entry=${m.entry}`);
+      const mark = m.retained === false ? "○" : "★";
+      const tag = m.retained === false ? "candidate" : "retained";
+      console.log(`  ${mark} ${m.name}@${m.version} [${m.source}] eval=${m.eval_score} uses=${m.uses} ${tag} entry=${m.entry}`);
+    }
+    if (candidates.length > 0) {
+      console.log(`\n  ○ 候选 ${candidates.length} 个未保留 —— B 路径不自动复用；org keep <name> 转正 / org drop <name> 取消保留`);
     }
   } else {
     console.log("registry：空（未初始化工作区）");
@@ -610,6 +679,8 @@ async function main(): Promise<number> {
     case "demo": return cmdDemo(a);
     case "ask": return cmdAsk(a);
     case "handoff": return cmdHandoff(a);
+    case "keep": return cmdKeep(a);
+    case "drop": return cmdDrop(a);
     case "status": return cmdStatus(a);
     case "score": return cmdScore(a);
     case "replay": return cmdReplay(a);
@@ -622,14 +693,19 @@ async function main(): Promise<number> {
   org run --task "..." [--workspace DIR] [--model scripted|deepseek] [--fixture FILE]
       团队模式派单：分解 → 路由 → 派单 → 审查 → 汇总 → 资产沉淀
   org demo [--workspace DIR]
-      全叙事演示：A 现场铸专家 / B 复用+补丁+金丝雀 / C 蓝绿验证
-      / D 多轮直连 / E 暖移交
+      全叙事演示：A 现场铸专家 / K 用户选取保留 / B 复用+补丁+金丝雀
+      / C 蓝绿验证 / D 多轮直连 / E 暖移交
   org ask <expert> "<question>" [--session id] [--turns "q1|q2"]
       直连指定专家（事件上总线 · 花销记账 · 会话账本 · 纪要回写）
   org handoff <expert> --task "<request>"
       转接模式（主控移交摘要 → 专家代答 → 记账 + 纪要回写）
+  org keep <expert> [expert2 ...] [--workspace DIR]
+      工具库治理：选取保留 harness（工厂候选 → 转正，git 留痕）
+  org drop <expert> [expert2 ...] [--workspace DIR]
+      工具库治理：取消保留（B 路径不再自动复用；显式寻址仍可用）
   org status [--workspace DIR]
       库 / 池 / memo / 基准题 / 基线 / 复发计数 / 会话账本 / git 注册表历史
+      （★ = 用户保留资产 · ○ = 工厂候选）
   org score [--axis structured_output]
       模型评分卡（证据归因聚合）
   org replay --run <run-dir>

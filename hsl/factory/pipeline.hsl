@@ -281,10 +281,20 @@ export fn merge_patch(registry: Registry, proposal: PatchProposal) -> Result<Exp
         gate: gate,
     };
     let patched = manifest.patched(record);
-    let mut reg = registry;
-    let _ = reg.register(patched.clone())?;
+    // 磁盘新鲜态合入：传入 registry 是主控节点的克隆快照，可能滞后于磁盘
+    // （同轮 note_use 增量已落盘）—— 以克隆为准 flush 会把其他专家的
+    // uses 计数回退（实测：补丁合入后 notice-parser 的 uses 归零）。
+    // 同理：patched 自身携带的 uses 也是快照值 —— 合入时保留磁盘最新计数
+    // （补丁只改版本与 provenance，不改使用统计）。
+    let mut reg = Registry::load(String::from("registry"))?;
+    let disk_manifest = reg.clone().find_by_name(proposal.expert.clone());
+    let merged = match disk_manifest {
+        Some(dm) => patched.clone().set_uses(dm.uses),
+        None => patched.clone(),
+    };
+    let _ = reg.register(merged.clone())?;
     let _ = commit_registry(format!("patch {} -> {} ({})", proposal.expert, to_version, proposal.trigger));
-    Ok(patched)
+    Ok(merged)
 }
 
 /// 补丁变更分级（机械启发式；诚实边界：文本级分类无法与语法级完全等价，

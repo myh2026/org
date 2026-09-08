@@ -9,6 +9,61 @@
 import { ENVELOPE_SIGNATURE } from "../contracts/contract.hsl";
 import { ExpertError } from "../types/errors.hsl";
 
+/// JSON 字符串字面量转义（序列化卫生：description/trigger 等来自真实模型的
+/// 文本含引号/反斜杠/换行时不再损坏注册表 JSON——静默损坏 = 注册表视为空的
+/// 高危路径，parse 侧 JSON.parse 失败会让整个库“消失”）。
+export fn json_escape(s: String) -> String {
+    let out = native typescript {
+        return s
+            .replace(/\\/g, "\\\\")
+            .replace(/"/g, "\\\"")
+            .replace(/\n/g, "\\n")
+            .replace(/\r/g, "\\r")
+            .replace(/\t/g, "\\t");
+    };
+    out
+}
+
+/// 分词（语义粗排的词面单元）：空格词 + CJK 二元滑窗。
+/// 中文任务目标无空格，纯 split(" ") 会把整句当单 token —— 词面重合几乎
+/// 永远为 0（D 暖移交对中文失效的结构性原因）。二元组是保守补偿：不引入
+/// 分词器依赖，重合信号从“不可能”恢复到“可用”。
+export fn goal_words(goal: String) -> Vec<String> {
+    let out: Vec<String> = native typescript {
+        // 注意：native 块按纯 JS 解析（类型注解会报 Unexpected token ':'）
+        const words = goal.split(/\s+/).filter((w) => w.length >= 2);
+        const bigrams = [];
+        for (let i = 0; i + 1 < goal.length; i++) {
+            const a = goal.charCodeAt(i);
+            const b = goal.charCodeAt(i + 1);
+            if (a >= 0x4e00 && a <= 0x9fff && b >= 0x4e00 && b <= 0x9fff) bigrams.push(goal.slice(i, i + 2));
+        }
+        return [...words, ...bigrams];
+    };
+    out
+}
+
+/// D 路径词面单元：空格词 + CJK 三元滑窗（3 字连续子串）。
+/// 暖移交是闸门判定（非粗排），信号强度必须与整词匹配等价 —— 二元组会
+/// 被“记录”这类 2 字杂散重合误触发（实测：validate 子任务被误移交
+/// notice-parser，工厂从未启动）。三元组 = 3 字连续子串重合，误触率骤降。
+export fn duty_words(goal: String) -> Vec<String> {
+    let out: Vec<String> = native typescript {
+        const words = goal.split(/\s+/).filter((w) => w.length >= 2);
+        const trigrams = [];
+        for (let i = 0; i + 2 < goal.length; i++) {
+            const a = goal.charCodeAt(i);
+            const b = goal.charCodeAt(i + 1);
+            const c = goal.charCodeAt(i + 2);
+            if (a >= 0x4e00 && a <= 0x9fff && b >= 0x4e00 && b <= 0x9fff && c >= 0x4e00 && c <= 0x9fff) {
+                trigrams.push(goal.slice(i, i + 3));
+            }
+        }
+        return [...words, ...trigrams];
+    };
+    out
+}
+
 /// 补丁记录（provenance：每次变更的触发原因 = 对应哪次审查反馈）。
 #[derive(Debug, Clone)]
 export struct PatchRecord {
@@ -48,6 +103,10 @@ export struct ExpertManifest {
     uses: u32,
     /// 裁决通过率（行为证据 → 评分卡归因原料）。
     pass_rate: f64,
+    /// 用户保留标记（工具库治理）：factory 产出默认为 false（候选），
+    /// 用户选取保留（org keep）后转正；manual/import 默认 true。
+    /// 未保留的候选不参与 B 路径自动复用（仍可显式寻址/记忆化派单）。
+    retained: bool,
     /// 补丁历史。
     provenance: Vec<PatchRecord>,
 }
@@ -69,6 +128,7 @@ impl ExpertManifest {
             entry_path: entry_path,
             uses: 0,
             pass_rate: 1.0,
+            retained: source != String::from("factory"),
             provenance: Vec::new(),
         }
     }
@@ -86,7 +146,7 @@ impl ExpertManifest {
 
     /// 语义适配粗排（B 路径第二判据：goal 与描述的词面重合）。
     fn affinity(self, goal: String) -> u32 {
-        let words = goal.split(" ").collect::<Vec<String>>();
+        let words = goal_words(goal);
         let mut score: u32 = 0;
         for w in words.iter() {
             if w.len() >= 2 && self.description.contains(w.as_str()) {
@@ -98,25 +158,32 @@ impl ExpertManifest {
 
     /// manifest 序列化（JSON；写入注册表）。
     fn to_json(self) -> String {
-        // join 序列化（无尾逗号；JSON 卫生由 Registry::load 的 parse 侧验证）
-        let mut cap_items: Vec<String> = Vec::new();
+        // join 序列化（无尾逗号）；字符串字段一律过 json_escape（序列化卫生）
+        let cap_items: Vec<String> = Vec::new();
+        let mut cap_list: Vec<String> = cap_items;
         for c in self.capabilities.iter() {
-            cap_items.push(format!("\"{}\"", c));
+            cap_list.push(format!("\"{}\"", json_escape(c.clone())));
         }
-        let caps = cap_items.join(",");
-        let mut patch_items: Vec<String> = Vec::new();
+        let caps = cap_list.join(",");
+        let patch_items: Vec<String> = Vec::new();
+        let mut patch_list: Vec<String> = patch_items;
         for p in self.provenance.iter() {
-            patch_items.push(format!(
+            patch_list.push(format!(
                 "{{\"from\":\"{}\",\"to\":\"{}\",\"kind\":\"{}\",\"trigger\":\"{}\",\"gate\":\"{}\"}}",
-                p.from_version, p.to_version, p.change_kind, p.trigger, p.gate
+                json_escape(p.from_version.clone()), json_escape(p.to_version.clone()),
+                json_escape(p.change_kind.clone()), json_escape(p.trigger.clone()),
+                json_escape(p.gate.clone())
             ));
         }
-        let patches = patch_items.join(",");
+        let patches = patch_list.join(",");
+        let retained_str = if self.retained { String::from("true") } else { String::from("false") };
         format!(
-            "{{\"name\":\"{}\",\"version\":\"{}\",\"bnf\":\"{}\",\"description\":\"{}\",\"capabilities\":[{}],\"signature\":\"{}\",\"source\":\"{}\",\"eval_score\":{},\"fixture\":\"{}\",\"entry\":\"{}\",\"uses\":{},\"pass_rate\":{},\"provenance\":[{}]}}",
-            self.name, self.version, self.bnf, self.description, caps, self.signature,
-            self.source, self.eval_score, self.fixture_path, self.entry_path,
-            self.uses, self.pass_rate, patches
+            "{{\"name\":\"{}\",\"version\":\"{}\",\"bnf\":\"{}\",\"description\":\"{}\",\"capabilities\":[{}],\"signature\":\"{}\",\"source\":\"{}\",\"eval_score\":{},\"fixture\":\"{}\",\"entry\":\"{}\",\"uses\":{},\"pass_rate\":{},\"retained\":{},\"provenance\":[{}]}}",
+            json_escape(self.name), json_escape(self.version), json_escape(self.bnf),
+            json_escape(self.description), caps, json_escape(self.signature),
+            json_escape(self.source), self.eval_score, json_escape(self.fixture_path),
+            json_escape(self.entry_path),
+            self.uses, self.pass_rate, retained_str, patches
         )
     }
 
@@ -126,10 +193,24 @@ impl ExpertManifest {
         self
     }
 
-    /// 补丁合入：版本 bump + provenance 追加（蓝绿：在岗会话继续旧版）。
+    /// 补丁合入：版本 bump + provenance 追加（蓝绿：在岗会话继续旧版；
+    /// retained 随既有 manifest 继承 —— 补丁不改变用户保留决策）。
     fn patched(mut self, record: PatchRecord) -> ExpertManifest {
         self.version = record.to_version.clone();
         self.provenance.push(record);
+        self
+    }
+
+    /// 用户保留决策翻转（org keep / org drop 的库治理操作）。
+    fn set_retained(mut self, retained: bool) -> ExpertManifest {
+        self.retained = retained;
+        self
+    }
+
+    /// 使用计数覆写（补丁/回滚合入时保留磁盘最新计数：patched manifest
+    /// 源自主控节点的克隆快照，uses 可能滞后于磁盘的同轮增量）。
+    fn set_uses(mut self, uses: u32) -> ExpertManifest {
+        self.uses = uses;
         self
     }
 
@@ -186,7 +267,8 @@ impl Registry {
         Ok(reg)
     }
 
-    /// 检索：能力交集 + 语义适配（B 路径判定）。
+    /// 检索：能力交集 + 语义适配（B 路径判定；不筛保留 —— C 路径记忆化
+    /// 与显式寻址也走这里，未保留候选必须仍可被找到）。
     fn find(self, goal: String, skills: &Vec<String>) -> Option<ExpertManifest> {
         let mut best: Option<ExpertManifest> = None;
         for m in self.experts.iter() {
@@ -203,6 +285,61 @@ impl Registry {
         best
     }
 
+    /// 可复用检索（B 路径专用：只命中用户保留的资产 —— factory 候选必须
+    /// 经用户选取（org keep）转正后才参与自动复用；manual/import 例外，
+    /// 它们本来就是随系统交付的存量资产）。
+    fn find_reusable(self, goal: String, skills: &Vec<String>) -> Option<ExpertManifest> {
+        let mut best: Option<ExpertManifest> = None;
+        for m in self.experts.iter() {
+            let reusable = m.source != String::from("factory") || m.retained;
+            if reusable && m.clone().serves(skills) {
+                let take = match best.clone() {
+                    Some(b) => b.clone().affinity(goal.clone()) < m.clone().affinity(goal.clone()),
+                    None => true,
+                };
+                if take {
+                    best = Some(m.clone());
+                }
+            }
+        }
+        best
+    }
+
+    /// 按名翻转保留标记（返回更新后的注册表；找不到时 None）。
+    fn with_retained(mut self, name: String, retained: bool) -> Option<Registry> {
+        let mut hit = false;
+        let mut kept: Vec<ExpertManifest> = Vec::new();
+        for m in self.experts.iter() {
+            if m.name == name {
+                kept.push(m.clone().set_retained(retained));
+                hit = true;
+            } else {
+                kept.push(m.clone());
+            }
+        }
+        if hit == false {
+            return None;
+        }
+        self.experts = kept;
+        Some(self)
+    }
+
+    /// 记一次在岗使用（磁盘态增量）。调用方应从磁盘新鲜加载本注册表再调用 ——
+    /// 进程内陈旧 manifest 直接 register 会把补丁刚写入的新版本号回退
+    /// （merge_patch 经 clone 值语义写盘，主循环内存态不跟进 —— 实测陷阱）。
+    fn note_use(mut self, name: String) -> Result<(), ExpertError> {
+        let mut kept: Vec<ExpertManifest> = Vec::new();
+        for m in self.experts.iter() {
+            if m.name == name {
+                kept.push(m.clone().used());
+            } else {
+                kept.push(m.clone());
+            }
+        }
+        self.experts = kept;
+        self.flush()
+    }
+
     /// 登记（入库：写 manifest + 更新索引；幂等按名覆盖）。
     fn register(&mut self, manifest: ExpertManifest) -> Result<(), ExpertError> {
         let mut kept: Vec<ExpertManifest> = Vec::new();
@@ -214,6 +351,20 @@ impl Registry {
         kept.push(manifest.clone());
         self.experts = kept;
         self.flush()
+    }
+
+    /// 登记到内存态（不落盘）：mint 后主控节点需立即可见新专家，但磁盘已由
+    /// register_expert 写入 —— 此处再 flush 会用节点上的陈旧快照覆盖磁盘
+    //（同轮 note_use 增量会被回退）。
+    fn upsert_memory(&mut self, manifest: ExpertManifest) {
+        let mut kept: Vec<ExpertManifest> = Vec::new();
+        for m in self.experts.iter() {
+            if m.name != manifest.name {
+                kept.push(m.clone());
+            }
+        }
+        kept.push(manifest.clone());
+        self.experts = kept;
     }
 
     /// 落盘（index.json + 每专家 manifest）。
@@ -271,13 +422,15 @@ impl Registry {
         None
     }
 
-    /// 状态快照（org status 的原料）。
+    /// 状态快照（org status 的原料；★ = 用户保留资产，○ = 待选候选）。
     fn snapshot(self) -> String {
         let mut out = format!("registry root: {} ({} experts)\n", self.root, self.experts.len());
         for m in self.experts.iter() {
+            let mark = if m.retained { String::from("★") } else { String::from("○") };
             out.push_str(format!(
-                "  {}@{} [{}] uses={} pass_rate={} eval={}\n",
-                m.name, m.version, m.source, m.uses, m.pass_rate, m.eval_score
+                "  {} {}@{} [{}] uses={} pass_rate={} eval={} {}\n",
+                mark, m.name, m.version, m.source, m.uses, m.pass_rate, m.eval_score,
+                if m.retained { String::from("retained") } else { String::from("candidate") }
             ).as_str());
         }
         out
@@ -298,16 +451,42 @@ fn registry_entry_to_manifest(fields: HashMap<String, String>) -> Result<ExpertM
     let entry = fields.get(String::from("entry")).unwrap_or(String::from(""));
     let uses_raw = fields.get(String::from("uses")).unwrap_or(String::from("0"));
     let pass_raw = fields.get(String::from("pass_rate")).unwrap_or(String::from("1.0"));
+    // 旧注册表无 retained 字段 → 默认 true（向后兼容：存量资产不受新字段影响）
+    let retained_raw = fields.get(String::from("retained")).unwrap_or(String::from("true"));
 
     let eval_score = parse_f64(eval_raw);
     let pass_rate = parse_f64(pass_raw);
     let uses = parse_u32(uses_raw);
+    let retained = retained_raw == String::from("true");
 
     let capabilities: Vec<String> = native typescript {
         const arr = JSON.parse(caps_raw);
         if (Array.isArray(arr) === false) return [];
         return arr.map((x) => String(x));
     };
+
+    // provenance 读回（历史是资产的一部分：加载侧不解析会在任何
+    // load→flush 往返中把补丁历史静默洗掉 —— note_use 磁盘态增量实测踩中）
+    let prov_raw = fields.get(String::from("provenance")).unwrap_or(String::from("[]"));
+    let prov_rows: Vec<HashMap<String, String>> = native typescript {
+        const arr = JSON.parse(prov_raw);
+        if (Array.isArray(arr) === false) return [];
+        return arr.map((p) => {
+            const m = new Map();
+            for (const [k, v] of Object.entries(p)) m.set(k, v === null || v === undefined ? "" : String(v));
+            return m;
+        });
+    };
+    let mut provenance: Vec<PatchRecord> = Vec::new();
+    for row in prov_rows.iter() {
+        provenance.push(PatchRecord {
+            from_version: row.get(String::from("from")).unwrap_or(String::from("?")),
+            to_version: row.get(String::from("to")).unwrap_or(String::from("?")),
+            change_kind: row.get(String::from("kind")).unwrap_or(String::from("knowledge")),
+            trigger: row.get(String::from("trigger")).unwrap_or(String::from("")),
+            gate: row.get(String::from("gate")).unwrap_or(String::from("")),
+        });
+    }
 
     Ok(ExpertManifest {
         name: name,
@@ -322,7 +501,8 @@ fn registry_entry_to_manifest(fields: HashMap<String, String>) -> Result<ExpertM
         entry_path: entry,
         uses: uses,
         pass_rate: pass_rate,
-        provenance: Vec::new(),
+        retained: retained,
+        provenance: provenance,
     })
 }
 

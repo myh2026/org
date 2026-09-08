@@ -1,5 +1,68 @@
 # CHANGELOG
 
+## v0.4.3（2026-09-08）
+
+**工具库治理：用户选取保留（org keep / org drop）+ 注册表写盘模型系统性修复 + TUI 直连车道修复**。
+工厂产出从「自动入库即资产」升级为「候选 → 用户选取 → 转正」：B 路径自动复用只命中
+用户保留的 harness，选取动作进 git 账本（与 mint/patch 同链）。配套修复注册表写盘的
+三处静默覆盖（版本回退 / uses 回退 / provenance 洗掉）与 TUI 直连 env 泄漏。
+详见 [BUGFIXES.md](BUGFIXES.md) B-9 / B-10 / B-11 / B-12。
+
+### 新增
+
+- **用户选取保留（工具库治理核心特性）**：
+  - `ExpertManifest.retained` 字段：factory 产出默认候选（false）；manual/import
+    存量默认保留；旧注册表无该字段时加载默认 true（向后兼容）；
+  - `Registry::find_reusable`（B 路径专用检索）：只命中保留资产——未保留候选
+    不参与自动复用（显式寻址 `?专家` 与 C 路径记忆化派单仍可用，诚实边界）；
+  - CLI：`org keep <expert...>` / `org drop <expert...>`——翻转 retained +
+    index.json 与每专家副本双写 + git 提交留痕（`(user curation)`）；无参时
+    列出注册表（★/○ 可见）；dist/demo 入库快照只读守卫；
+  - TUI：`:keep <name>` / `:drop <name>` 命令（无参作用于专家栏选中项）；
+    专家库行标记 ★ 保留（绿）/ ○ 候选（琥珀）；帮助浮层同步；
+  - `org demo` 新增 K 相位：run A 铸出候选后「用户选取转正」（scripted 演示
+    自动全选，真实用户用 `org keep` 挑选）——叙事从「铸专家 → 复用」升级为
+    「铸候选 → 选取 → 复用」，git 链从三提交变四提交
+    （template → mint → **keep** → patch）；
+  - `org status`：注册表行加 ★/○ 与 retained/candidate 标记 + 候选计数提示。
+- **uses 计数器（修复性新增）**：`used()` 首次接线——磁盘态增量
+  （`note_expert_use`：load → +1 → flush），B 复用 / C 生成（含记忆化重派）/
+  D 暖移交三类派单全部计数；实测三连跑 `notice-parser uses=3` /
+  `record-validator uses=5`。
+- **CJK 语义亲和**：`goal_words`（B 粗排：空格词 + 二元滑窗）与 `duty_words`
+  （D 闸门：空格词 + **三元**滑窗——2 字杂散重合不触发误移交）。中文任务目标
+  此前在 `split(" ")` 下是单 token，词面重合恒 0（D 暖移交对中文结构性失效）。
+
+### 修复
+
+- **B-10 TUI 直连 env 泄漏（严重）**：bun 子进程车道从未合并 `envExtra`
+  （ORG_ASK_EXPERT 等）→ TUI `?专家 问题?` 在有 bun 的机器上必然失败；
+  修复 `Object.assign(env, envExtra)`（双车道同构，B-8 同族教训）。
+- **B-11 provenance 只写不读**：加载侧补齐 `PatchRecord` 解析——任何
+  load→flush 往返（note_use / keep）不再洗掉补丁历史；`json_escape`
+  序列化卫生（description 含引号/反斜杠/换行时注册表 JSON 不再损坏——
+  deepseek 真实模式的关键加固）。
+- **B-12 uses 计数 + 注册表写盘模型**：merge_patch / canary 回滚 / bridge 导入
+  统一「磁盘新鲜态合入 + 保留磁盘最新 uses」；org mint 注册改 `upsert_memory`
+  （内存可见、磁盘由 register_expert 写）；修复两处静默覆盖（版本回退、
+  uses 回退）。
+- **B-9（上游）dsh 假演示**：HSL 仓库 workspace 以 post-fix 状态入库导致
+  README 快速开始为假绿灯——上游已恢复 bug 版 + run-all.ts 副本隔离 +
+  行为断言（详见 BUGFIXES.md B-9 与上游 Issue）。
+- **`org demo --workspace` rmSync 脚枪**：`assertSafeResetWorkspace` 守卫——
+  目标目录非空且不含 org 工作区标记（registry/raw/out-*/.git）时拒绝整目录
+  删除（此前指错目录会静默删光）。
+- **`native typescript` 块实为纯 JS**：块内类型注解（`const x: string[] =`）
+  报 `Unexpected token ':'`——文档与命名误导（见 BUGFIXES 注记与上游 Issue）。
+
+### 测试
+
+- 84 个机制级测试（原 71 + 新增 13）：`tests/keep.test.ts`（10 个：数据面
+  翻转/git 留痕/防呆、路由面 C 记忆化 vs B 复用往返、序列化卫生）+
+  `tests/demo.test.ts` 新增「用户选取保留」组（retained 落盘、B 通道派单、
+  uses 曲线）+ git 链断言升级四提交。
+
+
 ## v0.4.2（2026-09-08）
 
 **HSL 实测回推：内建方法面补齐 26 个 Rust 对等方法 + S-19 静态断层预警；CLI 实测修复**。

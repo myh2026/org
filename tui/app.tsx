@@ -16,7 +16,7 @@ import { Screen } from "./renderer.ts";
 import { renderFrame } from "./frame.ts";
 import {
   startRun, scanWorkspace, replayRun, latestScorecardDir,
-  ensureWorkspace, resetWorkspace, gitShortLog,
+  ensureWorkspace, resetWorkspace, gitShortLog, setRetained, keepAllCandidates,
   type RunHandle, type Scorecard,
 } from "../lib/engine.ts";
 import type { EngineEvent } from "../lib/events.ts";
@@ -321,10 +321,38 @@ export class App {
       case "status": {
         const info = scanWorkspace(this.state.workspace);
         this.dispatch({ type: "workspace", info });
+        const candidates = info.experts.filter((e) => !e.retained);
         this.dispatch({
           type: "notice",
-          text: `会话 ${info.sessions.length} · 专家 ${info.experts.length} · memo ${info.memoKeys} · 基准题 ${info.minedTracks} 轨道`,
+          text: `会话 ${info.sessions.length} · 专家 ${info.experts.length}（候选 ${candidates.length}）· memo ${info.memoKeys} · 基准题 ${info.minedTracks} 轨道`,
         });
+        return;
+      }
+      case "keep": case "drop": {
+        // 工具库治理：选取保留（★）/取消保留（○）；无参时作用于专家栏选中项
+        const retained = name === "keep";
+        const target = arg || this.state.experts[this.state.selIdx.experts]?.name;
+        if (!target) {
+          this.dispatch({ type: "notice", text: `用法：:${name} <expert>（或 Tab 到专家库选中后 :${name}）`, tone: "warn" });
+          return;
+        }
+        try {
+          const { kept, missing } = setRetained(this.state.workspace, [target], retained);
+          if (kept.length > 0) {
+            this.dispatch({
+              type: "notice",
+              text: retained
+                ? `★ 已保留 ${kept.join(", ")}（B 路径自动复用开始命中）`
+                : `○ 已取消保留 ${kept.join(", ")}（B 路径不再自动复用）`,
+            });
+          }
+          if (missing.length > 0) {
+            this.dispatch({ type: "notice", text: `注册表中未找到：${missing.join(", ")}`, tone: "err" });
+          }
+          this.refreshWorkspace();
+        } catch (err) {
+          this.dispatch({ type: "notice", text: `保留操作失败：${(err as Error).message}`, tone: "err" });
+        }
         return;
       }
       case "clear": this.dispatch({ type: "clearScreen" }); return;
@@ -413,6 +441,17 @@ export class App {
           model: this.state.model === "deepseek" ? "deepseek" : "scripted",
         }), { demo: step });
         prevOk = res;
+        // run A 结束 = 用户选取时点：工厂产出候选 → 保留转正（scripted 自动全选）
+        if (step === "A" && res && !this.stopped) {
+          const picked = keepAllCandidates(this.state.workspace);
+          if (picked.length > 0) {
+            this.dispatch({
+              type: "notice",
+              text: `★ 用户选取保留：${picked.join(", ")}（候选转正；真实用户用 :keep <name> 挑选）`,
+            });
+            this.refreshWorkspace();
+          }
+        }
       }
       this.demoActive = false;
       if (prevOk) {

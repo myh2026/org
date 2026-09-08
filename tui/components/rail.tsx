@@ -78,13 +78,17 @@ export function renderRail(state: TuiState, theme: Theme, width: number, height:
         if (used >= budget) return;
         const sel = focused && idx === state.selIdx.experts;
         const runnable = e.entry.length > 0;
+        // ★ = 用户保留资产（B 路径自动复用命中）· ○ = 工厂候选（待选取转正）
+        const mark = e.retained ? "★" : "○";
+        const markColor = e.retained ? "ok" : "warn";
         lines.push(fitLine(
           [
             { t: "  ", dim: true },
             { t: sel ? "▸" : " ", c: "brand" },
-            { t: runnable ? "◆ " : "◇ ", c: "faint" },
+            { t: mark + " ", c: markColor },
             { t: truncate(`${e.name}@${e.version}`, Math.max(4, Math.floor(inner * 0.55))), c: sel ? "brand" : "fg", b: sel },
             { t: ` eval=${e.eval_score.toFixed(1)}`, c: e.eval_score >= 0.9 ? "ok" : "warn" },
+            { t: runnable ? "" : " ◇", c: "faint" },
           ],
           inner,
         ));

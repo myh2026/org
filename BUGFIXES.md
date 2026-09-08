@@ -146,3 +146,77 @@
    resetWorkspace / org demo 重置前置检查，CLI 侧报错退出 2）；`hsl/probe/probe9.hsl`
    头注释补正确运行方式。守卫覆盖 org 命令面；直接调用 dhv 工具链时工作区语义
    归调用者（诚实边界）。
+
+## B-9（已修复上游）dsh 演示工作区以「已修复」状态入库 —— README 快速开始是一场假演示
+
+- **现象**：按 HSL 仓库 README 快速开始跑 dsh 剧本端到端，exit 0 + accepted，
+  但 transcript 里 `edit_file FAILED old_text 未找到（0 处）`——修复从未发生。
+  「Agent 修好了 bug」的演示叙事是假的：committed 的
+  `toolchain/examples/dsh/workspace/stats.ts` 处于 post-fix 状态（variance 已用 n-1、
+  median 已实现），fixture 的 `old_text` 期望 bug 版 → 锚点永不命中 → 模型照剧本
+  跑完后续步骤（测试因「本来就修好了」而 PASS）→ 审查 accept → 假绿灯。
+- **根因**（两层）：
+  1. `toolchain/tests/hsl/run-all.ts` 的 dsh 端到端用例**直接对仓库内 workspace 执行**
+     （scripted run 会真实改写 stats.ts）——测试跑完把污染状态留在工作树里，
+     某次连同污染一起 commit 入库；
+  2. 入库后无人校验「workspace 处于 pre-fix 状态」——fixture 与工作区的配对约束
+     没有测试锁定。
+- **修复**（上游 harness-specification-language）：
+  1. 恢复 `examples/dsh/workspace/stats.ts` 为 bug 版（与 fixture `old_text` 逐字一致）；
+  2. `run-all.ts` dsh 用例改为**临时目录副本隔离**（`fs.cpSync` → TMP）并新增两个
+     行为断言：跑完后副本应含 `xs.length - 1` 分母与 `export function median`
+     （「修复真实发生」从隐式期待变成显式验证）；
+  3. CI（quarter-tests.yml）本就用 `/tmp/dsh-ws` 副本——正确的既有实践，无需改动。
+- **教训**：**任何会写工作区的 scripted 测试都必须跑在副本上**；「端到端 ok」不等于
+  「端到端做了正确的事」——用产物内容断言锁住行为，而不只是退出码。
+
+## B-10（ORG 修复，v0.4.3）TUI 直连在 bun 子进程车道必然失败（env 泄漏）
+
+- **现象**：TUI 里 `?notice-parser 问题?`（直连）以「引擎退出码 1」失败；同一命令
+  `ORG_FORCE_INPROC=1`（进程内车道）正常。CLI `org ask` 不受影响。
+- **根因**（`lib/engine.ts` `startRun`）：直连三件套 `ORG_ASK_EXPERT/SESSION/QUESTION`
+  只进了 `envExtra`——它只被传给 `runInproc`；bun 子进程车道 `B.spawn([...], { env })`
+  的 `env` 是 process.env 拷贝，**从未合并 envExtra**。冒烟测试只覆盖 inproc 车道
+  （恰好正常的那条），漏网。
+- **复现**：`startRun({ entry: "direct", expert: "notice-parser", ... })` 在有 bun 的
+  机器上 `ok: false`；`ORG_FORCE_INPROC=1` 同参 `ok: true`。
+- **修复**：spawn 前 `Object.assign(env, envExtra)`——直连环境变量同时进入两条车道。
+- **教训**：**双车道抽象的每个车道都要有同参直测**（车道可以不同，行为必须同构——
+  与 B-8 同族）。
+
+## B-11（ORG 修复，v0.4.3）注册表 provenance「只写不读」—— 任何 load→flush 往返静默洗掉补丁历史
+
+- **现象**：v0.4.3 引入 uses 磁盘态增量（`note_use`：load → +1 → flush）后，
+  `record-validator` 的 `provenance` 落盘后变回 `[]`——补丁历史被洗掉。
+- **根因**（`hsl/registry/manifest.hsl` `registry_entry_to_manifest`）：`to_json` 写出
+  `provenance` 数组，但加载侧**从不解析该字段**（硬编码 `provenance: Vec::new()`）。
+  原有代码恰好没有「load→flush」回路（merge_patch 用内存克隆直写），磁盘上的
+  provenance 由 merge_patch 的单次写出维持——磁盘态增量一旦引入，每次往返都把
+  历史抹平。
+- **修复**：加载侧补齐 provenance 解析（`$host.json.fields` 通道逐行重建 `PatchRecord`）；
+  json 序列化卫生同步加固（`json_escape`：引号/反斜杠/换行/制表符转义——真实模型
+  产出的 description 含 `"` 时注册表 JSON 不再损坏）。
+- **教训**：**序列化对称性是隐性契约**——写了却不读的字段是埋给未来调用者的雷；
+  一旦引入「以磁盘为准」的写路径（增量/合并），所有 load→flush 往返都是雷的引信。
+  测试锁定：`tests/keep.test.ts`「注册表序列化卫生」用例（含引号/反斜杠的
+  description 经 keep 的 load→flip→flush 往返后保真）。
+
+## B-12（ORG 修复，v0.4.3）uses 计数器从未递增 + 陈旧快照全量 flush 互相覆盖
+
+- **现象**：`ExpertManifest::used()` 定义于 v0.1.0 但**零调用点**——复用两轮后注册表
+  仍显示 `uses: 0`，`org status` 展示误导。
+- **修复过程**（三步，每步都踩出下一个坑——记录完整链路）：
+  1. 直接 `registry.register(m.used())` → **版本回退 bug**：merge_patch 经 clone 值语义
+     写盘（1.0.1），主控节点内存态仍 1.0.0——重派时的 uses 写回把版本拖回 1.0.0；
+  2. 改为磁盘态增量（`note_use`：从磁盘新鲜加载再 +1）→ **uses 回退 bug**：patched
+     manifest 源自陈旧克隆，`register(patched)` 全量覆盖磁盘（把 note_use 刚写入的
+     计数拖回旧值）；
+  3. 终态：merge_patch / canary 回滚 / bridge 导入统一「磁盘新鲜态合入 + 保留磁盘
+     最新 uses」（`set_uses`）；org 主控 mint 注册改 `upsert_memory`（只进内存不落盘
+     ——磁盘已由 register_expert 写过）。
+- **修复后实测**：三连跑 `notice-parser uses=3`、`record-validator@1.0.1 uses=5`
+  （A×2 + B×2 + C×1，与派单记录逐一对应）。
+- **教训**：**「load-all → mutate → write-all」的多写者模型里，任何持有旧快照的
+  写者都是覆盖攻击者**。修法只有两条路：要么所有写者都从磁盘新鲜加载（本修复选择，
+  代价是 I/O）；要么改写为按字段合并。值语义语言里前者更稳——后者要求语言层支持
+  字段级寻址。

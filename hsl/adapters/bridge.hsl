@@ -98,7 +98,8 @@ export fn import_agent(path: String, registry: Registry) -> Result<ExpertManifes
         String::from(""),
     );
 
-    let mut reg = registry;
+    // 磁盘新鲜态登记（与 merge_patch 同模式：克隆快照 flush 会回退其他专家的 uses）
+    let mut reg = Registry::load(String::from("registry"))?;
     let _ = reg.register(manifest.clone())?;
     let name = agent.name.clone();
     let import_path = path.clone();

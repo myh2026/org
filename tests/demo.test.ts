@@ -5,6 +5,7 @@
 //   - 三连跑 3/3 子任务、model_calls 5→1→0（固化改变成本结构）
 //   - 工厂闸门：mint 过真实 dhv check + fixture 验收后注册
 //   - 意见复发两次 → 补丁提案 → 同一验收管线合入 → git 注册表留痕
+//   - 用户选取保留：工厂产出候选 → keep 转正 → B 路径自动复用（新增）
 //   - 金丝雀影子晋升：新旧版本同输入双跑，一致才确认
 //   - 蓝绿：run C 补丁版首验即收（零返工）
 //   - 固化：冻结映射跨运行持久，命中零模型调用
@@ -179,13 +180,46 @@ describe("README 走读：评分卡（证据归因聚合）", () => {
 });
 
 describe("README 走读：资产层（git 注册表 = 增长率账本）", () => {
-  test("git 注册表三提交链：template → mint → patch", () => {
+  test("git 注册表四提交链：template → mint → keep → patch（用户选取留痕）", () => {
     const proc = Bun.spawnSync(["git", "-C", WS, "log", "--oneline", "--all"], { stdout: "pipe" });
     const log = proc.stdout.toString().split("\n").filter((l) => l.trim().length > 0);
-    expect(log.length).toBeGreaterThanOrEqual(3);
+    expect(log.length).toBeGreaterThanOrEqual(4);
     expect(log.some((l) => l.includes("registry template"))).toBe(true);
     expect(log.some((l) => l.includes("mint record-validator@1.0.0"))).toBe(true);
+    // 用户选取（工具库治理）：K 相位在 run A 后留痕 —— 增长率账本的一部分
+    expect(log.some((l) => l.includes("keep record-validator@1.0.0"))).toBe(true);
+    expect(log.some((l) => l.includes("(user curation)"))).toBe(true);
     expect(log.some((l) => l.includes("patch record-validator -> 1.0.1"))).toBe(true);
+  });
+});
+
+describe("README 走读：用户选取保留（工具库治理）", () => {
+  test("工厂产出候选 → K 相位自动转正：retained=true 落盘", () => {
+    const manifest = readJson(path.join(WS, "registry/record-validator.json"));
+    expect(manifest.retained).toBe(true);
+    const idx = readJson(path.join(WS, "registry/index.json"));
+    const rv = (idx as Array<Record<string, unknown>>).find((m) => m.name === "record-validator");
+    expect(rv!.retained).toBe(true);
+  });
+
+  test("转正后 B 路径自动复用：run B/C task#3 走 reuse 通道（非 C 生成）", () => {
+    for (const id of ["b", "c"]) {
+      const events = eventsOf(path.join(WS, `out-${id}`));
+      const dispatches = journalEvents(events, "dispatch")
+        .filter((d) => String(d.detail).includes("task#3"));
+      expect(dispatches.length).toBeGreaterThanOrEqual(1);
+      expect(dispatches.some((d) => String(d.detail).includes("channel=reuse record-validator"))).toBe(true);
+    }
+  });
+
+  test("uses 计数随派单增长（notice-parser 3 次 / record-validator 5 次）", () => {
+    const idx = readJson(path.join(WS, "registry/index.json")) as Array<Record<string, unknown>>;
+    const np = idx.find((m) => m.name === "notice-parser");
+    const rv = idx.find((m) => m.name === "record-validator");
+    // 三轮各派单 1 次
+    expect(Number(np!.uses)).toBe(3);
+    // A×2（首次+返工）+ B×2（首次+返工）+ C×1
+    expect(Number(rv!.uses)).toBe(5);
   });
 });
 

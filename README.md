@@ -5,11 +5,11 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.4.2_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Status](https://img.shields.io/badge/status-v0.4.3_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
 [![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-快速开始v042-实测可用)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
-[![Tests](https://img.shields.io/badge/tests-71_passing-brightgreen.svg)](#-测试)
+[![Tests](https://img.shields.io/badge/tests-84_passing-brightgreen.svg)](#-测试)
 [![CI](https://github.com/myh2026/org/actions/workflows/ci.yml/badge.svg)](https://github.com/myh2026/org/actions/workflows/ci.yml)
 [![Release](https://github.com/myh2026/org/actions/workflows/release.yml/badge.svg)](https://github.com/myh2026/org/actions/workflows/release.yml)
 
@@ -19,7 +19,7 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **当前状态**：v0.4.2 可运行实现。新增 **OpenCode 级终端前端（`org tui`）** 与 **Windows/macOS/Linux 五目标单二进制分发**（无 bun 环境全功能）。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 71 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
+> **当前状态**：v0.4.3 可运行实现。新增 **工具库治理：用户选取保留（`org keep` / `org drop`）** —— 工厂产出是候选，用户选取转正后才参与 B 路径自动复用，选取动作进 git 账本。另有 **OpenCode 级终端前端（`org tui`）** 与 **Windows/macOS/Linux 五目标单二进制分发**（无 bun 环境全功能）。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 84 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
 
 ## ✨ 为什么是 ORG
 
@@ -114,25 +114,25 @@ flowchart TB
 
 怎么读这张图：**蓝色管线是监督回路（主控的四个阶段），紫色是资产层（库与池），绿色是工厂管线（生成与验收），红色是补丁通路，琥珀色是模型评分卡与证据归因，青色是固化通路。** 用户既是团队模式的委托方，也可以经直连通道直接访问池中专家；工厂同时服务两条生产线——新专家生成与老专家补丁，共用同一道验收闸门；监督回路的行为证据持续归因到评分卡，评分卡反过来决定池中实例的模型匹配。
 
-### 一次典型任务的走读（v0.3.0 已可复现，`org demo`）
+### 一次典型任务的走读（v0.4.3 已可复现，`org demo`）
 
 1. 用户下达任务：「抓取某站点近一周公告，输出结构化表格」；
 2. 主控分解为 检索 / 解析 / 校验 三个子任务，**随即**向用户发出澄清问题（输出格式、字段偏好）——人类思考时间与机器执行时间重叠，而非串行；
 3. 路由：检索子任务琐碎且强依赖主控上下文 → **A 内联**；解析子任务在专家库命中 → **B 复用** notice-parser；校验子任务无匹配专家 → **C 现场生成**，生成物通过真实 `dhv check`（结构铁律）与 fixture 验收（行为闸门）后注册入池；
 4. 派单契约先行：每份工单写明交付物规格、验收标准、预算水位与返工上限；
 5. 主控过程审查发现校验专家覆盖不足，四态裁决为 `Revise`——在早期拦截，而不是汇总后发现全量返工；
-6. 任务结束：新专家、验收样本、固化 memo 沉淀入库（git 注册表提交留痕）；
-7. **第二次同类任务**（run B）：校验专家直接复用（零工厂成本）；解析专家的日期归一化判定节点持续命中 memo（模型调用 5 → 1）；「覆盖不足」审查意见复发两次 → 自动升级为**补丁提案**，经 check + smoke 闸门合入 record-validator@1.0.1（git 留痕）；
+6. 任务结束：**新专家以「候选」身份沉淀（retained=false）**；**用户选取保留**（`org keep`，演示中 scripted 自动选取）→ 候选转正进 git 账本；验收样本、固化 memo 一并沉淀（git 注册表提交留痕）；
+7. **第二次同类任务**（run B）：校验专家（已转正）直接复用（零工厂成本）；解析专家的日期归一化判定节点持续命中 memo（模型调用 5 → 1）；「覆盖不足」审查意见复发两次 → 自动升级为**补丁提案**，经 check + smoke 闸门合入 record-validator@1.0.1（git 留痕）；
 8. **第三次同类任务**（run C）：判定节点 5/5 全命中（**零模型调用**）；补丁版专家首验即收（**零返工**）——蓝绿发布生效，系统单位成本随使用递减。
 
-实测数据（scripted 模式，约 2s 全叙事）：model_calls 衰减 **5 → 1 → 0**，返工 **1 → 1 → 0**，git 注册表三个提交（template → mint → patch）即资产层的增长率账本；另有多轮直连（2 轮问答、记账、会话账本）与暖移交（移交摘要 + 专家代答）两个通道产物。
+实测数据（scripted 模式，约 2s 全叙事）：model_calls 衰减 **5 → 1 → 0**，返工 **1 → 1 → 0**，git 注册表四个提交（template → mint → **keep（用户选取）** → patch）即资产层的增长率账本；另有多轮直连（2 轮问答、记账、会话账本）与暖移交（移交摘要 + 专家代答）两个通道产物。
 
 ## 🖥️ 组织驾驶舱（TUI）——OpenCode 级终端前端
 
 `org tui` 打开三区布局的产品级终端界面（零依赖自研渲染器，规格见 [docs/tui-spec.md](docs/tui-spec.md)）：
 
 ```
-╭ ORG — Organization Harness ──────────────────────────────── v0.4.2 ╮
+╭ ORG — Organization Harness ──────────────────────────────── v0.4.3 ╮
 │  ▾ 会话 (5)          │  org 任务分解 → 3 子任务                       │
 │    ● 抓取某站点近…    │     ├ task#1 fetch   [A 内联] ✓               │
 │    ○ (direct) 多轮…  │     ├ task#2 parse   [B 复用] notice-parser ✓  │
@@ -149,8 +149,10 @@ flowchart TB
 
 - **事件卡片流**：任务分解（A/B/C/D 路由徽标四色）· 工厂五步 stepper · 四态裁决徽标
   （Accept 绿 / Revise 琥珀 / Reject 红 / Escalate 紫）· 固化（❄冻结 ⚡命中）· 补丁
-  （版本 bump + git sha + 金丝雀确认）· 直连 · 完成卡（成本衰减 5→1→0）· 系统卡；
+  （版本 bump + git sha + 金丝雀确认）· 用户选取（★ 保留 / ○ 候选）· 直连 · 完成卡
+  （成本衰减 5→1→0）· 系统卡；
 - **输入协议**：任务回车派单（团队模式）· `?专家 问题?` 直连 · `:demo` 全叙事演示 ·
+  `:keep <name>` / `:drop <name>` 工具库治理（无参作用于专家栏选中项）·
   `:replay out-…` 历史会话秒开重演（不重跑引擎）· `:filter 任务|分解|工厂|裁决|直连|汇总|动态`
   事件流过滤（视图偏好，不随 run 重置）· `:score :theme :status :clear :help :quit`；
 - **三主题**（org-dark / org-light / paper）· 窄终端降级 · 帮助浮层（`?`）· 运行取消（Esc）；
@@ -224,6 +226,11 @@ v0.1.0 补充一条工程事实：**C 路径是记忆化的**——注册表已�
 | `version` | 语义版本 + 绑定的 BNF 版本（语言演进的漂移检测） |
 | `stats` | 使用次数、裁决通过率、生成来源（工厂 / 人工 / 导入） |
 | `provenance` | 补丁历史：每次变更的触发原因（对应哪次审查反馈） |
+
+**工具库治理（v0.4.3）**：工厂产出的新专家默认是**候选**（`retained=false`）——注册在库但不参与
+B 路径自动复用；用户选取保留（`org keep`）后转正，取消保留（`org drop`）则再次失联（显式
+寻址与 C 路径记忆化派单仍可用）。选取动作进 git 账本（`(user curation)` 提交，与
+mint / patch 同链）——「哪些 harness 值得留下来」是用户的决策权，不是系统的默认行为。
 
 主控与专家之间的接口采用**信封契约**：外层统一为 `TaskSpec -> Result<Report, ExpertError>`（主控可无差别组合任意专家），payload 按领域自定义类型（专家保持表达能力）。全强类型会使生成端互相卡死，全自由文本会退化为黑盒，信封是两者的平衡点。
 
@@ -410,7 +417,7 @@ org/
 > 注册表，不入库）；`toolchain/dhv-ts` 内嵌解释器 vendored 入库——克隆即得可校验完整状态：
 > `bun cli/org.ts check` 直接全量模块过，无需任何环境准备。
 
-## ⚡ 快速开始（v0.4.2 实测可用）
+## ⚡ 快速开始（v0.4.3 实测可用）
 
 **终端用户（免环境）**：到 [Releases](https://github.com/myh2026/org/releases/latest) 下载
 对应平台产物（`org-windows-x64.exe` / `org-darwin-arm64.zip` / `org-linux-x64.zip` …），
@@ -438,23 +445,27 @@ bun test tests/
 # 4) 团队模式派单（单轮）
 bun cli/org.ts run --task "抓取某站点近一周公告，输出结构化表格"
 
-# 5) 直连指定专家（多轮：记账 + 会话账本 + 纪要回写）
+# 5) 工具库治理：用户选取保留（工厂产出是候选，选取转正后参与 B 路径复用）
+bun cli/org.ts keep record-validator --workspace demo-run
+bun cli/org.ts drop record-validator --workspace demo-run   # 反悔：取消保留
+
+# 6) 直连指定专家（多轮：记账 + 会话账本 + 纪要回写）
 bun cli/org.ts ask notice-parser "上周抓取任务里的字段映射规则是什么？"
 bun cli/org.ts ask notice-parser --session demo --turns "那日期无法解析时怎么处理？|再总结一下字段规则"
 
-# 6) 转接模式（暖移交：主控移交摘要 → 专家代答）
+# 7) 转接模式（暖移交：主控移交摘要 → 专家代答）
 bun cli/org.ts handoff notice-parser --task "帮我把解析规则整理成一句话"
 
-# 7) 查看库与池状态 / git 注册表历史（无 demo-run 时自动读 dist/demo 入库快照）
+# 8) 查看库与池状态 / git 注册表历史（★ 保留 · ○ 候选；无 demo-run 时自动读 dist/demo 入库快照）
 bun cli/org.ts status
 
-# 8) 查看模型评分卡与证据来源（evidence_count 为跨运行累计）
+# 9) 查看模型评分卡与证据来源（evidence_count 为跨运行累计）
 bun cli/org.ts score --axis structured_extract
 
-# 9) 确定性重放某次历史运行
+# 10) 确定性重放某次历史运行
 bun cli/org.ts replay --run demo-run/out-a   # 或 dist/demo/out-a
 
-# 10) 真实 LLM 模式（经 $host.llm 网关；判定调用全部走真实模型）
+# 11) 真实 LLM 模式（经 $host.llm 网关；判定调用全部走真实模型）
 bun cli/org.ts run --task "..." --model deepseek
 
 # 环境变量：
@@ -464,9 +475,11 @@ bun cli/org.ts run --task "..." --model deepseek
 
 ### CI/CD 与测试
 
-- **测试**（`bun test tests/`，71 个）：结构闸门（dhv check 全源 + 生成器出题与人工抽查逐字一致）
-  / README 走读（三连跑衰减曲线、工厂闸门、补丁与金丝雀、固化持久化、评分卡归因、
-  journal→fixture、直连、暖移交、git 注册表链）/ 动力学点火（漂移告警、固化降级、
+- **测试**（`bun test tests/`，84 个）：结构闸门（dhv check 全源 + 生成器出题与人工抽查逐字一致）
+  / README 走读（三连跑衰减曲线、工厂闸门、用户选取保留（retained 落盘 / B 通道命中 /
+  uses 曲线）、补丁与金丝雀、固化持久化、评分卡归因、
+  journal→fixture、直连、暖移交、git 注册表链）/ 工具库治理（keep/drop 数据面 +
+  路由面 + 序列化卫生）/ 动力学点火（漂移告警、固化降级、
   Reject 重派、Escalate 仲裁返工、三档补丁闸门、N 版本冗余）。
 - **push / PR**（`ci.yml`）：`dhv check` 全模块 → `bun test` → 三连跑冒烟 → `status` 冒烟 →
   产物上传 workflow artifact → **dist/ 有变化则自动回写提交**（`chore(dist): … [skip ci]`）。

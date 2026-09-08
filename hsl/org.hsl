@@ -538,6 +538,17 @@ fn forge_contract(subtask: SubTask, answers: Vec<String>) -> TaskSpec {
 ///   - 进程内车道：静态专家（随 ORG 发行，经 import 编入，如 notice-parser）
 ///   - 嵌套解释器车道：磁盘专家（工厂 minted / 补丁后版本）—— 每次从磁盘
 ///     加载最新版，即蓝绿发布语义（在岗会话继续旧版，新派单自动加载新版）
+/// 记一次在岗使用（磁盘态增量：从磁盘新鲜加载最新版本再 +1 —— 进程内
+/// 陈旧 manifest 直接 register 会把补丁刚写入的新版本号回退；used() 此前
+/// 无调用点，复用两轮后 registry 仍显示 uses=0，status 展示误导）。
+fn note_expert_use(name: String) {
+    let loaded = Registry::load(String::from("registry"));
+    match loaded {
+        Ok(reg) => { let _ = reg.note_use(name); },
+        Err(_e) => {},
+    }
+}
+
 async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
                  mut journal: Journal, mut registry: Registry, mut pool: Pool,
                  mut policy: CapabilityPolicy, exclude: String) -> Result<StatusReport, OrgError> {
@@ -572,6 +583,8 @@ async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
                     return Err(OrgError::route(format!("复用通道失效：{} 不在注册表", expert)));
                 },
             };
+            // 记一次在岗使用（磁盘态增量，见 note_expert_use 注释）
+            note_expert_use(m.name.clone());
             if m.entry_path.ends_with(String::from(".hsl")) {
                 // 嵌套解释器车道（磁盘专家：蓝绿加载最新版）
                 let mut full = spec.clone();
@@ -612,10 +625,12 @@ async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
                     let fresh = Factory::run(subtask.goal.clone(), subtask.skills.clone()).await?;
                     journal.log(String::from("factory"), String::from("mint-register"),
                         format!("{}@{} eval={}", fresh.name, fresh.version, fresh.eval_score));
-                    registry.register(fresh.clone())?;
+                    registry.upsert_memory(fresh.clone());
                     fresh
                 },
             };
+            // 记一次在岗使用（mint 的首次上岗也是使用；含记忆化重派 —— 磁盘态增量）
+            note_expert_use(minted.name.clone());
             // 派单：嵌套解释器执行（磁盘专家从磁盘加载 = 蓝绿）
             let mut full = spec.clone();
             full.payload = prepare_payload(subtask.clone());
@@ -632,6 +647,8 @@ async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
             let manifest = registry.find_by_name_or(expert.clone(), subtask.goal.clone(), &subtask.skills);
             match manifest {
                 Some(m) => {
+                    // 记一次在岗使用（暖移交也是真实派单；磁盘态增量）
+                    note_expert_use(m.name.clone());
                     if m.entry_path.ends_with(String::from(".hsl")) {
                         let mut full = spec.clone();
                         full.payload = prepare_payload(subtask.clone());

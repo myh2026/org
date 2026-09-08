@@ -61,8 +61,10 @@ export function renderHelp(state: TuiState, theme: Theme, width: number, height:
   const rows: Array<[string, string]> = [
     ["输入任务 ⏎", "团队模式派单（分解→路由→审查→汇总）"],
     ["?专家 问题?", "直连指定专家（记账 + 纪要回写）"],
-    [":demo", "三连跑演示：铸专家 → 复用+补丁 → 蓝绿"],
+    [":demo", "三连跑演示：铸专家 → 用户选取 → 复用+补丁 → 蓝绿"],
     [":replay <out-…>", "重演历史会话（事件流秒开）"],
+    [":keep <expert>", "工具库治理：选取保留候选（★ 转正）"],
+    [":drop <expert>", "取消保留（○ 候选；B 路径不再自动复用）"],
     [":filter [类]", "事件流过滤：任务/分解/工厂/裁决/直连/汇总/动态"],
     [":score [axis]", "模型评分卡（证据归因）"],
     [":theme dark|light|paper", "切换主题"],

@@ -1,5 +1,5 @@
 // ============================================================================
-// org/lib/engine.ts — 引擎桥：CLI 与 TUI 共用（v0.4.2，规格书 §4）
+// org/lib/engine.ts — 引擎桥：CLI 与 TUI 共用（v0.4.3，规格书 §4）
 // ----------------------------------------------------------------------------
 // 主路径：spawn `bun <dhv-ts> run <entry> --workspace --task --model --fixture
 // --out --allow bun,node,ls,cat,grep,diff,git`（与 cli/org.ts runHsl 同参），
@@ -176,9 +176,34 @@ export function ensureWorkspace(ws: string): void {
 /** demo 语义：重置工作区到模板（可重复的三连跑叙事）。 */
 export function resetWorkspace(ws: string): void {
   assertWorkspaceNotTemplate(ws);
+  assertSafeResetWorkspace(ws);
   fs.rmSync(ws, { recursive: true, force: true });
   fs.cpSync(WS_TEMPLATE, ws, { recursive: true });
   gitInit(ws);
+}
+
+/** demo 重置安全守卫：rmSync 脚枪防线。
+ *  目标目录非空且不含任何 org 工作区标记（registry/raw/out- 目录/.git）时拒绝
+ *  整目录删除 —— `org demo --workspace <任意目录>` 此前只有模板只读守卫，
+ *  指错目录（如 ~）会把整个目录静默删光。空目录与不存在的目录放行。 */
+export function assertSafeResetWorkspace(ws: string): void {
+  if (!fs.existsSync(ws)) return;
+  let entries: fs.Dirent[] = [];
+  try {
+    entries = fs.readdirSync(ws, { withFileTypes: true });
+  } catch {
+    return; // 不可读 → 后续 rmSync 自会报错，不在此拦截
+  }
+  if (entries.length === 0) return;
+  const markers = new Set(["registry", "raw", ".git", ".hsl-runs", "work", "factory", "runtime"]);
+  const runLike = entries.some((e) => e.isDirectory() && e.name.startsWith("out-"));
+  const hasMarker = entries.some((e) => e.isDirectory() && markers.has(e.name)) || runLike;
+  if (!hasMarker) {
+    throw new Error(
+      `拒绝重置 ${ws}：目录非空且不含 org 工作区标记（registry/raw/out-*）。` +
+      `demo 会整目录 rmSync —— 请确认这是 org 工作区，或换一个空目录。`,
+    );
+  }
 }
 
 export function gitShortLog(ws: string, n = 5): Array<{ sha: string; subject: string }> {
@@ -191,6 +216,69 @@ export function gitShortLog(ws: string, n = 5): Array<{ sha: string; subject: st
   } catch {
     return [];
   }
+}
+
+// ---------- 工具库治理：用户选取保留（org keep / org drop / TUI :keep / :drop） ----------
+// 工厂产出默认是候选（retained=false）：B 路径自动复用只命中用户保留资产
+// （manual/import 存量例外）。选取动作 = 翻转 retained + git 提交留痕
+// （与 mint/patch 同链 —— 增长率账本的一部分）。
+
+export interface RegistryEntry {
+  name: string;
+  version: string;
+  source: string;
+  retained?: boolean;
+  [key: string]: unknown;
+}
+
+export function loadRegistryIndex(ws: string): RegistryEntry[] {
+  const index = path.join(ws, "registry/index.json");
+  try {
+    const raw = JSON.parse(fs.readFileSync(index, "utf-8"));
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
+
+function gitCommitRegistry(ws: string, message: string): void {
+  git(ws, ["add", "registry/"]);
+  git(ws, ["commit", "-q", "-m", message]);
+}
+
+/** 翻转专家保留标记（index.json + 每专家副本 + git 提交；CLI 与 TUI 共用）。 */
+export function setRetained(ws: string, names: string[], retained: boolean): { kept: string[]; missing: string[] } {
+  const experts = loadRegistryIndex(ws);
+  const wanted = new Set(names);
+  const hit: string[] = [];
+  for (const m of experts) {
+    if (wanted.has(m.name)) {
+      m.retained = retained;
+      hit.push(`${m.name}@${m.version}`);
+      wanted.delete(m.name);
+      // 同步每专家副本（与 HSL flush 的双写形态一致）
+      const per = path.join(ws, "registry", `${m.name}.json`);
+      try { fs.writeFileSync(per, JSON.stringify(m)); } catch { /* 副本缺失容忍 */ }
+    }
+  }
+  const missing = [...wanted];
+  if (hit.length > 0) {
+    fs.writeFileSync(path.join(ws, "registry/index.json"), JSON.stringify(experts));
+    const action = retained ? "keep" : "drop";
+    gitCommitRegistry(ws, `${action} ${hit.join(", ")} (user curation)`);
+  }
+  return { kept: hit, missing };
+}
+
+/** demo 剧本内的用户选取：保留全部 factory 候选（返回转正名单）。 */
+export function keepAllCandidates(ws: string): string[] {
+  const experts = loadRegistryIndex(ws);
+  const candidates = experts
+    .filter((m) => m.source === "factory" && m.retained !== true)
+    .map((m) => m.name);
+  if (candidates.length === 0) return [];
+  const { kept } = setRetained(ws, candidates, true);
+  return kept;
 }
 
 // ---------- 产物读取 ----------
@@ -256,6 +344,7 @@ export interface ExpertInfo {
   eval_score: number;
   entry: string;
   uses: number;
+  retained: boolean;
   capabilities: string[];
 }
 
@@ -314,6 +403,8 @@ export function scanWorkspace(ws: string): WorkspaceInfo {
       eval_score: Number(m.eval_score ?? 0),
       entry: String(m.entry ?? ""),
       uses: Number(m.uses ?? 0),
+      // 旧注册表无 retained 字段 → 默认 true（与 HSL 侧 registry_entry_to_manifest 同口径）
+      retained: m.retained === undefined ? true : m.retained === true,
       capabilities: Array.isArray(m.capabilities) ? (m.capabilities as unknown[]).map(String) : [],
     }));
   } catch { /* 空 registry */ }
@@ -603,6 +694,11 @@ export function startRun(opts: RunOptions): RunHandle {
         envExtra.ORG_ASK_SESSION = opts.session ?? "default";
         envExtra.ORG_ASK_QUESTION = opts.task;
       }
+      // 直连环境变量必须同时进入两条车道：bun 子进程车道（B.spawn env）与
+      // 进程内车道（runInproc envExtra）。历史 bug：子进程车道漏合并 envExtra
+      // → TUI `?专家 问题?` 在有 bun 的机器上以 usage 错误失败（进程内车道
+      // 恰好正常，冒烟测试只覆盖了后者）。
+      Object.assign(env, envExtra);
       const forceInproc = process.env.ORG_FORCE_INPROC === "1";
       const bun = forceInproc ? null : resolveBun();
       let code = 0;

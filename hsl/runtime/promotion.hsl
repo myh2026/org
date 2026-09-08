@@ -91,9 +91,16 @@ export async fn canary_check(
                 return false;
             }
         };
-        let mut reg = registry;
+        // 磁盘新鲜态降版（与 merge_patch 同模式：克隆快照 flush 会回退其他专家的 uses；
+        // reverted 自身携带的 uses 同为快照值 —— 保留磁盘最新计数）
+        let mut reg = Registry::load(String::from("registry"))?;
         let reverted = manifest_new.revert_version(from_version.clone());
-        let _ = reg.register(reverted)?;
+        let disk_manifest = reg.clone().find_by_name(manifest_new.name.clone());
+        let merged = match disk_manifest {
+            Some(dm) => reverted.clone().set_uses(dm.uses),
+            None => reverted.clone(),
+        };
+        let _ = reg.register(merged)?;
         let _ = native typescript {
             $host.events.emit("canary_rollback", { expert: name, version: manifest_new.version, restored: rollback_ok });
             return true;
