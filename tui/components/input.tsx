@@ -65,6 +65,7 @@ export function renderHelp(state: TuiState, theme: Theme, width: number, height:
     [":replay <out-…>", "重演历史会话（事件流秒开）"],
     [":keep <expert>", "工具库治理：选取保留候选（★ 转正）"],
     [":drop <expert>", "取消保留（○ 候选；B 路径不再自动复用）"],
+    [":import <file.hsl>", "导入你的 harness（check 闸门 → 入库即保留可复用）"],
     [":filter [类]", "事件流过滤：任务/分解/工厂/裁决/直连/汇总/动态"],
     [":score [axis]", "模型评分卡（证据归因）"],
     [":theme dark|light|paper", "切换主题"],

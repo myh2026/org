@@ -1,5 +1,51 @@
 # CHANGELOG
 
+## v0.4.4（2026-09-08）
+
+**工具库治理第三动作 `org import`（导入你自己的 harness）+ 上下文窗口计量（Codex 风格）**。
+用户不再只能消费系统铸出的专家——自己的 .hsl harness 经 check 闸门直接入工具库
+（导入即保留，B 路径自动复用立即可用）；直连会话的上下文占用随轮次增长，现在
+每轮可见（meter 计量条 + 事件上总线 + status 汇总）。
+
+### 新增
+
+- **`org import <file.hsl>`（导入用户 harness）**：
+  - 质量闸门：`dhv check` 必须绿——坏 harness 拒绝入库（工具库不收坏件）；
+  - 入库三件套：复制源文件到 `registry/harnesses/<name>.hsl`（可追溯）+
+    `registry/index.json` 条目 + 每专家副本（与 keep/drop 双写形态一致）；
+  - 治理语义：`source=import · retained=true`——导入即保留（区别于 factory
+    候选），`find_reusable` 的 B 路径判据 `source != "factory" || retained`
+    立即命中；`eval_score=0.0`（诚实边界：导入 ≠ 已验证）；
+  - 元数据自动提取：描述取文件首个 `///` 文档注释；能力扫描
+    `#[capability(…)]` 注解（去重保序）；`--name / --description /
+    --capability` 显式覆盖；
+  - git 留痕：`import <name>@0.1.0 (user harness)`（与 mint/patch/keep 同链，
+    增长率账本的一部分）；
+  - 防呆面：重名拒绝（同名专家需改名或先 drop）、非 .hsl 拒绝、非法名拒绝
+    （`^[a-z][a-z0-9-]*$`，与专家名同域）、空文件拒绝；
+  - TUI 同构命令 `:import <file.hsl> [--name N]`（通知 + 工作区刷新 + 帮助
+    浮层同步）。
+- **上下文窗口计量（Codex 风格，`[ctx]` meter）**：
+  - `hsl/pool/direct.hsl`：`estimate_context`（系统提示含会话史 + 本轮问答，
+    chars/3 近似口径——与既有 `estimate_tokens` 同源）；每轮问答后打印
+    `[ctx] 窗口占用 ▓░░ 8.4k/131.0k（6.4%）（N 轮累计）`（整数运算千分数，
+    12 格 meter；GLM-4.5 窗口 128k tokens）；会话账本行新增 `ctx_tokens`
+    字段（additive，向后兼容）；`DirectSession` 新增 `ctx_tokens`；
+  - 事件上总线：`direct_ctx` journal 事件（detail 字符串
+    `expert/session turn=N ctx=N window=N`，与既有事件同构）——知情权
+    不可绕，TUI / replay / status 均可消费；
+  - TUI：直连卡实时渲染 meter（`direct_ctx` 事件驱动，store 新增
+    RE_CTX 解析 + 卡片 `ctxTokens/ctxWindow/ctxTurn` 字段）；
+  - `org status`：按会话汇总上下文占用（每会话一行：轮次 · 记账 tokens ·
+    ctx meter）；
+  - `lib/engine.ts`：`CONTEXT_WINDOW_TOKENS` / `estimateTokens` /
+    `contextUsageOf` / `listContextUsage` / `renderContextMeter`（CLI 与
+    TUI 共用计量基础设施）。
+- 测试：`tests/import.test.ts` 13 个机制级用例（导入数据面 / 元数据面 /
+  治理联动 / 防呆面 4 桩 / 上下文计量 5 桩），全套 97 用例全绿。
+- 文档：README 工具库治理升级为三动作（import/keep/drop）+ 上下文窗口
+  计量小节；快速开始加入 import 与 [ctx] 示例；测试徽章 97。
+
 ## v0.4.3（2026-09-08）
 
 **工具库治理：用户选取保留（org keep / org drop）+ 注册表写盘模型系统性修复 + TUI 直连车道修复**。

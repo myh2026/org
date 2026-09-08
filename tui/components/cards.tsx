@@ -149,6 +149,21 @@ export function renderCard(card: Card, width: number): Line[] {
       for (const a of card.answers.slice(-2)) {
         body([{ t: "   a ", c: "ok" }], a, "fg", 5);
       }
+      // 上下文窗口占用（Codex 风格计量条；direct_ctx 事件驱动）
+      if (card.ctxTokens !== undefined) {
+        const w = card.ctxWindow ?? 131072;
+        const pct = w > 0 ? Math.min(1, card.ctxTokens / w) : 0;
+        const cells = 12;
+        const filled = Math.max(card.ctxTokens > 0 ? 1 : 0, Math.min(cells, Math.round(pct * cells)));
+        const bar = "▓".repeat(filled) + "░".repeat(cells - filled);
+        const fmtK = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
+        fit([
+          { t: "   ctx ", dim: true },
+          { t: bar, c: "info" },
+          { t: ` ${fmtK(card.ctxTokens)}/${fmtK(w)}（${(pct * 100).toFixed(1)}%）`, dim: true },
+          { t: card.ctxTurn !== undefined ? ` · ${card.ctxTurn} 轮` : "", dim: true },
+        ]);
+      }
       if (card.turns !== undefined && card.turns > 0) {
         fit([{ t: `   ${card.turns} 轮 · 已记账 · 纪要已回写会话账本`, dim: true }]);
       }

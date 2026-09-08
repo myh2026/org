@@ -19,6 +19,7 @@ import { ExpertManifest, Registry } from "../registry/manifest.hsl";
 import { ask } from "../providers/model.hsl";
 
 /// 直连会话（一次 org ask = 一轮问答；多轮 = 账本上的多行）。
+/// ctx_tokens：本轮提示词+回答的上下文占用估算（Codex 风格窗口计量）。
 #[derive(Debug, Clone)]
 export struct DirectSession {
     expert: String,
@@ -26,6 +27,7 @@ export struct DirectSession {
     question: String,
     answer: String,
     tokens: u32,
+    ctx_tokens: u32,
     turn: u32,
 }
 
@@ -67,6 +69,8 @@ export fn main() -> Result<(), ExpertError> {
             println!("[direct] {} 回答（{} tokens）：", s.expert, s.tokens);
         }
         println!("{}", s.answer);
+        // 上下文窗口占用（Codex 风格：会话史单调增长，占用可见）
+        println!("[ctx] 窗口占用 {}（{} 轮累计）", ctx_line(s.ctx_tokens, 131072), s.turn);
         i += 1;
         if i >= total {
             break;
@@ -147,9 +151,11 @@ export async fn direct(expert: String, session_id: String, question: String) -> 
 
     // 花销记账（独立科目：direct-ledger.jsonl；多轮累加而非覆盖）
     let tokens = estimate_tokens(question.clone(), answer.clone());
+    // 上下文占用（近似口径，与 lib/engine.ts 同源：系统提示含会话史）
+    let ctx_tokens = estimate_context(m.description.clone(), history.clone(), question.clone(), answer.clone());
     let ledger_line = format!(
-        "{{\"expert\":\"{}\",\"session\":\"{}\",\"turn\":{},\"question\":\"{}\",\"tokens\":{},\"accepted\":1}}\n",
-        expert, session_id, turn, question, tokens
+        "{{\"expert\":\"{}\",\"session\":\"{}\",\"turn\":{},\"question\":\"{}\",\"tokens\":{},\"ctx_tokens\":{},\"accepted\":1}}\n",
+        expert, session_id, turn, question, tokens, ctx_tokens
     );
     let _ = native typescript {
         let prev = "";
@@ -169,7 +175,15 @@ export async fn direct(expert: String, session_id: String, question: String) -> 
     };
 
     // 会话账本落盘（runtime/sessions/<expert>/<session>.jsonl；多轮连续性载体）
-    append_session(expert.clone(), session_id.clone(), turn, question.clone(), answer.clone(), tokens);
+    append_session(expert.clone(), session_id.clone(), turn, question.clone(), answer.clone(), tokens, ctx_tokens);
+
+    // 上下文占用上总线（知情权不可绕：TUI / status 消费 direct_ctx 事件）
+    // detail 走字符串通道（与 direct_open 等事件同构，store 侧正则解析）
+    let ctx_detail = format!("{}/{} turn={} ctx={} window=131072", expert, session_id, turn, ctx_tokens);
+    let _ = native typescript {
+        $host.events.emit("journal", { name: "direct_ctx", detail: ctx_detail });
+        return true;
+    };
 
     // 纪要回写（主控编排上下文保持完整 —— 事后知情，不事前审批）
     let memo = format!("direct session with {} [{}] turn {} :: {} -> {}", expert, session_id, turn, question, answer);
@@ -194,6 +208,7 @@ export async fn direct(expert: String, session_id: String, question: String) -> 
         question: question,
         answer: answer,
         tokens: tokens,
+        ctx_tokens: ctx_tokens,
         turn: turn,
     })
 }
@@ -262,12 +277,12 @@ fn render_history(history: Vec<TurnRecord>) -> String {
     out
 }
 
-/// 会话账本追加（JSONL；目录自动建）。
-fn append_session(expert: String, session_id: String, turn: u32, question: String, answer: String, tokens: u32) {
+/// 会话账本追加（JSONL；目录自动建；ctx_tokens 为窗口占用估算）。
+fn append_session(expert: String, session_id: String, turn: u32, question: String, answer: String, tokens: u32, ctx_tokens: u32) {
     let path = format!("runtime/sessions/{}/{}.jsonl", expert, session_id);
     let line = format!(
-        "{{\"turn\":{},\"question\":\"{}\",\"answer\":\"{}\",\"tokens\":{}}}\n",
-        turn, question, answer, tokens
+        "{{\"turn\":{},\"question\":\"{}\",\"answer\":\"{}\",\"tokens\":{},\"ctx_tokens\":{}}}\n",
+        turn, question, answer, tokens, ctx_tokens
     );
     let _ = native typescript {
         let prev = "";
@@ -285,4 +300,56 @@ fn append_session(expert: String, session_id: String, turn: u32, question: Strin
 fn estimate_tokens(question: String, answer: String) -> u32 {
     let raw = (question.len() + answer.len()) / 3;
     raw as u32
+}
+
+/// 上下文占用估算（与 lib/engine.ts contextUsageOf 同口径）：系统提示
+/// （专家描述 + 会话史）+ 本轮问答，chars/3 折算 + 每轮结构开销近似。
+fn estimate_context(desc: String, history: Vec<TurnRecord>, question: String, answer: String) -> u32 {
+    let mut chars = desc.len() + question.len() + answer.len() + 64;
+    for t in history.iter() {
+        chars += t.question.len() + t.answer.len() + 24;
+    }
+    (chars / 3) as u32
+}
+
+/// 千分位 k 格式（8400 → "8.4k"；与 TS 侧 fmt 同形）。
+fn fmt_k(n: u32) -> String {
+    if n >= 1000 {
+        let whole = n / 1000;
+        let frac = (n % 1000) / 100;
+        format!("{}.{}k", whole, frac)
+    } else {
+        format!("{}", n)
+    }
+}
+
+/// 上下文计量条（Codex 风格）：▓▓░░ 8.4k/131.1k（6.4%）。
+/// 整数运算（千分数避免浮点），12 格 meter。
+fn ctx_line(used: u32, window: u32) -> String {
+    let mut denom = window;
+    if denom == 0 {
+        denom = 1;
+    }
+    let pct = (used * 1000) / denom;
+    let mut filled = (used * 12) / denom;
+    if filled > 12 {
+        filled = 12;
+    }
+    if used > 0 && filled == 0 {
+        filled = 1;
+    }
+    let mut bar = String::new();
+    let mut i: u32 = 0;
+    loop {
+        if i >= 12 {
+            break;
+        }
+        if i < filled {
+            bar.push_str("▓");
+        } else {
+            bar.push_str("░");
+        }
+        i += 1;
+    }
+    format!("{} {}/{}（{}.{}%）", bar, fmt_k(used), fmt_k(window), pct / 10, pct % 10)
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // ============================================================================
-// org/cli/org.ts — ORG 命令行（v0.4.3）
+// org/cli/org.ts — ORG 命令行（v0.4.4）
 // ----------------------------------------------------------------------------
 //   org run --task "..."          团队模式派单（监督回路全流程）
 //   org demo                      全叙事演示：铸专家 → 用户选取保留 → 复用+补丁+金丝雀
@@ -10,7 +10,9 @@
 //   org handoff <expert> --task "..."   转接模式（主控移交摘要 → 专家代答）
 //   org keep <expert...>          工具库治理：选取保留 harness（候选 → 转正）
 //   org drop <expert...>          工具库治理：取消保留（不再参与 B 路径自动复用）
-//   org status                    库 / 池 / 资产状态（★ 保留 · ○ 候选）
+//   org import <file.hsl>         工具库治理：导入用户自己的 harness（check 闸门 →
+//                                 入库即保留 → B 路径即刻可复用）
+//   org status                    库 / 池 / 资产状态（★ 保留 · ○ 候选 · 含上下文窗口占用）
 //   org score [--axis a]          模型评分卡与证据来源
 //   org replay --run <dir>        确定性重放某次历史运行（journal 时间线）
 //   org check                     dhv check 全部 HSL 源
@@ -24,9 +26,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { ROOT, DEFAULT_WORKSPACE } from "../lib/root.ts";
 import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
-         loadRegistryIndex, setRetained, keepAllCandidates } from "../lib/engine.ts";
+         loadRegistryIndex, setRetained, keepAllCandidates,
+         importHarness, listContextUsage, renderContextMeter } from "../lib/engine.ts";
 
-const VERSION = "0.4.3";
+const VERSION = "0.4.4";
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const HANDOFF_ENTRY = path.join(ROOT, "hsl/pool/handoff.hsl");
@@ -73,6 +76,9 @@ interface Args {
   session: string;
   turns: string[];
   approveCapability: boolean;
+  name: string;
+  description: string;
+  capabilities: string[];
   rest: string[];
 }
 
@@ -89,6 +95,9 @@ function parseArgs(argv: string[]): Args {
     session: "default",
     turns: [],
     approveCapability: false,
+    name: "",
+    description: "",
+    capabilities: [],
     rest: [],
   };
   let i = 1;
@@ -104,6 +113,9 @@ function parseArgs(argv: string[]): Args {
     else if (v === "--session") a.session = argv[++i] ?? "default";
     else if (v === "--turns") a.turns = (argv[++i] ?? "").split("|").filter((s) => s.length > 0);
     else if (v === "--approve-capability") a.approveCapability = true;
+    else if (v === "--name") a.name = (argv[++i] ?? "").toLowerCase();
+    else if (v === "--description" || v === "--desc") a.description = argv[++i] ?? "";
+    else if (v === "--capability" || v === "--capabilities") a.capabilities = (argv[++i] ?? "").split(",").map((s) => s.trim()).filter((s) => s.length > 0);
     else a.rest.push(v);
     i++;
   }
@@ -464,6 +476,34 @@ async function cmdDrop(a: Args): Promise<number> {
   return cmdRetain(a, false);
 }
 
+// ---- 导入用户自己的 harness（工具库治理第三动作：import = 用户交付资产） ----
+async function cmdImport(a: Args): Promise<number> {
+  const file = a.rest[0] ?? "";
+  if (!file) {
+    console.error('用法：org import <file.hsl> [--name NAME] [--description "…"] [--capability a,b] [--workspace DIR]');
+    console.error("  导入即保留（source=import, retained=true）—— B 路径自动复用立即可用；");
+    console.error("  描述缺省取文件首个 /// 文档注释，能力缺省扫描 #[capability(…)] 注解。");
+    return 2;
+  }
+  ensureWorkspace(a.workspace);
+  try {
+    const r = await importHarness(a.workspace, path.resolve(file), {
+      name: a.name || undefined,
+      description: a.description || undefined,
+      capabilities: a.capabilities.length > 0 ? a.capabilities : undefined,
+    });
+    console.log(`✓ 已导入 ${r.name}@${r.version}（check 绿 · git 留痕）`);
+    console.log(`  描述：${r.description}`);
+    console.log(`  能力：${r.capabilities.join(", ")}`);
+    console.log(`  入库：${path.relative(process.cwd(), r.file)}（source=import · retained=true · B 路径即刻可复用）`);
+    console.log("  下一步：org status 查看 · org ask " + r.name + ' "…" 直连 · org drop ' + r.name + " 取消保留");
+    return 0;
+  } catch (err) {
+    console.error(`✗ 导入失败：${(err as Error).message}`);
+    return 1;
+  }
+}
+
 async function cmdRetain(a: Args, retained: boolean): Promise<number> {
   const names = a.rest;
   const action = retained ? "keep（选取保留）" : "drop（取消保留）";
@@ -542,13 +582,12 @@ async function cmdStatus(a: Args): Promise<number> {
       console.log(`复发计数（补丁判据）：${JSON.stringify(rec)}`);
     }
   }
-  // 会话账本
-  const sessionsDir = path.join(ws, "runtime/sessions");
-  if (fs.existsSync(sessionsDir)) {
-    for (const expert of fs.readdirSync(sessionsDir)) {
-      const dir = path.join(sessionsDir, expert);
-      const files = fs.readdirSync(dir);
-      console.log(`直连会话账本（${expert}）：${files.join(", ")}`);
+  // 会话账本（含上下文窗口占用 —— Codex 风格计量）
+  const usages = listContextUsage(ws);
+  if (usages.length > 0) {
+    console.log("\n直连会话账本（上下文窗口占用 · GLM-4.5 窗口 128k tokens）：");
+    for (const u of usages) {
+      console.log(`  ${u.expert}/${u.session} ${u.turns} 轮 · 记账 ${u.billed} tokens · ctx ${renderContextMeter(u)}`);
     }
   }
   // git 历史
@@ -681,6 +720,7 @@ async function main(): Promise<number> {
     case "handoff": return cmdHandoff(a);
     case "keep": return cmdKeep(a);
     case "drop": return cmdDrop(a);
+    case "import": return cmdImport(a);
     case "status": return cmdStatus(a);
     case "score": return cmdScore(a);
     case "replay": return cmdReplay(a);
@@ -703,9 +743,12 @@ async function main(): Promise<number> {
       工具库治理：选取保留 harness（工厂候选 → 转正，git 留痕）
   org drop <expert> [expert2 ...] [--workspace DIR]
       工具库治理：取消保留（B 路径不再自动复用；显式寻址仍可用）
+  org import <file.hsl> [--name N] [--description "…"] [--capability a,b]
+      工具库治理：导入你自己的 harness（check 闸门 → 入库 → 即刻可复用；
+      描述缺省取 /// 文档注释 · 能力缺省扫描 #[capability] 注解）
   org status [--workspace DIR]
-      库 / 池 / memo / 基准题 / 基线 / 复发计数 / 会话账本 / git 注册表历史
-      （★ = 用户保留资产 · ○ = 工厂候选）
+      库 / 池 / memo / 基准题 / 基线 / 复发计数 / 会话账本（含上下文窗口占用）
+      / git 注册表历史（★ = 用户保留 · ○ = 工厂候选 · import = 用户导入）
   org score [--axis structured_output]
       模型评分卡（证据归因聚合）
   org replay --run <run-dir>

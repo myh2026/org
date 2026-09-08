@@ -1,8 +1,10 @@
-{"seq":0,"ts":"2026-09-08T11:17:35.538Z","name":"run_start","data":{"entry":"/home/runner/work/org/org/hsl/pool/direct.hsl","model":"scripted","task":"(direct) multi-turn","scale":"microkernel"}}
-{"seq":1,"ts":"2026-09-08T11:17:35.548Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
-{"seq":2,"ts":"2026-09-08T11:17:35.548Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
-{"seq":3,"ts":"2026-09-08T11:17:35.552Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
-{"seq":4,"ts":"2026-09-08T11:17:35.562Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
-{"seq":5,"ts":"2026-09-08T11:17:35.562Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
-{"seq":6,"ts":"2026-09-08T11:17:35.564Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
-{"seq":7,"ts":"2026-09-08T11:17:35.565Z","name":"run_end","data":{"elapsed_ms":27,"ok":true}}
+{"seq":0,"ts":"2026-09-08T11:29:34.562Z","name":"run_start","data":{"entry":"/home/z/repos/org/hsl/pool/direct.hsl","model":"scripted","task":"(direct) multi-turn","scale":"microkernel"}}
+{"seq":1,"ts":"2026-09-08T11:29:34.573Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
+{"seq":2,"ts":"2026-09-08T11:29:34.573Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
+{"seq":3,"ts":"2026-09-08T11:29:34.578Z","name":"journal","data":{"name":"direct_ctx","detail":"notice-parser/demo turn=1 ctx=94 window=131072"}}
+{"seq":4,"ts":"2026-09-08T11:29:34.579Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
+{"seq":5,"ts":"2026-09-08T11:29:34.584Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
+{"seq":6,"ts":"2026-09-08T11:29:34.584Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
+{"seq":7,"ts":"2026-09-08T11:29:34.586Z","name":"journal","data":{"name":"direct_ctx","detail":"notice-parser/demo turn=2 ctx=144 window=131072"}}
+{"seq":8,"ts":"2026-09-08T11:29:34.586Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
+{"seq":9,"ts":"2026-09-08T11:29:34.587Z","name":"run_end","data":{"elapsed_ms":25,"ok":true}}

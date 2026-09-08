@@ -1,7 +1,7 @@
 {
-  "ts": "2026-09-08T11:17:35.464Z",
+  "ts": "2026-09-08T11:29:34.450Z",
   "ok": true,
-  "elapsed_ms": 16,
+  "elapsed_ms": 29,
   "model": "scripted",
   "task": "校验记录完整性并产出验收结论",
   "events": 2

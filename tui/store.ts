@@ -65,6 +65,7 @@ export type Card =
   | {
       id: number; t: "direct"; expert?: string; question: string;
       answers: string[]; turns?: number; note?: string; done: boolean;
+      ctxTokens?: number; ctxWindow?: number; ctxTurn?: number;
     }
   | {
       id: number; t: "done"; ok: boolean; canceled?: boolean;
@@ -281,6 +282,9 @@ const RE_REDISPATCH = /^task#(\d+)\s+revise\s+#(\d+):\s*(.*)$/;
 const RE_MINT = /^(\S+)@([\d.]+)\s+eval=(\S+)/;
 /** `静默更新检测：alerts=0 baseline=...` */
 const RE_DRIFT = /alerts=(\d+)/;
+
+/** `direct_ctx` 事件：`notice-parser/demo turn=2 ctx=141 window=131072`（Codex 风格窗口计量） */
+const RE_CTX = /^(\S+)\/(\S+) turn=(\d+) ctx=(\d+) window=(\d+)$/;
 
 export function pushEngineEvent(state: TuiState, ev: EngineEvent): TuiState {
   switch (ev.kind) {
@@ -580,6 +584,28 @@ function applyJournal(state: TuiState, action: string, detail: string): TuiState
         next = withCard(state, ctx.directCardId, (c) => (c.t === "direct" ? { ...c, expert: detail } : c));
       }
       return next;
+    }
+    case "direct_ctx": {
+      // 直连上下文窗口占用（Codex 风格）：expert/session turn=N ctx=N window=N
+      const m = RE_CTX.exec(detail);
+      if (!m) return state;
+      const ctx = state.runCtx ?? newRunCtx(state.model);
+      if (ctx.directCardId === null) {
+        const id = state.nextId;
+        return {
+          ...state, nextId: id + 1,
+          runCtx: { ...ctx, directCardId: id },
+          cards: [...state.cards, {
+            id, t: "direct", expert: m[1], question: ctx.mission,
+            answers: [], done: false,
+            ctxTokens: Number(m[4]), ctxWindow: Number(m[5]), ctxTurn: Number(m[3]),
+          }],
+        };
+      }
+      return withCard(state, ctx.directCardId, (c) =>
+        c.t === "direct"
+          ? { ...c, expert: m[1], ctxTokens: Number(m[4]), ctxWindow: Number(m[5]), ctxTurn: Number(m[3]) }
+          : c);
     }
     case "direct_close": {
       const ctx = state.runCtx;

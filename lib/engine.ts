@@ -1,5 +1,5 @@
 // ============================================================================
-// org/lib/engine.ts — 引擎桥：CLI 与 TUI 共用（v0.4.3，规格书 §4）
+// org/lib/engine.ts — 引擎桥：CLI 与 TUI 共用（v0.4.4，规格书 §4）
 // ----------------------------------------------------------------------------
 // 主路径：spawn `bun <dhv-ts> run <entry> --workspace --task --model --fixture
 // --out --allow bun,node,ls,cat,grep,diff,git`（与 cli/org.ts runHsl 同参），
@@ -279,6 +279,215 @@ export function keepAllCandidates(ws: string): string[] {
   if (candidates.length === 0) return [];
   const { kept } = setRetained(ws, candidates, true);
   return kept;
+}
+
+// ---------- 工具库治理：导入用户自己的 harness（org import / TUI :import） ----------
+// 语义：导入 = 用户在场交付自己的 .hsl harness 进工具库。与 factory 产物不同，
+// 导入是用户的显式动作 —— source="import" 且 retained=true（B 路径立即可用，
+// 与 manual 存量同待遇，见 manifest.hsl find_reusable 的判据）。
+// 质量闸门：导入前强制 dhv check（不通过拒绝入库 —— 工具库不收坏 harness）。
+
+export interface ImportOptions {
+  name?: string;              // 缺省取文件名 stem
+  description?: string;       // 缺省取文件首个 /// 文档注释
+  capabilities?: string[];    // 缺省扫描 #[capability(...)] 注解
+}
+
+export interface ImportResult {
+  name: string;
+  version: string;
+  file: string;               // 入库后的 harness 文件（registry/harnesses/<name>.hsl）
+  description: string;
+  capabilities: string[];
+  checkOutput: string;
+}
+
+/** 校验 harness 名（与专家名同域：小写字母/数字/连字符）。 */
+export function validHarnessName(name: string): boolean {
+  return /^[a-z][a-z0-9-]*$/.test(name) && name.length >= 2 && name.length <= 48;
+}
+
+/** 从 HSL 源码提取首个 /// 文档注释作为描述。 */
+export function docCommentOf(source: string): string {
+  for (const line of source.split("\n")) {
+    const m = /^\s*\/\/\/\s?(.*)$/.exec(line);
+    if (m && m[1] && m[1].trim().length > 0) return m[1].trim();
+  }
+  return "";
+}
+
+/** 从 HSL 源码扫描 #[capability(...)] 注解（去重，保持出现顺序）。 */
+export function capabilitiesOf(source: string): string[] {
+  const out: string[] = [];
+  for (const m of source.matchAll(/#\[capability\(\s*([a-zA-Z0-9_,\s]+?)\s*\)\]/g)) {
+    for (const raw of m[1]!.split(",")) {
+      const c = raw.trim();
+      if (c.length > 0 && !out.includes(c)) out.push(c);
+    }
+  }
+  return out;
+}
+
+/**
+ * 导入一个用户 harness：check 闸门 → 复制入库 → 注册 index.json + 每专家
+ * 副本 → git 提交留痕（与 keep/drop 同链 —— 增长率账本的一部分）。
+ * 抛错即失败（CLI/TUI 捕获后展示）。check 通道默认 dhvRun（可注入替换）。
+ */
+export async function importHarness(
+  ws: string,
+  file: string,
+  opts: ImportOptions = {},
+  check: (args: string[]) => Promise<{ ok: boolean; out: string }> = dhvRun,
+): Promise<ImportResult> {
+  if (!fs.existsSync(file)) {
+    throw new Error(`文件不存在：${file}`);
+  }
+  if (!file.endsWith(".hsl")) {
+    throw new Error(`只接受 .hsl 文件（收到 ${path.basename(file)}）`);
+  }
+  const source = fs.readFileSync(file, "utf-8");
+  if (source.trim().length === 0) {
+    throw new Error("文件为空（空 harness 不能入库）");
+  }
+  // 质量闸门：dhv check 必须绿（导入的是要被 B 路径复用的资产）
+  const checkRes = await check(["check", file]);
+  if (!checkRes.ok) {
+    throw new Error(`dhv check 未通过（工具库不收坏 harness）：\n${checkRes.out.trim().split("\n").slice(-6).join("\n")}`);
+  }
+  // 名字：--name 优先，缺省文件 stem；与注册表同域查重
+  const name = (opts.name ?? path.basename(file, ".hsl")).toLowerCase();
+  if (!validHarnessName(name)) {
+    throw new Error(`名字不合法：${name}（小写字母开头，仅 a-z0-9-，2-48 字符）`);
+  }
+  const experts = loadRegistryIndex(ws);
+  if (experts.some((m) => m.name === name)) {
+    throw new Error(`注册表已有同名专家：${name}（改名或先 org drop）`);
+  }
+  const description = (opts.description && opts.description.length > 0)
+    ? opts.description
+    : (docCommentOf(source) || `(imported harness ${name})`);
+  const capabilities = (opts.capabilities && opts.capabilities.length > 0)
+    ? opts.capabilities
+    : (capabilitiesOf(source).length > 0 ? capabilitiesOf(source) : ["general"]);
+
+  // 入库：registry/harnesses/<name>.hsl（用户源文件原样保存，可追溯）
+  const harnessDir = path.join(ws, "registry", "harnesses");
+  fs.mkdirSync(harnessDir, { recursive: true });
+  const dest = path.join(harnessDir, `${name}.hsl`);
+  fs.copyFileSync(file, dest);
+
+  // 注册：index.json + 每专家副本（与 setRetained 双写形态一致）
+  const entry: Record<string, unknown> = {
+    name,
+    version: "0.1.0",
+    bnf: "v1.5.0",
+    description,
+    capabilities,
+    signature: "fn main() -> Result<(), ExpertError>",
+    source: "import",
+    eval_score: 0.0,   // 诚实边界：未评估（不是 1.0 —— 导入 ≠ 已验证）
+    pass_rate: 0.0,
+    entry: `registry/harnesses/${name}.hsl`,
+    fixture: "",
+    uses: 0,
+    retained: true,    // 用户导入 = 用户保留（区别于 factory 候选）
+    provenance: [{ imported_from: path.basename(file), at: new Date().toISOString() }],
+  };
+  fs.writeFileSync(path.join(ws, "registry/index.json"), JSON.stringify([...experts, entry]));
+  fs.writeFileSync(path.join(ws, "registry", `${name}.json`), JSON.stringify(entry));
+  git(ws, ["add", "registry/"]);
+  git(ws, ["commit", "-q", "-m", `import ${name}@0.1.0 (user harness)`]);
+
+  return {
+    name, version: "0.1.0", file: dest,
+    description, capabilities, checkOutput: checkRes.out.trim(),
+  };
+}
+
+// ---------- 上下文窗口计量（Codex 风格：会话上下文占用可见） ----------
+// 直连会话每轮把全部历史织入提示词（direct.hsl render_history）—— 上下文
+// 占用随轮次单调增长。计量口径（诚实边界：近似估算，非精确 tokenizer）：
+//   当前上下文 ≈ est(专家描述) + Σ est(每轮 问答) + 结构开销
+// 与 direct.hsl 的 estimate_tokens 同源（chars/3），双端数字一致。
+
+/** 模型上下文窗口（GLM-4.5，128K tokens）。 */
+export const CONTEXT_WINDOW_TOKENS = 131_072;
+
+/** 估算文本 token 数（与 HSL 侧 estimate_tokens 同口径：chars/3）。 */
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 3);
+}
+
+export interface ContextUsage {
+  expert: string;
+  session: string;
+  turns: number;
+  /** 全会话问答 token 合计（记账口径：每轮 tokens 求和）。 */
+  billed: number;
+  /** 当前上下文占用（近似：描述 + 全部历史 + 结构开销）。 */
+  context: number;
+  window: number;
+}
+
+/** 读取一个会话账本的上下文占用（缺账本 → null）。 */
+export function contextUsageOf(ws: string, expert: string, session: string, description = ""): ContextUsage | null {
+  const file = path.join(ws, "runtime", "sessions", expert, `${session}.jsonl`);
+  let raw: string;
+  try {
+    raw = fs.readFileSync(file, "utf-8");
+  } catch {
+    return null;
+  }
+  let billed = 0;
+  let qaChars = 0;
+  let turns = 0;
+  for (const line of raw.split("\n")) {
+    if (line.trim().length === 0) continue;
+    try {
+      const o = JSON.parse(line) as { question?: string; answer?: string; tokens?: number };
+      turns += 1;
+      billed += Number(o.tokens ?? 0);
+      qaChars += (o.question ?? "").length + (o.answer ?? "").length;
+    } catch { /* 坏行容忍 */ }
+  }
+  const context = estimateTokens(description) + Math.ceil(qaChars / 3) + 32 * turns;
+  return { expert, session, turns, billed, context, window: CONTEXT_WINDOW_TOKENS };
+}
+
+/** 全工作区会话账本扫描（status / TUI 会话栏共用）。 */
+export function listContextUsage(ws: string): ContextUsage[] {
+  const out: ContextUsage[] = [];
+  const experts = loadRegistryIndex(ws);
+  const descOf = (name: string): string => {
+    const hit = experts.find((m) => m.name === name);
+    return hit ? String(hit.description ?? "") : "";
+  };
+  const root = path.join(ws, "runtime", "sessions");
+  let expertsDirs: fs.Dirent[] = [];
+  try {
+    expertsDirs = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of expertsDirs) {
+    if (!e.isDirectory()) continue;
+    for (const f of fs.readdirSync(path.join(root, e.name))) {
+      if (!f.endsWith(".jsonl")) continue;
+      const usage = contextUsageOf(ws, e.name, f.replace(/\.jsonl$/, ""), descOf(e.name));
+      if (usage && usage.turns > 0) out.push(usage);
+    }
+  }
+  return out.sort((a, b) => a.expert.localeCompare(b.expert) || a.session.localeCompare(b.session));
+}
+
+/** 渲染上下文计量条：▓▓░░░ 8.4k/128k（6.6%）（CLI status / TUI 共用）。 */
+export function renderContextMeter(usage: { context: number; window: number }): string {
+  const pct = usage.window > 0 ? usage.context / usage.window : 0;
+  const cells = 12;
+  const filled = Math.max(usage.context > 0 ? 1 : 0, Math.min(cells, Math.round(pct * cells)));
+  const bar = "▓".repeat(filled) + "░".repeat(cells - filled);
+  const fmt = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
+  return `${bar} ${fmt(usage.context)}/${fmt(usage.window)}（${(pct * 100).toFixed(1)}%）`;
 }
 
 // ---------- 产物读取 ----------

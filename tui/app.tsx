@@ -17,6 +17,7 @@ import { renderFrame } from "./frame.ts";
 import {
   startRun, scanWorkspace, replayRun, latestScorecardDir,
   ensureWorkspace, resetWorkspace, gitShortLog, setRetained, keepAllCandidates,
+  importHarness,
   type RunHandle, type Scorecard,
 } from "../lib/engine.ts";
 import type { EngineEvent } from "../lib/events.ts";
@@ -326,6 +327,31 @@ export class App {
           type: "notice",
           text: `会话 ${info.sessions.length} · 专家 ${info.experts.length}（候选 ${candidates.length}）· memo ${info.memoKeys} · 基准题 ${info.minedTracks} 轨道`,
         });
+        return;
+      }
+      case "import": {
+        // 工具库治理第三动作：导入用户自己的 harness（check 闸门 → 入库即保留）
+        if (!arg) {
+          this.dispatch({ type: "notice", text: "用法：:import <file.hsl> [--name N]（check 绿才入库 · 入库即保留可复用）", tone: "warn" });
+          return;
+        }
+        // 支持 :import <file> --name <name> 形态（余参拆解）
+        const parts = arg.split(/\s+/);
+        const file = parts[0]!;
+        const nameIdx = parts.indexOf("--name");
+        const importName = nameIdx >= 0 ? parts[nameIdx + 1] : undefined;
+        void (async () => {
+          try {
+            const r = await importHarness(this.state.workspace, path.resolve(file), { name: importName });
+            this.dispatch({
+              type: "notice",
+              text: `✓ 已导入 ${r.name}@${r.version}（check 绿 · ${r.capabilities.join(",")} · B 路径即刻可复用）`,
+            });
+            this.refreshWorkspace();
+          } catch (err) {
+            this.dispatch({ type: "notice", text: `导入失败：${(err as Error).message}`, tone: "err" });
+          }
+        })();
         return;
       }
       case "keep": case "drop": {
