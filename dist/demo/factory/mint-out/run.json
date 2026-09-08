@@ -1,7 +1,7 @@
 {
-  "ts": "2026-09-08T14:14:21.718Z",
+  "ts": "2026-09-08T15:07:14.684Z",
   "ok": true,
-  "elapsed_ms": 15,
+  "elapsed_ms": 14,
   "model": "scripted",
   "task": "acceptance rehearsal: validate sample records",
   "events": 2
