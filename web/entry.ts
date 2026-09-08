@@ -16,6 +16,11 @@
 //   POST /api/ask                 进程内直连（DIRECT_ENTRY + ORG_ASK_* env +
 //                                  expertFixtureOf 剧本自动发现 + dhvRun —— 与
 //                                  org ask 同链路，不 spawn CLI 自身）
+//   POST /api/ask-stream          同链路 SSE 流式版（issue #11）：open →
+//                                  queued? → start → stage*（2.6s 轮换）→
+//                                  log*（子进程 stdout 逐行实时）→ done/error。
+//                                  spawn 车道 banner/配置行到达即推；进程内
+//                                  车道降级为 stage+done 两类事件。
 //
 // 入口形态（与 tui/entry.ts 同模式）：
 //   cli/org.ts cmdWeb      org web 子命令（进程内 import 本文件；bun compile
@@ -29,10 +34,10 @@ import * as path from "node:path";
 import { ROOT, DEFAULT_WORKSPACE } from "../lib/root.ts";
 import {
   ensureWorkspace, loadRegistryIndex, listContextUsage,
-  expertFixtureOf, dhvRun,
+  expertFixtureOf, dhvRun, resolveDhv, resolveBun,
 } from "../lib/engine.ts";
 
-const VERSION = "0.4.7";
+const VERSION = "0.4.8";
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const STOCK_FIXTURE = path.join(ROOT, "fixtures/run-notices.json");
 const DEFAULT_PORT = 4600; // 3000/3030/5000 被本机其他服务占用，绝不复用
@@ -238,10 +243,19 @@ export function parseAskOut(out: string): AskOutcome {
 
 // ask 串行锁：direct 流水线固定写 workspace/out-ask（与 org ask 同产物约定），
 // 并发 POST 会让两个运行互踩产物目录 —— 原型用单飞队列（一次一轮）。
+// askBusy 供 SSE 端点诚实告知「排队中」（多用户并发原型取舍）。
 let askChain: Promise<unknown> = Promise.resolve();
+let askBusy = false;
 
 function askSerialized<T>(fn: () => Promise<T>): Promise<T> {
-  const run = askChain.then(fn, fn);
+  const run = askChain.then(async () => {
+    askBusy = true;
+    try {
+      return await fn();
+    } finally {
+      askBusy = false;
+    }
+  });
   askChain = run.then(() => undefined, () => undefined);
   return run;
 }
@@ -278,12 +292,165 @@ async function askOnce(
   return parseAskOut(r.out);
 }
 
+// ---- SSE 流式执行（issue #11：spawn 车道增量读子进程 stdout 逐行回调） ----
+
+/** direct.hsl 的真实流水线阶段（与 direct.hsl 源码对照；GUI 等待期轮换展示）。 */
+export const ASK_STAGES = [
+  "能力核对（capability gate）",
+  "注册表寻址（resolve）",
+  "会话史装载（ledger replay）",
+  "模型网关调用（model gateway）",
+  "记账与纪要回写（billing & ledger write）",
+] as const;
+
+/** 流式执行一轮直连：与 askOnce 同参数/同产物约定，区别在于 ——
+ *  spawn 车道用 ReadableStream.getReader() 增量读 stdout/stderr，
+ *  每凑齐一行即回调 onLog（banner/配置行到达即推，deepseek 长回答
+ *  期间 GUI 不再黑盒等待）；进程内车道（ORG_FORCE_INPROC）无增量
+ *  输出，仅返回最终结果（SSE 端点用 stage 事件填充等待期）。 */
+async function askStreamOnce(
+  ws: string,
+  req: { expert: string; question: string; session: string; model: string },
+  onLog: (line: string) => void,
+): Promise<AskOutcome> {
+  ensureWorkspace(ws);
+  const env: Record<string, string> = {
+    ORG_ASK_EXPERT: req.expert,
+    ORG_ASK_SESSION: req.session,
+    ORG_ASK_QUESTION: req.question,
+  };
+  let fixture = STOCK_FIXTURE;
+  const found = expertFixtureOf(ws, req.expert);
+  if (found) fixture = found;
+  const args = [
+    "run", DIRECT_ENTRY,
+    "--workspace", ws,
+    "--task", `(direct) ${req.question}`,
+    "--model", req.model,
+    "--fixture", fixture,
+    "--out", path.join(ws, "out-ask"),
+    "--allow", "bun,node,ls,cat,grep,diff,git",
+  ];
+  const forceInproc = process.env.ORG_FORCE_INPROC === "1";
+  const bun = forceInproc ? null : resolveBun();
+  if (bun) {
+    const dhv = resolveDhv();
+    const full: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (typeof v === "string") full[k] = v;
+    }
+    full.DHV_TS = dhv.replace(/\\/g, "/");
+    Object.assign(full, env);
+    const proc = Bun.spawn([bun, dhv, ...args], { env: full, stdout: "pipe", stderr: "pipe" });
+    const chunks: string[] = [];
+    // 行缓冲泵：chunk → 完整行（含跨 chunk 的半行拼接），逐行回调 + 原文留档
+    const pump = async (stream: ReadableStream<Uint8Array>): Promise<void> => {
+      const reader = stream.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        for (;;) {
+          const nl = buf.indexOf("\n");
+          if (nl < 0) break;
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          chunks.push(line + "\n");
+          if (line.trim().length > 0) onLog(line);
+        }
+      }
+      buf += dec.decode();
+      if (buf.length > 0) {
+        chunks.push(buf);
+        if (buf.trim().length > 0) onLog(buf.replace(/\n$/, ""));
+      }
+    };
+    await Promise.all([
+      proc.exited,
+      pump(proc.stdout as unknown as ReadableStream<Uint8Array>),
+      pump(proc.stderr as unknown as ReadableStream<Uint8Array>),
+    ]);
+    return parseAskOut(chunks.join(""));
+  }
+  // 进程内车道：无增量输出，走 dhvRun 拿最终结果
+  const r = await dhvRun(args, env);
+  return parseAskOut(r.out);
+}
+
 // ---- HTTP 服务 ----
 
 function json(res: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(res), {
     status,
     headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
+
+// ---- SSE 流式端点（issue #11）----
+// 事件协议（`event: <type>\ndata: <json>\n\n`）：
+//   open    请求回显 + 排队状态（queued=true 表示前一轮仍在跑）
+//   start   串行队列轮到本轮（流水线真正开跑）
+//   stage   等待期流水线阶段轮换（2.6s 一帧，direct.hsl 真实阶段）
+//   log     子进程 stdout 逐行实时（banner/配置行/回答正文/收尾行）
+//   done    AskOutcome 整体（answer/tokens/ctxLine/durationMs/turn/logs）
+//   error   引擎失败（人话 message）
+// 客户端断开不中止运行：账本是事实源，轮次照常落盘（enqueue 静默失败）。
+
+const SSE_STAGE_MS = 2600;
+
+function sseAsk(
+  ws: string,
+  req: { expert: string; question: string; session: string; model: string },
+): Response {
+  const enc = new TextEncoder();
+  let closed = false;
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: string, data: unknown): void => {
+        if (closed) return;
+        try {
+          controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+        } catch {
+          closed = true; // 客户端已断开：静默，运行继续（账本照写）
+        }
+      };
+      send("open", { expert: req.expert, session: req.session, model: req.model, queued: askBusy });
+      try {
+        const outcome = await askSerialized(async () => {
+          send("start", { model: req.model });
+          let stageIdx = 0;
+          const ticker = setInterval(() => {
+            send("stage", { stage: ASK_STAGES[stageIdx % ASK_STAGES.length]!, n: stageIdx + 1 });
+            stageIdx++;
+          }, SSE_STAGE_MS);
+          try {
+            return await askStreamOnce(ws, req, (line) => send("log", { line }));
+          } finally {
+            clearInterval(ticker);
+          }
+        });
+        send("done", outcome);
+      } catch (err) {
+        send("error", { message: (err as Error).message });
+      } finally {
+        try {
+          controller.close();
+        } catch { /* 已关闭 */ }
+      }
+    },
+    cancel() {
+      closed = true;
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      "connection": "keep-alive",
+      "x-accel-buffering": "no",
+    },
   });
 }
 
@@ -349,8 +516,11 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
           const expert = String(body.expert ?? "").trim();
           const question = String(body.question ?? "").trim();
           const session = String(body.session ?? "default").trim();
-          // model 缺省 scripted（占位剧本秒回）；真实回答由用户显式传 deepseek
-          const model = String(body.model ?? "scripted").trim() || "scripted";
+          // model 回落链（issue #11 修复）：请求体显式传 > 服务级
+          // （org web --model deepseek）> scripted 缺省。此前服务级 flag
+          // 被忽略（body 缺省写死 scripted）—— --model deepseek 启动后
+          // GUI 不传 model 也应走 deepseek。
+          const model = String(body.model ?? "").trim() || opts.model || "scripted";
           if (!expert || !question) {
             return json({ error: "expert 与 question 必填" }, 400);
           }
@@ -359,6 +529,26 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
           }
           const outcome = await askSerialized(() => askOnce(ws, { expert, question, session, model }));
           return json(outcome as unknown as Record<string, unknown>, outcome.ok ? 200 : 500);
+        }
+        // ---- 交互面（SSE 流式，issue #11）----
+        if (route === "POST /api/ask-stream") {
+          let body: Record<string, unknown>;
+          try {
+            body = (await req.json()) as Record<string, unknown>;
+          } catch {
+            return json({ error: "请求体必须是 JSON" }, 400);
+          }
+          const expert = String(body.expert ?? "").trim();
+          const question = String(body.question ?? "").trim();
+          const session = String(body.session ?? "default").trim();
+          const model = String(body.model ?? "").trim() || opts.model || "scripted";
+          if (!expert || !question) {
+            return json({ error: "expert 与 question 必填" }, 400);
+          }
+          if (!SAFE_NAME.test(expert) || !SAFE_NAME.test(session)) {
+            return json({ error: "expert/session 名不合法" }, 400);
+          }
+          return sseAsk(ws, { expert, question, session, model });
         }
         // ---- 未知路由 ----
         if (url.pathname.startsWith("/api/")) {
@@ -387,7 +577,8 @@ export async function webMain(argv: string[]): Promise<number> {
   console.log(`ORG web · v${VERSION} · 工作区 ${p.workspace}`);
   console.log(`  GUI        http://127.0.0.1:${server.port}/`);
   console.log(`  只读面     GET /api/status · /api/sessions?expert=… · /api/session/<专家>/<会话>`);
-  console.log(`  交互面     POST /api/ask（model 缺省 scripted · 占位剧本秒回）`);
+  console.log(`  交互面     POST /api/ask（JSON 整轮）· POST /api/ask-stream（SSE 流式）`);
+  console.log(`  模型       ${p.model}（请求体可逐次覆盖）`);
   console.log(`  Ctrl+C 退出`);
   process.on("SIGINT", () => { server.stop(true); process.exit(0); });
   process.on("SIGTERM", () => { server.stop(true); process.exit(0); });
@@ -459,6 +650,22 @@ function renderIndexHtml(): string {
            border-radius: 3px; vertical-align: middle; margin: 0 6px; overflow: hidden; }
   .meter i { display: block; height: 100%; background: linear-gradient(90deg,
              var(--amber-soft), var(--amber)); }
+  /* SSE 等待态（issue #11）：阶段轮换行（光标呼吸）+ 运行日志终端折叠区 */
+  .stage { color: var(--amber); font-size: 12px; }
+  .stage::after { content: "▊"; margin-left: 3px; color: var(--amber);
+                  animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  details.runlogs { margin-top: 8px; font-size: 11px; }
+  details.runlogs summary { color: var(--dim); cursor: pointer; user-select: none; }
+  details.runlogs summary:hover { color: var(--muted); }
+  details.runlogs summary b { color: var(--amber-soft); font-weight: 600; }
+  details.runlogs pre { margin-top: 6px; background: #0a0908; border: 1px solid #33302c;
+      border-radius: 6px; padding: 8px 10px; color: #a8967a; font: 11px/1.5 ui-monospace,
+      Menlo, Consolas, monospace; max-height: 160px; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-all; }
+  .answering { margin-top: 6px; color: var(--text); white-space: pre-wrap;
+               word-break: break-word; }
+  .answering .caret { color: var(--amber); animation: blink 1s steps(1) infinite; }
   .composer select, .composer input[type=text] { background: var(--bg);
       color: var(--text); border: 1px solid var(--border); border-radius: 8px;
       padding: 8px 12px; font-size: 13px; outline: none; }
@@ -490,7 +697,7 @@ function renderIndexHtml(): string {
     <div id="sessions"></div>
   </aside>
   <main>
-    <div class="chat" id="chat"><div class="empty">左侧选一位专家开始直连<br>（scripted 占位剧本秒回 · --model deepseek 换真实回答）</div></div>
+    <div class="chat" id="chat"><div class="empty">左侧选一位专家开始直连<br>（scripted 占位剧本秒回 · 提问后可见 SSE 流式：阶段轮换 + 实时运行日志）</div></div>
     <div class="composer">
       <select id="expertSel"></select>
       <input type="text" id="question" placeholder="向专家提问…（回车发送）" autofocus>
@@ -614,6 +821,18 @@ function selectSession(id) {
     });
 }
 
+// SSE 帧 → {event, data}（「event: X」+「data: {...}」两行一帧；注释行/心跳忽略）
+function sseFrame(frame, handler) {
+  var ev = "message", data = "";
+  frame.split("\\n").forEach(function (l) {
+    if (l.indexOf("event:") === 0) ev = l.slice(6).trim();
+    else if (l.indexOf("data:") === 0) data += l.slice(5).trim();
+  });
+  var obj = null;
+  try { obj = data ? JSON.parse(data) : null; } catch (e) { /* 容忍非 JSON */ }
+  handler(ev, obj);
+}
+
 function ask() {
   var expert = document.getElementById("expertSel").value || state.currentExpert;
   var question = document.getElementById("question").value.trim();
@@ -625,33 +844,124 @@ function ask() {
   if (chat.querySelector(".empty")) chat.innerHTML = "";
   chat.insertAdjacentHTML("beforeend",
     msgHtml("user", question) +
-    '<div class="msg bot" id="pending"><div class="bubble" style="color:var(--dim)">能力核对 → 寻址 → 会话史装载 → 模型网关 → 记账与纪要回写…</div></div>');
+    '<div class="msg bot" id="pending"><div class="bubble">' +
+    '<div class="stage" id="pstage">启动直连流水线…</div>' +
+    '<div class="answering" id="panswer" style="display:none"></div>' +
+    '<details class="runlogs" id="plogs"><summary>运行日志（<b id="plogn">0</b> 行 · 实时）</summary><pre id="plogbody"></pre></details>' +
+    "</div></div>");
   chat.scrollTop = chat.scrollHeight;
-  api("/api/ask", {
+  var inAnswer = false, answerLines = [];
+  var settled = false;
+
+  function el(id) { return document.getElementById(id); }
+  function setStage(text) { var n = el("pstage"); if (n) n.textContent = text; }
+  function scrollDown() { chat.scrollTop = chat.scrollHeight; }
+  function appendLog(line) {
+    var body = el("plogbody"), n = el("plogn");
+    if (!body) return;
+    body.textContent += line + "\\n";
+    if (n) n.textContent = String(Number(n.textContent) + 1);
+    body.scrollTop = body.scrollHeight;
+  }
+  function renderAnswer() {
+    var a = el("panswer");
+    if (!a) return;
+    a.style.display = "";
+    a.textContent = answerLines.join("\\n");
+    a.insertAdjacentHTML("beforeend", '<span class="caret">▊</span>');
+  }
+
+  function onEvent(ev, d) {
+    if (settled) return;
+    if (ev === "open") {
+      if (d && d.queued) setStage("排队中（前一轮直连仍在运行）…");
+    } else if (ev === "start") {
+      setStage("流水线开跑（" + ((d && d.model) || "scripted") + "）");
+    } else if (ev === "stage") {
+      setStage("org 流水线 · " + ((d && d.stage) || ""));
+    } else if (ev === "log" && d && d.line) {
+      var line = d.line;
+      appendLog(line);
+      if (/^\\[direct\\]/.test(line)) {
+        inAnswer = true; answerLines = [];
+        setStage("回答输出中（子进程 stdout 逐行回传）…");
+      } else if (line.indexOf("[ctx]") === 0) {
+        inAnswer = false;
+        setStage("记账与纪要回写…");
+      } else if (line.indexOf("harness 返回") >= 0) {
+        inAnswer = false;
+      } else if (inAnswer) {
+        answerLines.push(line);
+        renderAnswer();
+      }
+      scrollDown();
+    } else if (ev === "done") {
+      finalize(d);
+    } else if (ev === "error") {
+      finalize(null, (d && d.message) || "引擎失败");
+    }
+  }
+
+  function finalize(outcome, errMsg) {
+    if (settled) return;
+    settled = true;
+    var pending = el("pending");
+    if (pending) pending.remove();
+    if (outcome) {
+      var meta = "turn " + (outcome.turn == null ? "-" : outcome.turn) + " · <b>" +
+        (outcome.tokens == null ? "-" : outcome.tokens) + " tokens</b>" +
+        (outcome.durationMs == null ? "" : " · " + outcome.durationMs + " ms") +
+        " · ctx " + meterHtml(outcome.ctxLine);
+      chat.insertAdjacentHTML("beforeend",
+        '<div class="msg bot"><div class="bubble">' +
+        esc(outcome.answer || "（无回答）") + "</div>" +
+        '<details class="runlogs"><summary>运行日志</summary><pre>' +
+        esc(outcome.logs || "") + "</pre></details>" +
+        '<div class="obs">' + meta + "</div></div>");
+      if (!state.currentSession) state.currentSession = session;
+    } else {
+      chat.insertAdjacentHTML("beforeend",
+        '<div class="msg bot"><div class="bubble" style="color:var(--red)">直连失败：' +
+        esc(errMsg || "未知错误") + "</div></div>");
+    }
+    scrollDown();
+    api("/api/sessions?expert=" + encodeURIComponent(expert))
+      .then(function (x) { renderSessions(x.sessions || []); });
+  }
+
+  fetch("/api/ask-stream", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ expert: expert, question: question, session: session }),
   }).then(function (r) {
-    var node = document.getElementById("pending");
-    if (node) node.remove();
-    var meta = "turn " + (r.turn == null ? "-" : r.turn) + " · <b>" +
-      (r.tokens == null ? "-" : r.tokens) + " tokens</b>" +
-      (r.durationMs == null ? "" : " · " + r.durationMs + " ms") +
-      " · ctx " + meterHtml(r.ctxLine);
-    chat.insertAdjacentHTML("beforeend",
-      '<div class="msg bot"><div class="bubble">' +
-      esc(r.answer || (r.error || "（无回答）")) + "</div>" +
-      '<div class="obs">' + meta + "</div></div>");
-    chat.scrollTop = chat.scrollHeight;
-    if (!state.currentSession) state.currentSession = session;
-    api("/api/sessions?expert=" + encodeURIComponent(expert))
-      .then(function (x) { renderSessions(x.sessions || []); });
+    if (!r.ok) {
+      // 验证类失败在流建立前返回 JSON（expert 必填/名不合法等）—— 读出人话错误
+      return r.json().then(
+        function (e) { throw new Error(e && e.error ? e.error : "HTTP " + r.status); },
+        function () { throw new Error("HTTP " + r.status); },
+      );
+    }
+    var reader = r.body.getReader();
+    var dec = new TextDecoder();
+    var buf = "";
+    function pump() {
+      return reader.read().then(function (chunk) {
+        if (chunk.done) return;
+        buf += dec.decode(chunk.value, { stream: true });
+        var idx;
+        while ((idx = buf.indexOf("\\n\\n")) >= 0) {
+          var frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          sseFrame(frame, onEvent);
+        }
+        return pump();
+      });
+    }
+    return pump();
   }).catch(function (e) {
-    var node = document.getElementById("pending");
-    if (node) node.remove();
-    chat.insertAdjacentHTML("beforeend",
-      '<div class="msg bot"><div class="bubble" style="color:var(--red)">请求失败：' + esc(e) + "</div></div>");
+    finalize(null, "SSE 连接失败：" + e);
   }).then(function () {
+    if (!settled) finalize(null, "SSE 连接意外中断（未收到 done）");
     btn.disabled = false; btn.textContent = "发送";
     document.getElementById("question").value = "";
     document.getElementById("question").focus();

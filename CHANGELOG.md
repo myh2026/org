@@ -1,5 +1,55 @@
 # CHANGELOG
 
+## v0.4.8（2026-09-08）
+
+**`org web` 对话流式：`POST /api/ask-stream` SSE 端点 + GUI 渐进渲染（issue #11，
+v0.4.7 已知边界「ask 长任务无流式」补齐）**。deepseek 真实模式下长回答不再
+黑盒等整轮 —— 运行配置（子进程 banner/入口/模型/工作区行）到达即推送，等待
+期间流水线阶段轮换可见，回答正文逐行浮出。
+
+### 新增
+
+- **SSE 事件协议**（`event: X\ndata: {json}` 帧）：`open`（请求回显 + 排队
+  状态）→ `start`（串行队列轮到本轮）→ `stage`（2.6s 轮换 direct.hsl 真实
+  阶段：能力核对 → 注册表寻址 → 会话史装载 → 模型网关 → 记账回写）→
+  `log`（子进程 stdout 逐行实时）→ `done`（AskOutcome 整体）/ `error`（人话
+  message）。客户端断开不中止运行（账本是事实源，轮次照常落盘）；
+- **spawn 车道增量读**：`askStreamOnce` 用 `ReadableStream.getReader()` +
+  行缓冲泵逐行回调（跨 chunk 半行拼接保真）；进程内车道
+  （`ORG_FORCE_INPROC`）降级为 stage+done 两类事件；
+- **GUI 渐进渲染**：等待气泡 = 阶段轮换行（琥珀光标呼吸）+ 运行日志终端
+  折叠区（逐行追加 · 计数徽标）+ 回答正文逐行浮出（`[direct]` 头行触发、
+  `[ctx]` 行止笔，光标跟随）；完成态消息附完整运行日志折叠区与观测元数据行
+  （turn/tokens/耗时/ctx meter）；
+- **HTTP 错误人话化**：流建立前的验证类 400 由前端读 JSON body 呈现具体
+  原因（不再是笼统 HTTP 400）。
+
+### 修复
+
+- **`org web --model` 失效**（v0.4.7 引入）：`/api/ask` 的 model 只看请求体
+  缺省 scripted，服务级 flag 被忽略。现改为回落链：请求体显式传 > 服务级
+  （`org web --model deepseek`）> scripted；`open`/`start` 事件回显生效值。
+
+### 并存
+
+- 旧 `POST /api/ask`（JSON 整轮）保留（兼容 API 消费方），GUI 已切流式。
+
+### 已知边界（本版新增口径）
+
+- 事件总线 WebSocket 拓扑观测（issue #10 第 4 点）仍未做；`stage` 事件是
+  流水线阶段的推演轮换（等待期 liveness 指示），非逐阶段真实回执 —— 真实
+  逐阶段事件需要 dhv-ts 事件总线透传（跨仓库项）；
+- token 级流式（模型输出逐 token 推送）受 dhv-ts `$host.llm` 非流式调用
+  约束 —— 当前粒度 = 子进程 stdout 逐行（回答正文整段在模型返回后一次
+  打印）。
+
+### 测试
+
+- `tests/web.test.ts` 新增 5 用例：SSE 事件全链（open/start/log*/done +
+  账本落盘 + 无 error）、第二轮 ctx 单调增长、验证类 400（流建立前）、
+  GUI 单页 SSE 消费要素、model 回落链（第二服务 `srv-level-flag` 判别）；
+  全套 123/123（`bun test`，35s）。
+
 ## v0.4.7（2026-09-08）
 
 **Web GUI 原型：`org web` 子命令（issue #10 路线图 1-3 点）**。Bun.serve 起

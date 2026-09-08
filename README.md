@@ -5,7 +5,7 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.4.7_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Status](https://img.shields.io/badge/status-v0.4.8_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
 [![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-快速开始v042-实测可用)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
@@ -19,7 +19,7 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **当前状态**：v0.4.7 可运行实现。新增 **Web GUI 原型（`org web`：Bun.serve 零依赖单页驾驶舱 —— 专家卡 + 会话侧栏 + 对话视图 + 观测元数据 tokens/耗时/ctx 窗口计量；scripted 占位剧本秒回）**；**B 路径执行面（导入 harness 被任务派单真实执行：注册表登记优先寻址 + 工单序列化卫生 + deliverable 交付物契约）**；**剧本联动（导入即能用：`org import` 自动生成占位剧本，`org ask` / `org handoff` 剧本自动发现 —— 零参数直连，`--model deepseek` 换真实回答）**；**工具库治理三动作：导入你自己的 harness（`org import`）+ 选取保留（`org keep` / `org drop`）** —— 工厂产出是候选，用户选取转正后才参与 B 路径自动复用，导入即保留即刻可复用，动作进 git 账本；直连会话新增 **上下文窗口计量（Codex 风格 meter，`[ctx]` 每轮可见）**。另有 **OpenCode 级终端前端（`org tui`）** 与 **Windows/macOS/Linux 五目标单二进制分发**（无 bun 环境全功能）。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 118 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
+> **当前状态**：v0.4.8 可运行实现。新增 **Web GUI 对话流式（`org web`：`POST /api/ask-stream` SSE 端点 + GUI 渐进渲染 —— open/start/stage/log/done 事件链，子进程 stdout 逐行实时推送，等待期流水线阶段轮换，回答正文逐行浮出；修 `--model` 服务级回落）**；**Web GUI 原型（`org web`：Bun.serve 零依赖单页驾驶舱 —— 专家卡 + 会话侧栏 + 对话视图 + 观测元数据 tokens/耗时/ctx 窗口计量；scripted 占位剧本秒回）**；**B 路径执行面（导入 harness 被任务派单真实执行：注册表登记优先寻址 + 工单序列化卫生 + deliverable 交付物契约）**；**剧本联动（导入即能用：`org import` 自动生成占位剧本，`org ask` / `org handoff` 剧本自动发现 —— 零参数直连，`--model deepseek` 换真实回答）**；**工具库治理三动作：导入你自己的 harness（`org import`）+ 选取保留（`org keep` / `org drop`）** —— 工厂产出是候选，用户选取转正后才参与 B 路径自动复用，导入即保留即刻可复用，动作进 git 账本；直连会话新增 **上下文窗口计量（Codex 风格 meter，`[ctx]` 每轮可见）**。另有 **OpenCode 级终端前端（`org tui`）** 与 **Windows/macOS/Linux 五目标单二进制分发**（无 bun 环境全功能）。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 123 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
 
 ## ✨ 为什么是 ORG
 
@@ -193,9 +193,17 @@ GUI 只是薄渲染层 —— 逻辑全部复用 CLI 同一代码路径（issue 
   环境变量 + `expertFixtureOf` 剧本自动发现 + dhvRun 双车道 —— 与
   `org ask` 同链路，不 spawn CLI 自身）；model 缺省 scripted（占位剧本
   秒回），响应含 `{ok, answer, tokens, ctxLine, durationMs, turn, logs}`；
+- **流式端点 `POST /api/ask-stream`（v0.4.8，issue #11）**：同链路 SSE
+  版 —— 事件链 `open`（排队状态回显）→ `start` → `stage*`（2.6s 轮换
+  direct.hsl 真实阶段）→ `log*`（spawn 车道子进程 stdout 逐行实时：
+  banner/配置行到达即推，回答正文逐行浮出）→ `done`/`error`；客户端
+  断开不中止运行（账本照写）；GUI 已切流式（等待气泡 = 阶段轮换行 +
+  运行日志终端折叠区 + 渐进答案）；
+- **model 回落链（v0.4.8 修复）**：请求体显式传 > 服务级
+  （`org web --model deepseek`）> scripted —— `--model` 不再失效；
 - **实现**：`web/entry.ts`（进程内 import，与 tui 同模式；`startWebServer`
   可编程入口供测试用随机端口）；服务只听 127.0.0.1，expert/session 名
-  白名单校验（防路径穿越）；测试 `bun test tests/web.test.ts`（14 用例）；
+  白名单校验（防路径穿越）；测试 `bun test tests/web.test.ts`（19 用例）；
 - 路线图第 4 点（事件总线 WebSocket 拓扑观测）见 issue #10，未做。
 
 ## 📦 三平台单二进制分发（Windows / macOS / Linux）
@@ -499,7 +507,8 @@ org/
 # 0) 打开组织驾驶舱（TUI；`bun run tui` 同效）
 bun cli/org.ts tui
 
-# 0.5) 打开 Web GUI 原型（浏览器 http://127.0.0.1:4600；scripted 占位剧本秒回）
+# 0.5) 打开 Web GUI 原型（浏览器 http://127.0.0.1:4600；scripted 占位剧本秒回
+#      · 提问走 SSE 流式：阶段轮换 + 实时运行日志 + 回答逐行浮出）
 bun cli/org.ts web
 
 # 1) 校验 ORG 全部 HSL 源码（hsl/ 源码 + 语言探针 + dist/ 铸出专家）
@@ -509,8 +518,8 @@ bun cli/org.ts check
 #    → 多轮直连 → 暖移交；结束时自动导出 dist/demo）
 bun cli/org.ts demo
 
-# 3) 机制级测试（118 个：结构闸门 / README 走读 / 动力学条件分支点火 /
-#    工具库治理 keep-drop-import / 上下文窗口计量 / Web GUI 原型）
+# 3) 机制级测试（123 个：结构闸门 / README 走读 / 动力学条件分支点火 /
+#    工具库治理 keep-drop-import / 上下文窗口计量 / Web GUI 原型 + SSE 流式）
 bun test tests/
 
 # 4) 团队模式派单（单轮）

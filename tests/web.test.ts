@@ -160,6 +160,149 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     expect(detail.turns[1]!.ctx_tokens).toBeGreaterThan(detail.turns[0]!.ctx_tokens);
   });
 
+  // ---- SSE 流式端点（issue #11）----
+
+  /** 解析一段完整 SSE 文本 → {event → data[]} 映射（帧边界 \n\n）。 */
+  function parseSse(text: string): Map<string, unknown[]> {
+    const out = new Map<string, unknown[]>();
+    for (const frame of text.split("\n\n")) {
+      if (!frame.trim()) continue;
+      let event = "message";
+      const dataLines: string[] = [];
+      for (const line of frame.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+      }
+      if (dataLines.length === 0) continue;
+      let obj: unknown = dataLines.join("");
+      try { obj = JSON.parse(dataLines.join("")); } catch { /* 保留原文 */ }
+      const list = out.get(event) ?? [];
+      list.push(obj);
+      out.set(event, list);
+    }
+    return out;
+  }
+
+  test("POST /api/ask-stream：SSE 事件全链（open → start → log* → done）+ 账本落盘", async () => {
+    const r = await fetch(base + "/api/ask-stream", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expert: "poet", question: "写一首关于冬夜的俳句", session: "web-sse1" }),
+    });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("text/event-stream");
+    expect(r.headers.get("cache-control")).toContain("no-cache");
+    const text = await r.text(); // 服务端 done 后关流，text() 完整收尾
+    const events = parseSse(text);
+
+    // open：请求回显 + 排队状态
+    const opens = events.get("open") as Array<{ expert: string; session: string; model: string; queued: boolean }>;
+    expect(opens?.length).toBe(1);
+    expect(opens[0]!.expert).toBe("poet");
+    expect(opens[0]!.session).toBe("web-sse1");
+    expect(opens[0]!.queued).toBe(false);
+    // start：流水线开跑（模型回显）
+    expect((events.get("start") as Array<{ model: string }>)?.[0]!.model).toBe("scripted");
+    // log：子进程 stdout 逐行实时（spawn 车道：banner / 配置 / direct / ctx / Ok）
+    const logs = (events.get("log") as Array<{ line: string }>) ?? [];
+    expect(logs.length).toBeGreaterThan(5);
+    const joined = logs.map((l) => l.line).join("\n");
+    expect(joined).toContain("dhv-ts");            // banner（工具链身份行）
+    expect(joined).toContain("hsl/pool/direct.hsl"); // 配置行（入口）
+    expect(joined).toContain("[direct]");           // 回答头行
+    expect(joined).toContain("harness 返回 Ok");    // 收尾行
+    // done：AskOutcome 整体
+    const dones = events.get("done") as Array<{
+      ok: boolean; answer: string; tokens: number | null;
+      ctxLine: string; durationMs: number | null; turn: number | null;
+    }>;
+    expect(dones?.length).toBe(1);
+    const done = dones[0]!;
+    expect(done.ok).toBe(true);
+    expect(done.answer).toContain("占位剧本应答");
+    expect(done.tokens).toBeGreaterThan(0);
+    expect(done.ctxLine).toContain("[ctx] 窗口占用");
+    expect(done.durationMs).toBeGreaterThanOrEqual(0);
+    expect(done.turn).toBe(1); // web-sse1 新会话首轮
+    // error 事件不应出现
+    expect(events.has("error")).toBe(false);
+    // 账本落盘（磁盘事实源）
+    expect(exists(path.join(ws, "runtime/sessions/poet/web-sse1.jsonl"))).toBe(true);
+  });
+
+  test("ask-stream 第二轮：同会话 turn=2 + ctx 单调增长（与 JSON 端点同语义）", async () => {
+    const r = await fetch(base + "/api/ask-stream", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expert: "poet", question: "再写一首同主题的现代诗", session: "web-sse1" }),
+    });
+    expect(r.status).toBe(200);
+    const events = parseSse(await r.text());
+    const done = (events.get("done") as Array<{ ok: boolean; turn: number | null; ctxLine: string }>)[0]!;
+    expect(done.ok).toBe(true);
+    expect(done.turn).toBe(2);
+    expect(done.ctxLine).toContain("2 轮累计");
+    const detail = (await (await fetch(base + "/api/session/poet/web-sse1")).json()) as {
+      turns: Array<{ turn: number; ctx_tokens: number }>;
+    };
+    expect(detail.turns.length).toBe(2);
+    expect(detail.turns[1]!.ctx_tokens).toBeGreaterThan(detail.turns[0]!.ctx_tokens);
+  });
+
+  test("ask-stream 防呆：必填缺失/坏 JSON → 400 JSON（流建立前拒绝）", async () => {
+    const r1 = await fetch(base + "/api/ask-stream", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expert: "", question: "x" }),
+    });
+    expect(r1.status).toBe(400);
+    expect(((await r1.json()) as { error: string }).error).toContain("必填");
+    const r2 = await fetch(base + "/api/ask-stream", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "not json",
+    });
+    expect(r2.status).toBe(400);
+  });
+
+  test("GUI 单页含 SSE 消费实现（渐进渲染要素齐备）", async () => {
+    const html = await (await fetch(base + "/")).text();
+    // 前端走 /api/ask-stream + 阶段行 + 运行日志折叠区 + 渐进答案
+    expect(html).toContain('"/api/ask-stream"');
+    expect(html).toContain('id="pstage"');
+    expect(html).toContain('id="plogbody"');
+    expect(html).toContain('id="panswer"');
+    expect(html).toContain("sseFrame");
+    // 旧 JSON 端点仍在服务端（兼容并存），但 GUI 已切流式
+    expect(html).not.toContain('"/api/ask"');
+  });
+
+  test("model 回落链（issue #11 修复）：请求体缺省 → 服务级 model（org web --model 不再失效）", async () => {
+    // 独立第二服务（同工作区 · port 0 随机）：服务级 model = srv-level-flag。
+    // 请求体不带 model → open/start 事件应回显服务级值（修复前：写死
+    // "scripted"，org web --model deepseek 启动后 GUI 永远走 scripted）。
+    const srv2 = startWebServer({ workspace: ws, port: 0, model: "srv-level-flag" });
+    try {
+      const r = await fetch(`http://127.0.0.1:${srv2.port}/api/ask-stream`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expert: "poet", question: "校验服务级 model 回落", session: "web-model-fb" }),
+      });
+      expect(r.status).toBe(200);
+      const events = parseSse(await r.text());
+      const open = (events.get("open") as Array<{ model: string }>)[0]!;
+      const start = (events.get("start") as Array<{ model: string }>)[0]!;
+      expect(open.model).toBe("srv-level-flag");
+      expect(start.model).toBe("srv-level-flag");
+      // 未知模型名按 scripted 剧本轨道执行（不触发真实 LLM 调用）
+      const done = (events.get("done") as Array<{ ok: boolean; answer: string }>)[0]!;
+      expect(done.ok).toBe(true);
+      expect(done.answer).toContain("占位剧本应答");
+    } finally {
+      srv2.stop(true);
+    }
+  });
+
   test("防呆：ask 必填字段缺失 → 400；expert 名路径穿越编码 → 400", async () => {
     const r1 = await fetch(base + "/api/ask", {
       method: "POST",
