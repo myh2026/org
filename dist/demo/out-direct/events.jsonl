@@ -1,8 +1,8 @@
-{"seq":0,"ts":"2026-09-08T11:00:11.465Z","name":"run_start","data":{"entry":"/home/runner/work/org/org/hsl/pool/direct.hsl","model":"scripted","task":"(direct) multi-turn","scale":"microkernel"}}
-{"seq":1,"ts":"2026-09-08T11:00:11.473Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
-{"seq":2,"ts":"2026-09-08T11:00:11.473Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
-{"seq":3,"ts":"2026-09-08T11:00:11.478Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
-{"seq":4,"ts":"2026-09-08T11:00:11.488Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
-{"seq":5,"ts":"2026-09-08T11:00:11.488Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
-{"seq":6,"ts":"2026-09-08T11:00:11.490Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
-{"seq":7,"ts":"2026-09-08T11:00:11.491Z","name":"run_end","data":{"elapsed_ms":25,"ok":true}}
+{"seq":0,"ts":"2026-09-08T11:17:35.538Z","name":"run_start","data":{"entry":"/home/runner/work/org/org/hsl/pool/direct.hsl","model":"scripted","task":"(direct) multi-turn","scale":"microkernel"}}
+{"seq":1,"ts":"2026-09-08T11:17:35.548Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
+{"seq":2,"ts":"2026-09-08T11:17:35.548Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
+{"seq":3,"ts":"2026-09-08T11:17:35.552Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
+{"seq":4,"ts":"2026-09-08T11:17:35.562Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
+{"seq":5,"ts":"2026-09-08T11:17:35.562Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
+{"seq":6,"ts":"2026-09-08T11:17:35.564Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
+{"seq":7,"ts":"2026-09-08T11:17:35.565Z","name":"run_end","data":{"elapsed_ms":27,"ok":true}}
