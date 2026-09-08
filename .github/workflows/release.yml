@@ -3,6 +3,9 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # 手动补发通道（tag push 事件偶发不触发时的兜底：按 tag ref 派发，
+  # GITHUB_REF_NAME 语义与 tag push 完全一致）
+  workflow_dispatch:
 
 permissions:
   contents: write # 创建 Release 需要
