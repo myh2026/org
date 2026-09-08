@@ -24,5 +24,8 @@
   "type": "module",
   "devDependencies": {
     "@types/bun": "^1.4.1"
+  },
+  "dependencies": {
+    "z-ai-web-dev-sdk": "^0.0.18"
   }
 }
