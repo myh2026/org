@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // ============================================================================
-// org/cli/org.ts — ORG 命令行（v0.4.1）
+// org/cli/org.ts — ORG 命令行（v0.4.2）
 // ----------------------------------------------------------------------------
 //   org run --task "..."          团队模式派单（监督回路全流程）
 //   org demo                      全叙事演示：铸专家 → 复用+补丁+金丝雀 → 蓝绿
@@ -21,9 +21,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ROOT, DEFAULT_WORKSPACE } from "../lib/root.ts";
-import { dhvRun } from "../lib/engine.ts";
+import { dhvRun, assertWorkspaceNotTemplate } from "../lib/engine.ts";
 
-const VERSION = "0.4.1";
+const VERSION = "0.4.2";
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const HANDOFF_ENTRY = path.join(ROOT, "hsl/pool/handoff.hsl");
@@ -156,7 +156,13 @@ async function cmdDemo(a: Args): Promise<number> {
   console.log("╚════════════════════════════════════════════════════════════════╝");
   console.log(`  工作区 ${ws}（git 注册表） · 任务「${task}」 · 模式 ${a.model}\n`);
 
-  // 工作区重置（演示可重复）
+  // 工作区重置（演示可重复）；模板目录只读守卫（防叙事污染，见 engine.ts）
+  try {
+    assertWorkspaceNotTemplate(ws);
+  } catch (err) {
+    console.error(`✗ ${(err as Error).message}`);
+    return 2;
+  }
   fs.rmSync(ws, { recursive: true, force: true });
   fs.cpSync(path.join(ROOT, "demo-ws"), ws, { recursive: true });
   gitInit(ws);
@@ -363,6 +369,12 @@ function gitInit(ws: string): void {
 }
 
 function ensureWorkspace(ws: string): void {
+  try {
+    assertWorkspaceNotTemplate(ws);
+  } catch (err) {
+    console.error(`✗ ${(err as Error).message}`);
+    process.exit(2);
+  }
   if (!fs.existsSync(ws)) {
     console.log(`ℹ 初始化工作区（模板 demo-ws → ${path.relative(ROOT, ws)}）`);
     fs.cpSync(path.join(ROOT, "demo-ws"), ws, { recursive: true });
@@ -503,9 +515,23 @@ async function cmdScore(a: Args): Promise<number> {
     model: string; evidence_count: number; cells: Array<{ cell: string; score: number; confidence: number }>;
   };
   console.log(`scorecard · model=${card.model} · evidence=${card.evidence_count}（来源 ${path.relative(ROOT, candidates[0]!)}）`);
-  const cells = a.axis ? card.cells.filter((c) => c.cell.startsWith(a.axis + "|")) : card.cells;
+  // 轴名匹配：cell 格式为 "能力轴|任务类"。--axis 同时接受两侧（能力轴或任务类），
+  // 任一侧命中即保留——此前只匹配能力轴侧，README 示例的 structured_extract（任务类）
+  // 过滤后沉默输出空列表（axis 拼写元反馈缺失）。
+  const cells = a.axis
+    ? card.cells.filter((c) => c.cell.startsWith(a.axis + "|") || c.cell.endsWith("|" + a.axis))
+    : card.cells;
   for (const c of cells) {
     console.log(`  ${c.cell.padEnd(38)} score=${c.score.toFixed(3)} confidence(n)=${c.confidence}`);
+  }
+  if (a.axis && cells.length === 0) {
+    // 空 results 必须给出可行动反馈：列出当前卡上真实的能力轴与任务类，
+    // 拼写错误当场可见（此前空输出无法区分「无数据」与「过滤词拼错」）。
+    const axes = [...new Set(card.cells.map((c) => c.cell.split("|")[0]!))];
+    const classes = [...new Set(card.cells.map((c) => c.cell.split("|")[1]!))];
+    console.log(`\n⚠ --axis "${a.axis}" 未命中任何 cell（格式 axis|task_class，两侧任一匹配）。`);
+    console.log(`  可用能力轴：${axes.join(", ")}`);
+    console.log(`  可用任务类：${classes.join(", ")}`);
   }
   console.log("\n证据分级：客观行为信号（verdict/budget/crystallize/canary/direct）权重 1.0；裁判档（shadow_compare）0.5。");
   return 0;
@@ -537,7 +563,10 @@ async function cmdReplay(a: Args): Promise<number> {
 async function cmdCheck(): Promise<number> {
   console.log(`dhv check · ORG 全源码（解释器 ${path.relative(ROOT, DHV)}）\n`);
   const files: string[] = [];
-  const skip = new Set([".git", "node_modules", ".hsl-runs", "demo-run"]);
+  // 跳过本地运行时工作区（demo-run / demo-run-tests / out-ask 均 git 忽略）：
+  // 测试跑过后 demo-run-tests 会出现铸出专家副本，check 的模块清单不应随本地
+  // 状态漂移（稳定口径 = hsl/ 源码 + dist/ 入库产物 + .hsl-runs 之外的库文件）。
+  const skip = new Set([".git", "node_modules", ".hsl-runs", "demo-run", "demo-run-tests", "out-ask"]);
   const walk = (dir: string): void => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const p = path.join(dir, e.name);

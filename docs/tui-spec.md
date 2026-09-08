@@ -157,4 +157,4 @@ export function startRun(opts: RunOptions): RunHandle
 - [ ] `:replay out-a` 秒开历史会话；左栏专家库/池/固化数字与 dist/demo 一致。
 - [ ] `?notice-parser …?` 直连卡正常（scripted fixture）。
 - [ ] `bun run tui:smoke` 0 退出（含 in-process 桥路径）；窄终端降级可用。
-- [ ] `bun test tests/` 仍 69/69 全绿（不得破坏现有测试）。
+- [ ] `bun test tests/` 仍 71/71 全绿（不得破坏现有测试）。

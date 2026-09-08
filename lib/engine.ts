@@ -1,5 +1,5 @@
 // ============================================================================
-// org/lib/engine.ts — 引擎桥：CLI 与 TUI 共用（v0.4.1，规格书 §4）
+// org/lib/engine.ts — 引擎桥：CLI 与 TUI 共用（v0.4.2，规格书 §4）
 // ----------------------------------------------------------------------------
 // 主路径：spawn `bun <dhv-ts> run <entry> --workspace --task --model --fixture
 // --out --allow bun,node,ls,cat,grep,diff,git`（与 cli/org.ts runHsl 同参），
@@ -138,6 +138,20 @@ export function resolveBun(): string | null {
 
 // ---------- 工作区（模板初始化 + git 注册表） ----------
 
+/** 模板目录只读守卫：工作区不能指向 demo-ws 本身。
+ *  实录事故：`dhv run probe9 --workspace demo-ws` 把固化观测账本写进模板 →
+ *  后续每次 demo 复制被污染的模板 → 三连跑叙事漂移（A 出现命中、衰减曲线
+ *  5→1→0 变 1→0→0）。模板是演示可重复性的地基，必须守卫。 */
+export function assertWorkspaceNotTemplate(ws: string): void {
+  if (path.resolve(ws) === path.resolve(WS_TEMPLATE)) {
+    throw new Error(
+      `工作区不能指向模板目录 ${WS_TEMPLATE}：运行会把观测账本 / 注册表写回模板，` +
+      `污染后续所有 demo 的叙事（衰减曲线漂移）。请换一个工作区目录` +
+      `（如 demo-run 或 --workspace <dir>）——模板由仓库分发，只读。`,
+    );
+  }
+}
+
 function git(ws: string, args: string[]): void {
   try {
     B.spawnSync(["git", ...args], { cwd: ws, stdout: "ignore", stderr: "ignore" });
@@ -153,6 +167,7 @@ export function gitInit(ws: string): void {
 }
 
 export function ensureWorkspace(ws: string): void {
+  assertWorkspaceNotTemplate(ws);
   if (fs.existsSync(ws)) return;
   fs.cpSync(WS_TEMPLATE, ws, { recursive: true });
   gitInit(ws);
@@ -160,6 +175,7 @@ export function ensureWorkspace(ws: string): void {
 
 /** demo 语义：重置工作区到模板（可重复的三连跑叙事）。 */
 export function resetWorkspace(ws: string): void {
+  assertWorkspaceNotTemplate(ws);
   fs.rmSync(ws, { recursive: true, force: true });
   fs.cpSync(WS_TEMPLATE, ws, { recursive: true });
   gitInit(ws);
@@ -424,11 +440,15 @@ export async function dhvRun(
     ]);
     return { ok: code === 0, out: so + se };
   }
+  // 进程内车道：capture 元素携带原文（含换行），join("") 还原字节级输出 ——
+  // 此前逐行过滤空行再 join("\n")，空行丢失且结尾无换行，与子进程车道
+  // 输出不一致（B-8：两车道输出保真度必须一致，否则同一命令在有无 bun 环境
+  // 下呈现不同结果，比对/测试/人眼对不齐）。
   const capture: string[] = [];
   const extra: Record<string, string> = { DHV_TS: shPath(dhv) };
   if (envExtra) Object.assign(extra, envExtra);
   const code = await runInproc(args, extra, capture);
-  return { ok: code === 0, out: capture.join("\n") };
+  return { ok: code === 0, out: capture.join("") };
 }
 
 // ---------- 进程内 fallback（vendored dhv-ts main.ts） ----------
@@ -450,12 +470,13 @@ async function runInproc(
   const savedExit = process.exit;
   // 静默引擎直写（println! 走 process.stdout.write，不经过 console）——
   // 进程内执行时若不拦截，引擎输出会污染 TUI 画面。
+  // v0.4.2（B-8）：写入原文直接入队（不再逐行过滤空行）——子进程车道返回
+  // 原始字节流，本车道也必须字节级一致；console 捕获由 captureFn 补换行。
   const realStdoutWrite = process.stdout.write.bind(process.stdout);
   const realStderrWrite = process.stderr.write.bind(process.stderr);
   const silentWrite = (sink: string[]): ((chunk: unknown) => boolean) => {
     return (chunk: unknown): boolean => {
-      const t = typeof chunk === "string" ? chunk : String(chunk);
-      for (const l of t.split("\n")) if (l.trim().length > 0) sink.push(l);
+      sink.push(typeof chunk === "string" ? chunk : String(chunk));
       return true;
     };
   };
@@ -469,7 +490,7 @@ async function runInproc(
     return undefined as never;
   }) as (c?: number) => never;
   const captureFn = (...a: unknown[]): void => {
-    capture.push(a.map((x) => (typeof x === "string" ? x : String(x))).join(" "));
+    capture.push(a.map((x) => (typeof x === "string" ? x : String(x))).join(" ") + "\n");
   };
   console.log = captureFn;
   console.error = captureFn;
@@ -495,7 +516,7 @@ async function runInproc(
       await import(`${dhvMain}${inprocRuns > 0 ? `?v=${inprocRuns}` : ""}`);
     }
   } catch (err) {
-    capture.push(`inproc import failed: ${(err as Error).message}`);
+    capture.push(`inproc import failed: ${(err as Error).message}\n`);
     code = 1;
   } finally {
     (process as unknown as { exit: (c?: number) => never }).exit = savedExit;
@@ -608,7 +629,9 @@ export function startRun(opts: RunOptions): RunHandle {
         pumpTick(outDir, off, q);
       }
       if (code !== 0 && !canceled) {
-        const tail = capture.filter((l) => l.trim().length > 0).slice(-6).join(" / ");
+        // v0.4.2（B-8）：in-proc 车道 capture 元素含内嵌换行（字节级保真），
+        // 展平后再取尾部行，与子进程车道同一行粒度。
+        const tail = capture.flatMap((l) => l.split("\n")).filter((l) => l.trim().length > 0).slice(-6).join(" / ");
         finish(false, `引擎退出码 ${code}${tail ? "：" + tail : ""}`);
       } else {
         finish(code === 0);

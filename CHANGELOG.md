@@ -1,5 +1,55 @@
 # CHANGELOG
 
+## v0.4.2（2026-09-08）
+
+**HSL 实测回推：内建方法面补齐 26 个 Rust 对等方法 + S-19 静态断层预警；CLI 实测修复**。
+对 HSL（vendored dhv-ts）做了一次系统实测（逐方法探针），把 B-1 类「check 过 / run 崩」
+断层从两个方向收口：运行期补齐方法面、check 期新增预警。详见 [BUGFIXES.md](BUGFIXES.md)
+B-6 / B-7 / B-8。
+
+### 新增
+
+- **HSL 内建方法面（B-6，`toolchain/dhv-ts/src/builtins.ts`，vendored 0.2.58）**：
+  - Vec 迭代器 10 个：`find` / `filter_map` / `flat_map` / `flatten` / `count` / `min` /
+    `max` / `zip` / `chain` / `step_by`（`min`/`max` 空为 None、同构 Ord）；
+  - Vec 变形 5 个：`reverse` / `dedup`（连续重复）/ `retain` / `truncate` / `chunks`；
+  - String 7 个：`split_once` / `rsplit_once`（返回 `Option<(before, after)>`，可
+    `Some((k, v))` 直接解构）/ `clear` / `truncate` / `retain` / `insert` / `remove`；
+  - HashMap 1 个：`iter`（(K, V) 二元组流）；
+  - Result 2 个：`unwrap_or_else` / `unwrap_err`；Option 1 个：`and`（补齐同族对称）；
+  - 复现探针入库：`hsl/probe/probe10.hsl`（25+ 断言全绿）。
+- **S-19 静态预警（B-7，`toolchain/dhv-ts/src/checker.ts`）**：注解为
+  String/Vec/HashMap/Option/Result 的绑定调用方法面之外的方法名 → check 期 warning
+  （带位置与运行期报错预告）—— B-1/B-6 类断层的首个静态暴露面；负样本探针
+  `hsl/probe/probe10-negative.hsl`（3 warning / 0 error，CI 门禁语义不变）。
+
+### 修复
+
+- **`org score --axis`**：cell 为 `能力轴|任务类`，现在两侧任一命中即保留（此前只匹配
+  能力轴前缀，README 示例轴名拼错时沉默输出空列表）；空结果列出真实可用轴与任务类；
+  README 示例改为真实存在的 `structured_extract`；
+- **进程内车道输出保真度（B-8，`lib/engine.ts`）**：`ORG_FORCE_INPROC=1` 时 stdout
+  捕获字节级还原（空行与结尾换行不再丢失）——同一命令双车道输出 diff 仅剩
+  run_id/耗时类时变字段；
+- **`org check` 模块清单稳定**：walker 跳过集合补 `demo-run-tests` / `out-ask`
+  （本地测试工作区不再使模块数 32 → 48 漂移）；
+- **工作区模板只读守卫**：`--workspace demo-ws`（模板目录本身）现在会被拒绝——
+  实测实录该用法会把固化观测账本写回模板，使后续 `org demo` 三连跑衰减曲线
+  5→1→0 静默漂移为 1→0→0（`lib/engine.ts` `assertWorkspaceNotTemplate`，
+  CLI 报错退出 2；probe9 头注释补正确运行方式）。
+
+### 变更
+
+- 版本联动：ORG 0.4.1 → 0.4.2（package.json / cli / tui frame / tui 冒烟断言 /
+  README 徽章）；vendored dhv-ts 0.2.56 → 0.2.58（包版本对齐代码内已含的 0.2.57 系
+  修复并叠加本次方法面补齐）。
+
+### 兼容性
+
+- 无破坏性变更：方法面为纯新增（与既有 ORG 源码零冲突，69 测全绿）；S-19 为
+  warning 级（退出码与 CI 门禁不变）；score/check 行为变化仅限空结果与本地
+  工作区口径。
+
 ## v0.4.1（2026-09-07）
 
 **TUI 事件流过滤 `:filter` + 发布资产官方 sha256 校验和**。

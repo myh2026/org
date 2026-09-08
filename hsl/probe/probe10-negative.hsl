@@ -1,0 +1,20 @@
+// ============================================================================
+// probe10-negative.hsl — B-7 负样本：S-19 应对未知方法名给出 check 期 warning
+// ============================================================================
+// 本文件 **故意调用不存在的方法**（vec_nope / str_nope / map_nope）。
+// 预期行为：
+//   check：0 error + 3 warning[S-19]（B-1 类「check 过 / run 崩」断层的前置暴露）；
+//   run  ：按旧行为崩溃（「没有方法」）—— 本文件不被 demo/测试执行，
+//          仅作 S-19 的静态验证载体（`bun toolchain/dhv-ts/src/main.ts check
+//          hsl/probe/probe10-negative.hsl` 应输出 3 条 S-19 warning）。
+// 注意：org check 的退出码只统计 error —— warning 不影响 CI 门禁。
+// ============================================================================
+export fn main() -> Result<(), String> {
+    let v: Vec<u32> = vec![1, 2, 3];
+    let s: String = String::from("a:b");
+    let m: HashMap<String, u32> = HashMap::new();
+    let _ = v.vec_nope(1);
+    let _ = s.str_nope();
+    let _ = m.map_nope();
+    Ok(())
+}

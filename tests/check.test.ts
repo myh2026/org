@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { ROOT, DHV, runDhv, runOrg } from "./helpers";
 
-function collectHsl(dir: string, out: string[] = [], skip = new Set([".git", "node_modules", ".hsl-runs", "demo-run", "demo-run-tests"])): string[] {
+function collectHsl(dir: string, out: string[] = [], skip = new Set([".git", "node_modules", ".hsl-runs", "demo-run", "demo-run-tests", "out-ask"])): string[] {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     const p = path.join(dir, e.name);
     if (e.isDirectory()) {

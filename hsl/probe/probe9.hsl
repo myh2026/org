@@ -1,5 +1,9 @@
 // ============================================================================
 // probe9.hsl — 直接运行 NoticeParser 观察块处理与覆盖率
+// ----------------------------------------------------------------------------
+// 运行方式（工作区勿指向 demo-ws 模板——会污染观测账本，见 BUGFIXES.md）：
+//   bun toolchain/dhv-ts/src/main.ts run hsl/probe/probe9.hsl \
+//     --workspace demo-run --fixture fixtures/run-notices.json
 // ============================================================================
 import { NoticeParser } from "../registry/experts/notice-parser.hsl";
 import { TaskSpec } from "../contracts/contract.hsl";

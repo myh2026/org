@@ -1,0 +1,123 @@
+// ============================================================================
+// probe10.hsl — B-6/B-7 复现：内建方法面缺口 + S-19 静态预警
+// ============================================================================
+// 背景：v0.2.58 之前，Rust 对等的高频方法在 checker（不校验方法名）与
+// 解释器（builtinMethodFor 找不到即崩）之间存在静默断层——check 全绿、
+// run 全崩（B-1 类断层的最大聚集面）。本探针双重验证：
+//   1. run 期：下列方法全部存在于运行时方法面（修复前逐个报「没有方法」）；
+//   2. check 期：S-19 对注解为内建值类型、方法名不在方法面的调用给 warning
+//      （配对负样本见 probe10-negative.hsl）。
+// 覆盖面：Vec 迭代器（find/filter_map/flat_map/flatten/count/min/max/zip/
+// chain/step_by）· Vec 变形（reverse/dedup/retain/truncate/chunks）·
+// String（split_once/rsplit_once/clear/truncate/retain/insert/remove）·
+// HashMap::iter · Result（unwrap_or_else/unwrap_err）· Option::and。
+// ============================================================================
+export fn main() -> Result<(), String> {
+    // ---- Vec 迭代器对等（修复前：check ✓ / run ✗ 「没有方法」） ----
+    let v: Vec<u32> = vec![3, 1, 2];
+    let hit = v.iter().find(|x: &u32| *x > 1);
+    match hit {
+        Some(first) => {
+            if first != 3 { return Err(String::from("find 应返回首个满足元素 3")); }
+        },
+        None => return Err(String::from("find 不应返回 None")),
+    }
+    if v.iter().count() != 3 { return Err(String::from("count 语义漂移")); }
+    match v.iter().min() {
+        Some(lo) => { if lo != 1 { return Err(String::from("min 应为 1")); } },
+        None => return Err(String::from("min 不应为 None")),
+    }
+    match v.iter().max() {
+        Some(hi) => { if hi != 3 { return Err(String::from("max 应为 3")); } },
+        None => return Err(String::from("max 不应为 None")),
+    }
+    let fm: Vec<u32> = v.iter().filter_map(|x: &u32| if *x > 1 { Some(x.clone()) } else { None }).collect();
+    if fm.len() != 2 { return Err(String::from("filter_map 应保留 2 个元素")); }
+    let fl: Vec<u32> = v.iter().flat_map(|x: &u32| vec![x.clone(), x.clone()]).collect();
+    if fl.len() != 6 { return Err(String::from("flat_map 应摊平为 6 个元素")); }
+    let nested: Vec<Vec<u32>> = vec![vec![1, 2], vec![3]];
+    if nested.iter().flatten().count() != 3 { return Err(String::from("flatten 应摊平为 3 个元素")); }
+    let pairs: Vec<(u32, u32)> = v.iter().zip(vec![10, 20, 30].iter()).collect();
+    if pairs.len() != 3 { return Err(String::from("zip 应产出 3 对")); }
+    if pairs[0].0 != 3 || pairs[0].1 != 10 { return Err(String::from("zip 元素错位")); }
+    if v.iter().chain(vec![9].iter()).count() != 4 { return Err(String::from("chain 应拼接为 4 个")); }
+    if v.iter().step_by(2).count() != 2 { return Err(String::from("step_by(2) 应取 2 个")); }
+
+    // ---- Vec 就地变形 ----
+    let mut r: Vec<u32> = vec![1, 2, 3];
+    r.reverse();
+    if r[0] != 3 || r[2] != 1 { return Err(String::from("reverse 应原地反转")); }
+    let mut d: Vec<u32> = vec![1, 1, 2, 2, 1];
+    d.dedup();
+    if d.len() != 3 { return Err(String::from("dedup 应去掉连续重复（Rust 语义）")); }
+    let mut keep: Vec<u32> = vec![1, 2, 3, 4];
+    keep.retain(|x: &u32| *x % 2 == 1);
+    if keep.len() != 2 { return Err(String::from("retain 应剩 2 个奇数")); }
+    let mut tc: Vec<u32> = vec![1, 2, 3, 4];
+    tc.truncate(2);
+    if tc.len() != 2 { return Err(String::from("truncate 应截到 2")); }
+    let blocks: Vec<Vec<u32>> = vec![1, 2, 3, 4, 5].chunks(2).collect();
+    if blocks.len() != 3 || blocks[2].len() != 1 { return Err(String::from("chunks 尾块允许不足 n")); }
+
+    // ---- String 对等 ----
+    let kv = "key: value".split_once(":");
+    match kv {
+        Some((k, rest)) => {
+            if k != "key" || rest != " value" { return Err(String::from("split_once 拆分错误")); }
+        },
+        None => return Err(String::from("split_once 不应返回 None")),
+    }
+    let path = "a/b/c.txt".rsplit_once("/");
+    match path {
+        Some((dir, base)) => {
+            if dir != "a/b" || base != "c.txt" { return Err(String::from("rsplit_once 应从右侧拆分")); }
+        },
+        None => return Err(String::from("rsplit_once 不应返回 None")),
+    }
+    let mut sc: String = String::from("abcd");
+    sc.truncate(2);
+    if sc.len() != 2 { return Err(String::from("String::truncate 截长错误")); }
+    let mut si: String = String::from("ac");
+    si.insert(1, "b");
+    if si != "abc" { return Err(String::from("String::insert 插入位置错误")); }
+    let mut sr: String = String::from("xyz");
+    let removed = sr.remove(0);
+    if removed != "x" || sr != "yz" { return Err(String::from("String::remove 应返回被移除字符")); }
+    let mut scl: String = String::from("keep");
+    scl.clear();
+    if !scl.is_empty() { return Err(String::from("String::clear 应清空")); }
+    let mut sret: String = String::from("a1b2");
+    sret.retain(|c: &char| c.is_alphabetic());
+    if sret != "ab" { return Err(String::from("String::retain 应按谓词保留字符")); }
+
+    // ---- HashMap::iter（(K, V) 二元组流） ----
+    let mut m: HashMap<String, u32> = HashMap::new();
+    m.insert(String::from("a"), 1);
+    m.insert(String::from("b"), 2);
+    let entries = m.iter();
+    if entries.len() != 2 { return Err(String::from("HashMap::iter 应产出 2 个二元组")); }
+
+    // ---- Result / Option 同族对称补齐 ----
+    let e: Result<u32, String> = Err(String::from("boom"));
+    let recovered = e.unwrap_or_else(|msg: String| msg.len());
+    if recovered != 4 { return Err(String::from("Result::unwrap_or_else 未取闭包值")); }
+    let e2: Result<u32, String> = Err(String::from("bad"));
+    if e2.unwrap_err() != "bad" { return Err(String::from("Result::unwrap_err 应取出 Err 载荷")); }
+    let o: Option<u32> = Some(1);
+    let chained = o.and(Some(5));
+    match chained {
+        Some(x) => { if x != 5 { return Err(String::from("Option::and 应取右操作数")); } },
+        None => return Err(String::from("Option::and 不应为 None")),
+    }
+
+    // ---- 空 Vec 的 min/max → None（Rust 语义） ----
+    let empty: Vec<u32> = Vec::new();
+    match empty.iter().min() {
+        None => {},
+        Some(_) => return Err(String::from("空 Vec::min 应为 None")),
+    }
+
+    println!("[probe10] B-6 方法面（Vec×14 + String×7 + HashMap×1 + Result×2 + Option×1）全部就位 ✓");
+    println!("[probe10] B-7 配套：S-19 在 check 期预警注解类型的未知方法名（负样本另存 probe10-negative.hsl）");
+    Ok(())
+}

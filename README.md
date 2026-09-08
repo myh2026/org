@@ -5,11 +5,11 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.4.0_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
-[![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-快速开始v040-实测可用)
+[![Status](https://img.shields.io/badge/status-v0.4.2_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-快速开始v042-实测可用)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
-[![Tests](https://img.shields.io/badge/tests-69_passing-brightgreen.svg)](#-测试)
+[![Tests](https://img.shields.io/badge/tests-71_passing-brightgreen.svg)](#-测试)
 [![CI](https://github.com/myh2026/org/actions/workflows/ci.yml/badge.svg)](https://github.com/myh2026/org/actions/workflows/ci.yml)
 [![Release](https://github.com/myh2026/org/actions/workflows/release.yml/badge.svg)](https://github.com/myh2026/org/actions/workflows/release.yml)
 
@@ -19,7 +19,7 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **当前状态**：v0.4.0 可运行实现。新增 **OpenCode 级终端前端（`org tui`）** 与 **Windows/macOS/Linux 五目标单二进制分发**（无 bun 环境全功能）。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 69 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
+> **当前状态**：v0.4.2 可运行实现。新增 **OpenCode 级终端前端（`org tui`）** 与 **Windows/macOS/Linux 五目标单二进制分发**（无 bun 环境全功能）。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 71 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
 
 ## ✨ 为什么是 ORG
 
@@ -132,7 +132,7 @@ flowchart TB
 `org tui` 打开三区布局的产品级终端界面（零依赖自研渲染器，规格见 [docs/tui-spec.md](docs/tui-spec.md)）：
 
 ```
-╭ ORG — Organization Harness ──────────────────────────────── v0.4.0 ╮
+╭ ORG — Organization Harness ──────────────────────────────── v0.4.2 ╮
 │  ▾ 会话 (5)          │  org 任务分解 → 3 子任务                       │
 │    ● 抓取某站点近…    │     ├ task#1 fetch   [A 内联] ✓               │
 │    ○ (direct) 多轮…  │     ├ task#2 parse   [B 复用] notice-parser ✓  │
@@ -383,7 +383,7 @@ org/
 ├── lib/
 │   ├── engine.ts                 #   引擎桥（CLI/TUI 共用）：dhvRun / startRun / 工作区扫描
 │   └── root.ts                   #   运行时根解析（源码模式 / 单二进制解包）
-├── tests/                        # 69 个机制级测试（结构闸门 / README 走读 / 动力学点火）
+├── tests/                        # 71 个机制级测试（结构闸门 / README 走读 / 动力学点火）
 ├── demo-ws/                      # 演示工作区模板（raw 公告 + 注册表模板）
 ├── fixtures/
 │   └── run-notices.json          # 三连跑剧本（make-fixture.ts 产出）
@@ -410,7 +410,7 @@ org/
 > 注册表，不入库）；`toolchain/dhv-ts` 内嵌解释器 vendored 入库——克隆即得可校验完整状态：
 > `bun cli/org.ts check` 直接全量模块过，无需任何环境准备。
 
-## ⚡ 快速开始（v0.4.0 实测可用）
+## ⚡ 快速开始（v0.4.2 实测可用）
 
 **终端用户（免环境）**：到 [Releases](https://github.com/myh2026/org/releases/latest) 下载
 对应平台产物（`org-windows-x64.exe` / `org-darwin-arm64.zip` / `org-linux-x64.zip` …），
@@ -432,7 +432,7 @@ bun cli/org.ts check
 #    → 多轮直连 → 暖移交；结束时自动导出 dist/demo）
 bun cli/org.ts demo
 
-# 3) 机制级测试（69 个：结构闸门 / README 走读 / 动力学条件分支点火）
+# 3) 机制级测试（71 个：结构闸门 / README 走读 / 动力学条件分支点火）
 bun test tests/
 
 # 4) 团队模式派单（单轮）
@@ -449,7 +449,7 @@ bun cli/org.ts handoff notice-parser --task "帮我把解析规则整理成一�
 bun cli/org.ts status
 
 # 8) 查看模型评分卡与证据来源（evidence_count 为跨运行累计）
-bun cli/org.ts score --axis structured_output
+bun cli/org.ts score --axis structured_extract
 
 # 9) 确定性重放某次历史运行
 bun cli/org.ts replay --run demo-run/out-a   # 或 dist/demo/out-a
@@ -464,7 +464,7 @@ bun cli/org.ts run --task "..." --model deepseek
 
 ### CI/CD 与测试
 
-- **测试**（`bun test tests/`，69 个）：结构闸门（dhv check 全源 + 生成器出题与人工抽查逐字一致）
+- **测试**（`bun test tests/`，71 个）：结构闸门（dhv check 全源 + 生成器出题与人工抽查逐字一致）
   / README 走读（三连跑衰减曲线、工厂闸门、补丁与金丝雀、固化持久化、评分卡归因、
   journal→fixture、直连、暖移交、git 注册表链）/ 动力学点火（漂移告警、固化降级、
   Reject 重派、Escalate 仲裁返工、三档补丁闸门、N 版本冗余）。
