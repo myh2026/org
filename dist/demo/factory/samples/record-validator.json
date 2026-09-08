@@ -1,0 +1,1 @@
+{"task_id":1,"goal":"acceptance rehearsal: validate sample records","acceptance":"coverage >= 0.95","payload":[{"title":"样本公告","date":"2024-03-10","date_status":"ok","dept":"办公室","category":"announcement"},{"title":"样本通知","date":"3月14日","date_status":"unparsed","dept":"综合部","category":"notice"}],"feedback":["accept flagged records"]}

@@ -1,0 +1,1 @@
+{"model":"scripted","evidence_count":17,"cells":[{"cell":"instruction_following|structured_extract","score":0.9166666666666666,"confidence":3},{"cell":"cost_efficiency|structured_extract","score":1,"confidence":3},{"cell":"judgment|structured_extract","score":0.8666666666666667,"confidence":1.5},{"cell":"tool_reliability|structured_extract","score":1,"confidence":1}]}

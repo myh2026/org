@@ -1,58 +1,58 @@
-{"seq":0,"ts":"2026-09-08T12:33:10.667Z","name":"run_start","data":{"entry":"/home/runner/work/org/org/hsl/org.hsl","model":"scripted","task":"抓取某站点近一周公告，输出结构化表格","scale":"microkernel"}}
-{"seq":1,"ts":"2026-09-08T12:33:10.671Z","name":"run_start","data":{"mission":"抓取某站点近一周公告，输出结构化表格"}}
-{"seq":2,"ts":"2026-09-08T12:33:10.672Z","name":"journal","data":{"name":"open","detail":"抓取某站点近一周公告，输出结构化表格"}}
-{"seq":3,"ts":"2026-09-08T12:33:10.672Z","name":"node","data":{"graph":"Org","node":"journal","initialized":true}}
-{"seq":4,"ts":"2026-09-08T12:33:10.675Z","name":"node","data":{"graph":"Org","node":"registry","initialized":true}}
-{"seq":5,"ts":"2026-09-08T12:33:10.675Z","name":"node","data":{"graph":"Org","node":"pool","initialized":true}}
-{"seq":6,"ts":"2026-09-08T12:33:10.675Z","name":"node","data":{"graph":"Org","node":"policy","initialized":true}}
-{"seq":7,"ts":"2026-09-08T12:33:10.675Z","name":"node","data":{"graph":"Org","node":"scorecard","initialized":true}}
-{"seq":8,"ts":"2026-09-08T12:33:10.675Z","name":"journal","data":{"name":"decompose","detail":"抓取某站点近一周公告，输出结构化表格"}}
-{"seq":9,"ts":"2026-09-08T12:33:10.678Z","name":"journal","data":{"name":"clarify","detail":"输出字段偏好：标题、日期、部门、分类？"}}
-{"seq":10,"ts":"2026-09-08T12:33:10.678Z","name":"journal","data":{"name":"clarify","detail":"日期格式用 ISO 8601 还是保留原文？"}}
-{"seq":11,"ts":"2026-09-08T12:33:10.679Z","name":"journal","data":{"name":"answer","detail":"字段偏好：标题、日期、部门、分类"}}
-{"seq":12,"ts":"2026-09-08T12:33:10.679Z","name":"journal","data":{"name":"answer","detail":"日期用 ISO 8601，无法解析的保留原文并标注"}}
-{"seq":13,"ts":"2026-09-08T12:33:10.681Z","name":"journal","data":{"name":"route","detail":"task#1 fetch -> A:inline"}}
-{"seq":14,"ts":"2026-09-08T12:33:10.682Z","name":"capability_granted","data":{"capability":"llm_call","mode":"orchestrated"}}
-{"seq":15,"ts":"2026-09-08T12:33:10.682Z","name":"journal","data":{"name":"dispatch","detail":"task#1 channel=inline (kernel context)"}}
-{"seq":16,"ts":"2026-09-08T12:33:10.684Z","name":"journal","data":{"name":"review","detail":"task#1 fetch verdict=Accept coverage=1.00"}}
-{"seq":17,"ts":"2026-09-08T12:33:10.685Z","name":"score_evidence","data":{"model":"scripted","axis":"instruction_following","task_class":"structured_extract","kind":"verdict_rate","value":1}}
-{"seq":18,"ts":"2026-09-08T12:33:10.686Z","name":"score_evidence","data":{"model":"scripted","axis":"cost_efficiency","task_class":"structured_extract","kind":"budget_adherence","value":1}}
-{"seq":19,"ts":"2026-09-08T12:33:10.686Z","name":"journal","data":{"name":"worker-done","detail":"task#1 coverage=1.00 tokens=0"}}
-{"seq":20,"ts":"2026-09-08T12:33:10.687Z","name":"journal","data":{"name":"route","detail":"task#2 parse -> B:reuse"}}
-{"seq":21,"ts":"2026-09-08T12:33:10.687Z","name":"capability_granted","data":{"capability":"llm_call","mode":"orchestrated"}}
-{"seq":22,"ts":"2026-09-08T12:33:10.687Z","name":"journal","data":{"name":"dispatch","detail":"task#2 channel=reuse notice-parser"}}
-{"seq":23,"ts":"2026-09-08T12:33:10.692Z","name":"node","data":{"graph":"NoticeParser","node":"crystallizer","initialized":true}}
-{"seq":24,"ts":"2026-09-08T12:33:10.692Z","name":"node","data":{"graph":"NoticeParser","node":"records","initialized":true}}
-{"seq":25,"ts":"2026-09-08T12:33:10.696Z","name":"crystallize_frozen","data":{"node":"notice-parser/norm_date","input":"3月14日"}}
-{"seq":26,"ts":"2026-09-08T12:33:10.697Z","name":"crystallize_hit","data":{"node":"notice-parser/norm_date","input":"2024年3月10日"}}
-{"seq":27,"ts":"2026-09-08T12:33:10.698Z","name":"crystallize_hit","data":{"node":"notice-parser/norm_date","input":"2024年3月12日"}}
-{"seq":28,"ts":"2026-09-08T12:33:10.698Z","name":"crystallize_hit","data":{"node":"notice-parser/norm_date","input":"2024年3月10日"}}
-{"seq":29,"ts":"2026-09-08T12:33:10.699Z","name":"crystallize_hit","data":{"node":"notice-parser/norm_date","input":"2024年3月12日"}}
-{"seq":30,"ts":"2026-09-08T12:33:10.702Z","name":"journal","data":{"name":"review","detail":"task#2 parse verdict=Accept coverage=1.00"}}
-{"seq":31,"ts":"2026-09-08T12:33:10.703Z","name":"score_evidence","data":{"model":"scripted","axis":"instruction_following","task_class":"structured_extract","kind":"verdict_rate","value":1}}
-{"seq":32,"ts":"2026-09-08T12:33:10.704Z","name":"score_evidence","data":{"model":"scripted","axis":"cost_efficiency","task_class":"structured_extract","kind":"budget_adherence","value":1}}
-{"seq":33,"ts":"2026-09-08T12:33:10.704Z","name":"score_evidence","data":{"model":"scripted","axis":"judgment","task_class":"structured_extract","kind":"crystallize_hit","value":0.8}}
-{"seq":34,"ts":"2026-09-08T12:33:10.704Z","name":"journal","data":{"name":"worker-done","detail":"task#2 coverage=1.00 tokens=480"}}
-{"seq":35,"ts":"2026-09-08T12:33:10.706Z","name":"journal","data":{"name":"route","detail":"task#3 validate -> B:reuse"}}
-{"seq":36,"ts":"2026-09-08T12:33:10.706Z","name":"capability_granted","data":{"capability":"llm_call","mode":"orchestrated"}}
-{"seq":37,"ts":"2026-09-08T12:33:10.706Z","name":"journal","data":{"name":"dispatch","detail":"task#3 channel=reuse record-validator"}}
-{"seq":38,"ts":"2026-09-08T12:33:10.762Z","name":"journal","data":{"name":"review","detail":"task#3 validate verdict=Revise coverage=0.80"}}
-{"seq":39,"ts":"2026-09-08T12:33:10.770Z","name":"journal","data":{"name":"patch","detail":"意见复发两次，升级补丁提案：remedy: count date_status=unparsed as valid (flagged, not excluded)"}}
-{"seq":40,"ts":"2026-09-08T12:33:10.960Z","name":"shadow_compare","data":{"expert":"record-validator","candidate_version":"1.0.1","baseline_version":"1.0.0","agree":true,"old_coverage":1,"new_coverage":1}}
-{"seq":41,"ts":"2026-09-08T12:33:10.961Z","name":"canary_confirmed","data":{"expert":"record-validator","version":"1.0.1"}}
-{"seq":42,"ts":"2026-09-08T12:33:10.961Z","name":"journal","data":{"name":"canary","detail":"影子对比一致 → 金丝雀确认 record-validator@1.0.1（蓝绿生效）"}}
-{"seq":43,"ts":"2026-09-08T12:33:10.961Z","name":"score_evidence","data":{"model":"scripted","axis":"tool_reliability","task_class":"structured_extract","kind":"canary_confirm","value":1}}
-{"seq":44,"ts":"2026-09-08T12:33:10.961Z","name":"score_evidence","data":{"model":"scripted","axis":"judgment","task_class":"structured_extract","kind":"shadow_compare","value":1}}
-{"seq":45,"ts":"2026-09-08T12:33:10.962Z","name":"journal","data":{"name":"re-dispatch","detail":"task#3 revise #1: remedy: count date_status=unparsed as valid (flagged, not excluded)"}}
-{"seq":46,"ts":"2026-09-08T12:33:10.962Z","name":"capability_granted","data":{"capability":"llm_call","mode":"orchestrated"}}
-{"seq":47,"ts":"2026-09-08T12:33:10.962Z","name":"journal","data":{"name":"dispatch","detail":"task#3 channel=reuse record-validator"}}
-{"seq":48,"ts":"2026-09-08T12:33:11.009Z","name":"journal","data":{"name":"review","detail":"task#3 validate verdict=Accept coverage=1.00"}}
-{"seq":49,"ts":"2026-09-08T12:33:11.010Z","name":"score_evidence","data":{"model":"scripted","axis":"instruction_following","task_class":"structured_extract","kind":"verdict_rate","value":0.75}}
-{"seq":50,"ts":"2026-09-08T12:33:11.010Z","name":"score_evidence","data":{"model":"scripted","axis":"cost_efficiency","task_class":"structured_extract","kind":"budget_adherence","value":1}}
-{"seq":51,"ts":"2026-09-08T12:33:11.010Z","name":"journal","data":{"name":"worker-done","detail":"task#3 coverage=1.00 tokens=0"}}
-{"seq":52,"ts":"2026-09-08T12:33:11.010Z","name":"journal","data":{"name":"asset","detail":"frozen notice-parser.norm_date"}}
-{"seq":53,"ts":"2026-09-08T12:33:11.010Z","name":"journal","data":{"name":"asset","detail":"patch record-validator :: remedy: count date_status=unparsed as valid (flagged, not excluded)"}}
-{"seq":54,"ts":"2026-09-08T12:33:11.011Z","name":"journal","data":{"name":"asset","detail":"memory: task memory index: 3 entries"}}
-{"seq":55,"ts":"2026-09-08T12:33:11.013Z","name":"journal","data":{"name":"drift","detail":"静默更新检测：alerts=0 baseline=registry/scorecards/baseline-scripted.json"}}
-{"seq":56,"ts":"2026-09-08T12:33:11.015Z","name":"fixtures_mined","data":{"entries":4,"tracks":3,"path":"registry/fixtures-mined/reviews.json"}}
-{"seq":57,"ts":"2026-09-08T12:33:11.017Z","name":"run_end","data":{"elapsed_ms":350,"ok":true}}
+{"seq":0,"ts":"2026-09-08T13:29:54.502Z","name":"run_start","data":{"entry":"/home/z/repos/org/hsl/org.hsl","model":"scripted","task":"抓取某站点近一周公告，输出结构化表格","scale":"microkernel"}}
+{"seq":1,"ts":"2026-09-08T13:29:54.506Z","name":"run_start","data":{"mission":"抓取某站点近一周公告，输出结构化表格"}}
+{"seq":2,"ts":"2026-09-08T13:29:54.507Z","name":"journal","data":{"name":"open","detail":"抓取某站点近一周公告，输出结构化表格"}}
+{"seq":3,"ts":"2026-09-08T13:29:54.508Z","name":"node","data":{"graph":"Org","node":"journal","initialized":true}}
+{"seq":4,"ts":"2026-09-08T13:29:54.511Z","name":"node","data":{"graph":"Org","node":"registry","initialized":true}}
+{"seq":5,"ts":"2026-09-08T13:29:54.512Z","name":"node","data":{"graph":"Org","node":"pool","initialized":true}}
+{"seq":6,"ts":"2026-09-08T13:29:54.512Z","name":"node","data":{"graph":"Org","node":"policy","initialized":true}}
+{"seq":7,"ts":"2026-09-08T13:29:54.512Z","name":"node","data":{"graph":"Org","node":"scorecard","initialized":true}}
+{"seq":8,"ts":"2026-09-08T13:29:54.513Z","name":"journal","data":{"name":"decompose","detail":"抓取某站点近一周公告，输出结构化表格"}}
+{"seq":9,"ts":"2026-09-08T13:29:54.543Z","name":"journal","data":{"name":"clarify","detail":"输出字段偏好：标题、日期、部门、分类？"}}
+{"seq":10,"ts":"2026-09-08T13:29:54.543Z","name":"journal","data":{"name":"clarify","detail":"日期格式用 ISO 8601 还是保留原文？"}}
+{"seq":11,"ts":"2026-09-08T13:29:54.544Z","name":"journal","data":{"name":"answer","detail":"字段偏好：标题、日期、部门、分类"}}
+{"seq":12,"ts":"2026-09-08T13:29:54.544Z","name":"journal","data":{"name":"answer","detail":"日期用 ISO 8601，无法解析的保留原文并标注"}}
+{"seq":13,"ts":"2026-09-08T13:29:54.549Z","name":"journal","data":{"name":"route","detail":"task#1 fetch -> A:inline"}}
+{"seq":14,"ts":"2026-09-08T13:29:54.550Z","name":"capability_granted","data":{"capability":"llm_call","mode":"orchestrated"}}
+{"seq":15,"ts":"2026-09-08T13:29:54.551Z","name":"journal","data":{"name":"dispatch","detail":"task#1 channel=inline (kernel context)"}}
+{"seq":16,"ts":"2026-09-08T13:29:54.554Z","name":"journal","data":{"name":"review","detail":"task#1 fetch verdict=Accept coverage=1.00"}}
+{"seq":17,"ts":"2026-09-08T13:29:54.562Z","name":"score_evidence","data":{"model":"scripted","axis":"instruction_following","task_class":"structured_extract","kind":"verdict_rate","value":1}}
+{"seq":18,"ts":"2026-09-08T13:29:54.563Z","name":"score_evidence","data":{"model":"scripted","axis":"cost_efficiency","task_class":"structured_extract","kind":"budget_adherence","value":1}}
+{"seq":19,"ts":"2026-09-08T13:29:54.563Z","name":"journal","data":{"name":"worker-done","detail":"task#1 coverage=1.00 tokens=0"}}
+{"seq":20,"ts":"2026-09-08T13:29:54.564Z","name":"journal","data":{"name":"route","detail":"task#2 parse -> B:reuse"}}
+{"seq":21,"ts":"2026-09-08T13:29:54.565Z","name":"capability_granted","data":{"capability":"llm_call","mode":"orchestrated"}}
+{"seq":22,"ts":"2026-09-08T13:29:54.565Z","name":"journal","data":{"name":"dispatch","detail":"task#2 channel=reuse notice-parser"}}
+{"seq":23,"ts":"2026-09-08T13:29:54.579Z","name":"node","data":{"graph":"NoticeParser","node":"crystallizer","initialized":true}}
+{"seq":24,"ts":"2026-09-08T13:29:54.579Z","name":"node","data":{"graph":"NoticeParser","node":"records","initialized":true}}
+{"seq":25,"ts":"2026-09-08T13:29:54.580Z","name":"crystallize_frozen","data":{"node":"notice-parser/norm_date","input":"3月14日"}}
+{"seq":26,"ts":"2026-09-08T13:29:54.585Z","name":"crystallize_hit","data":{"node":"notice-parser/norm_date","input":"2024年3月10日"}}
+{"seq":27,"ts":"2026-09-08T13:29:54.585Z","name":"crystallize_hit","data":{"node":"notice-parser/norm_date","input":"2024年3月12日"}}
+{"seq":28,"ts":"2026-09-08T13:29:54.586Z","name":"crystallize_hit","data":{"node":"notice-parser/norm_date","input":"2024年3月10日"}}
+{"seq":29,"ts":"2026-09-08T13:29:54.595Z","name":"crystallize_hit","data":{"node":"notice-parser/norm_date","input":"2024年3月12日"}}
+{"seq":30,"ts":"2026-09-08T13:29:54.598Z","name":"journal","data":{"name":"review","detail":"task#2 parse verdict=Accept coverage=1.00"}}
+{"seq":31,"ts":"2026-09-08T13:29:54.600Z","name":"score_evidence","data":{"model":"scripted","axis":"instruction_following","task_class":"structured_extract","kind":"verdict_rate","value":1}}
+{"seq":32,"ts":"2026-09-08T13:29:54.601Z","name":"score_evidence","data":{"model":"scripted","axis":"cost_efficiency","task_class":"structured_extract","kind":"budget_adherence","value":1}}
+{"seq":33,"ts":"2026-09-08T13:29:54.601Z","name":"score_evidence","data":{"model":"scripted","axis":"judgment","task_class":"structured_extract","kind":"crystallize_hit","value":0.8}}
+{"seq":34,"ts":"2026-09-08T13:29:54.601Z","name":"journal","data":{"name":"worker-done","detail":"task#2 coverage=1.00 tokens=480"}}
+{"seq":35,"ts":"2026-09-08T13:29:54.603Z","name":"journal","data":{"name":"route","detail":"task#3 validate -> B:reuse"}}
+{"seq":36,"ts":"2026-09-08T13:29:54.611Z","name":"capability_granted","data":{"capability":"llm_call","mode":"orchestrated"}}
+{"seq":37,"ts":"2026-09-08T13:29:54.611Z","name":"journal","data":{"name":"dispatch","detail":"task#3 channel=reuse record-validator"}}
+{"seq":38,"ts":"2026-09-08T13:29:54.754Z","name":"journal","data":{"name":"review","detail":"task#3 validate verdict=Revise coverage=0.80"}}
+{"seq":39,"ts":"2026-09-08T13:29:54.755Z","name":"journal","data":{"name":"patch","detail":"意见复发两次，升级补丁提案：remedy: count date_status=unparsed as valid (flagged, not excluded)"}}
+{"seq":40,"ts":"2026-09-08T13:29:55.101Z","name":"shadow_compare","data":{"expert":"record-validator","candidate_version":"1.0.1","baseline_version":"1.0.0","agree":true,"old_coverage":1,"new_coverage":1}}
+{"seq":41,"ts":"2026-09-08T13:29:55.101Z","name":"canary_confirmed","data":{"expert":"record-validator","version":"1.0.1"}}
+{"seq":42,"ts":"2026-09-08T13:29:55.101Z","name":"journal","data":{"name":"canary","detail":"影子对比一致 → 金丝雀确认 record-validator@1.0.1（蓝绿生效）"}}
+{"seq":43,"ts":"2026-09-08T13:29:55.101Z","name":"score_evidence","data":{"model":"scripted","axis":"tool_reliability","task_class":"structured_extract","kind":"canary_confirm","value":1}}
+{"seq":44,"ts":"2026-09-08T13:29:55.101Z","name":"score_evidence","data":{"model":"scripted","axis":"judgment","task_class":"structured_extract","kind":"shadow_compare","value":1}}
+{"seq":45,"ts":"2026-09-08T13:29:55.102Z","name":"journal","data":{"name":"re-dispatch","detail":"task#3 revise #1: remedy: count date_status=unparsed as valid (flagged, not excluded)"}}
+{"seq":46,"ts":"2026-09-08T13:29:55.102Z","name":"capability_granted","data":{"capability":"llm_call","mode":"orchestrated"}}
+{"seq":47,"ts":"2026-09-08T13:29:55.102Z","name":"journal","data":{"name":"dispatch","detail":"task#3 channel=reuse record-validator"}}
+{"seq":48,"ts":"2026-09-08T13:29:55.199Z","name":"journal","data":{"name":"review","detail":"task#3 validate verdict=Accept coverage=1.00"}}
+{"seq":49,"ts":"2026-09-08T13:29:55.200Z","name":"score_evidence","data":{"model":"scripted","axis":"instruction_following","task_class":"structured_extract","kind":"verdict_rate","value":0.75}}
+{"seq":50,"ts":"2026-09-08T13:29:55.200Z","name":"score_evidence","data":{"model":"scripted","axis":"cost_efficiency","task_class":"structured_extract","kind":"budget_adherence","value":1}}
+{"seq":51,"ts":"2026-09-08T13:29:55.200Z","name":"journal","data":{"name":"worker-done","detail":"task#3 coverage=1.00 tokens=0"}}
+{"seq":52,"ts":"2026-09-08T13:29:55.201Z","name":"journal","data":{"name":"asset","detail":"frozen notice-parser.norm_date"}}
+{"seq":53,"ts":"2026-09-08T13:29:55.201Z","name":"journal","data":{"name":"asset","detail":"patch record-validator :: remedy: count date_status=unparsed as valid (flagged, not excluded)"}}
+{"seq":54,"ts":"2026-09-08T13:29:55.201Z","name":"journal","data":{"name":"asset","detail":"memory: task memory index: 3 entries"}}
+{"seq":55,"ts":"2026-09-08T13:29:55.203Z","name":"journal","data":{"name":"drift","detail":"静默更新检测：alerts=0 baseline=registry/scorecards/baseline-scripted.json"}}
+{"seq":56,"ts":"2026-09-08T13:29:55.207Z","name":"fixtures_mined","data":{"entries":4,"tracks":3,"path":"registry/fixtures-mined/reviews.json"}}
+{"seq":57,"ts":"2026-09-08T13:29:55.209Z","name":"run_end","data":{"elapsed_ms":707,"ok":true}}
