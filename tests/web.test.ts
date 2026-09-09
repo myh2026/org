@@ -53,17 +53,21 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     server.stop(true);
   });
 
-  test("GET / 返回单页 HTML（内联 · 中文 UI · 无外链依赖）", async () => {
+  test("GET / 返回单页 HTML（Codex 风终端美学 · 无外链依赖）", async () => {
     const r = await fetch(base + "/");
     expect(r.status).toBe(200);
     expect(r.headers.get("content-type")).toContain("text/html");
     const html = await r.text();
     expect(html).toContain("<!DOCTYPE html>");
-    expect(html).toContain("组织驾驶舱");          // 顶栏标识
-    expect(html).toContain("专家（工具库）");       // 左侧栏
-    expect(html).toContain("向专家提问");           // 底部输入框
-    expect(html).toContain("#0c0a09");             // 深色琥珀主题（stone-950）
-    expect(html).toContain("#f59e0b");             // amber 点缀
+    expect(html).toContain("direct harness");       // 面包屑/空态 banner 标识
+    expect(html).toContain("输入问题");              // 输入坞 placeholder
+    expect(html).toContain("❯");                    // 用户转写行提示符
+    expect(html).toContain("#0a0a0b");             // 近黑 zinc 底（issue #12）
+    expect(html).toContain("#d97706");             // 琥珀仅作品牌微标记
+    expect(html).toContain('id="statusbar"');       // tmux 式底部状态栏
+    expect(html).toContain('id="modelSeg"');        // 模型切换分段控制
+    expect(html).toContain('"/api/abort"');         // 停止生成端点
+    expect(html).toContain('id="jumpBtn"');         // 回到最新悬浮按钮
     expect(html).not.toMatch(/src="http|href="http/); // 零外链（无静态文件）
   });
 
@@ -277,6 +281,11 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     expect(html).not.toContain('"/api/ask"');
   });
 
+  test("GET /api/status 含服务级 model（GUI 初始值对齐 org web --model）", async () => {
+    const st = (await (await fetch(base + "/api/status")).json()) as { model: string };
+    expect(st.model).toBe("scripted"); // 本服务 startWebServer({model: "scripted"})
+  });
+
   test("model 回落链（issue #11 修复）：请求体缺省 → 服务级 model（org web --model 不再失效）", async () => {
     // 独立第二服务（同工作区 · port 0 随机）：服务级 model = srv-level-flag。
     // 请求体不带 model → open/start 事件应回显服务级值（修复前：写死
@@ -301,6 +310,80 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     } finally {
       srv2.stop(true);
     }
+  });
+
+  // ---- 会话管理（issue #12：DELETE 删除 / PATCH 重命名）----
+
+  test("会话生命周期：ask 落账 → PATCH 重命名（mv 账本）→ 逐轮读取走新名 → DELETE 删除", async () => {
+    // 造一个会话
+    const ask = await fetch(base + "/api/ask", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expert: "poet", question: "会话管理链路验证", session: "web-mgmt" }),
+    });
+    expect(ask.status).toBe(200);
+    expect(exists(path.join(ws, "runtime/sessions/poet/web-mgmt.jsonl"))).toBe(true);
+    // PATCH 重命名：同专家内 mv 账本文件
+    const ren = await fetch(base + "/api/session/poet/web-mgmt", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ to: "web-mgmt-renamed" }),
+    });
+    expect(ren.status).toBe(200);
+    const ro = (await ren.json()) as { ok: boolean; from: string; to: string };
+    expect(ro.ok).toBe(true);
+    expect(ro.to).toBe("web-mgmt-renamed");
+    expect(exists(path.join(ws, "runtime/sessions/poet/web-mgmt.jsonl"))).toBe(false);
+    expect(exists(path.join(ws, "runtime/sessions/poet/web-mgmt-renamed.jsonl"))).toBe(true);
+    // 逐轮读取走新名（账本内容随文件搬走）
+    const detail = (await (await fetch(base + "/api/session/poet/web-mgmt-renamed")).json()) as {
+      turns: Array<{ question: string }>;
+    };
+    expect(detail.turns.length).toBe(1);
+    expect(detail.turns[0]!.question).toContain("会话管理链路验证");
+    // sessions 列表显示新名
+    const ls = (await (await fetch(base + "/api/sessions?expert=poet")).json()) as {
+      sessions: Array<{ id: string }>;
+    };
+    expect(ls.sessions.map((s) => s.id)).toContain("web-mgmt-renamed");
+    // DELETE 删除：删账本文件 = 删会话
+    const del = await fetch(base + "/api/session/poet/web-mgmt-renamed", { method: "DELETE" });
+    expect(del.status).toBe(200);
+    const dobj = (await del.json()) as { ok: boolean; deleted: string };
+    expect(dobj.ok).toBe(true);
+    expect(exists(path.join(ws, "runtime/sessions/poet/web-mgmt-renamed.jsonl"))).toBe(false);
+    // 再删 → 404（幂等防呆）
+    const del2 = await fetch(base + "/api/session/poet/web-mgmt-renamed", { method: "DELETE" });
+    expect(del2.status).toBe(404);
+  });
+
+  test("PATCH 防呆：坏 JSON/非法名/目标已存在 → 400/400/409", async () => {
+    const bad = await fetch(base + "/api/session/poet/web-t1", {
+      method: "PATCH",
+      body: "not json",
+    });
+    expect(bad.status).toBe(400);
+    const illegal = await fetch(base + "/api/session/poet/web-t1", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ to: "../escape" }),
+    });
+    expect(illegal.status).toBe(400);
+    const clash = await fetch(base + "/api/session/poet/web-t1", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ to: "web-sse1" }), // 已存在的会话
+    });
+    expect(clash.status).toBe(409);
+  });
+
+  test("POST /api/abort（issue #12 停止生成）：空闲时 → ok:false 人话（不误杀）", async () => {
+    const r = await fetch(base + "/api/abort", { method: "POST" });
+    expect(r.status).toBe(200);
+    const out = (await r.json()) as { ok: boolean; aborted: boolean; message?: string };
+    expect(out.ok).toBe(false);
+    expect(out.aborted).toBe(false);
+    expect(out.message).toContain("没有运行中的直连");
   });
 
   test("防呆：ask 必填字段缺失 → 400；expert 名路径穿越编码 → 400", async () => {

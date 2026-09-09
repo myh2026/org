@@ -1,5 +1,44 @@
 # CHANGELOG
 
+## v0.4.9（2026-09-09）
+
+**`org web` GUI 工程化重设计（Codex 风终端美学）+ 正常 Agent 功能补全
+（issue #12）**。GUI 从「组织驾驶舱」深琥珀风改为安静致密的工程终端风：
+近黑 zinc 色板、1px 发丝边框、等宽 chrome、tmux 式底部状态栏、`❯` 提示符
+转写行（无气泡）、运行日志终端窗口、braille 旋转指示；无渐变无辉光，低饱和
+功能色（emerald=运行/在线，red=错误），琥珀仅作状态栏品牌微标记。
+
+### 新增
+
+- **停止生成（`POST /api/abort`）**：SIGKILL 当前 spawn 车道子进程 ——
+  账本写入发生在 hsl 运行收尾，进程被杀即该轮不落账本（干净丢弃）；SSE 端
+  发 `error{aborted:true}`，GUI 呈现「■ 已停止 · 本轮未落账本」+ 已浮出的
+  部分正文；`Esc` 快捷键；空闲时 abort 返回 `ok:false` 人话（不误杀，
+  进程内车道同样人话告知）；
+- **会话管理端点**：`DELETE /api/session/<E>/<S>`（删账本文件 = 删会话，
+  幂等 404）· `PATCH /api/session/<E>/<S>`（body `{to}`，同专家 mv 账本，
+  目标已存在 409、非法名 400）—— GUI 侧栏行内重命名 + 两步删除确认；
+- **GUI 功能补全**：失败重试（错误块「重试」按钮，失败轮不落账本安全重发）·
+  导出会话 Markdown（含流水线头信息）· 模型切换（scripted/deepseek 分段
+  控制）· 智能滚动（用户在底部才跟随 + 「回到最新」悬浮按钮）· 会话/专家
+  左栏计数徽标 · 空态终端 banner（engine/workspace/expert/session/快捷键）；
+- **`GET /api/status` 增返 `model`**：GUI 初始值对齐 `org web --model`；
+- **GUI 转写式消息流**：用户消息 = `❯` 提示符行；助手消息 = `org · 专家 ·
+  turn · tokens · 耗时` 元信息行 + 正文 + run log 终端窗口（`▸` 折叠、行
+  计数）；运行中 = braille 旋转 + 阶段行 + 逐行日志。
+
+### 修复
+
+- 内联 JS 转义纪律回归测试：模板字符串内 `\n` 双写（此前踩坑：注释被劈开
+  导致整段 script 语法错误）；GUI 单页新增内联 JS `new Function` 解析断言
+  之外的机制级要素断言（statusbar/modelSeg/abort/❯/jumpBtn）。
+
+### 并存
+
+- 旧 `POST /api/ask`（JSON 整轮）保留（兼容 API 消费方），GUI 走流式；
+- SSE 客户端意外断开仍不中止运行（账本是事实源）—— 显式停止才走
+  `/api/abort`（fire-and-poll 消费方不受影响）。
+
 ## v0.4.8（2026-09-08）
 
 **`org web` 对话流式：`POST /api/ask-stream` SSE 端点 + GUI 渐进渲染（issue #11，

@@ -31,7 +31,7 @@ import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          loadRegistryIndex, setRetained, keepAllCandidates,
          importHarness, listContextUsage, renderContextMeter, expertFixtureOf } from "../lib/engine.ts";
 
-const VERSION = "0.4.8";
+const VERSION = "0.4.9";
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const HANDOFF_ENTRY = path.join(ROOT, "hsl/pool/handoff.hsl");
