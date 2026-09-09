@@ -5,11 +5,11 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.4.10_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Status](https://img.shields.io/badge/status-v0.4.11_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
 [![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-快速开始v042-实测可用)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
-[![Tests](https://img.shields.io/badge/tests-128_passing-brightgreen.svg)](#-测试)
+[![Tests](https://img.shields.io/badge/tests-136_passing-brightgreen.svg)](#-测试)
 [![CI](https://github.com/myh2026/org/actions/workflows/ci.yml/badge.svg)](https://github.com/myh2026/org/actions/workflows/ci.yml)
 [![Release](https://github.com/myh2026/org/actions/workflows/release.yml/badge.svg)](https://github.com/myh2026/org/actions/workflows/release.yml)
 
@@ -19,7 +19,7 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **当前状态**：v0.4.9 可运行实现。新增 **Web GUI 工程化重设计（`org web`：Codex 风终端美学 —— 近黑 zinc · 等宽 chrome · tmux 式状态栏 · `❯` 转写行 · run log 终端窗口；正常 Agent 功能补全：停止生成 `POST /api/abort`（SIGKILL 子进程，该轮不落账本）、会话删除/重命名端点、失败重试、导出 Markdown、模型切换、智能滚动）**；**Web GUI 对话流式（`POST /api/ask-stream` SSE：open/start/stage/log/done 事件链，子进程 stdout 逐行实时推送）**；**Web GUI 原型（`org web`：Bun.serve 零依赖单页驾驶舱 —— 专家卡 + 会话侧栏 + 对话视图 + 观测元数据 tokens/耗时/ctx 窗口计量；scripted 占位剧本秒回）**；**B 路径执行面（导入 harness 被任务派单真实执行：注册表登记优先寻址 + 工单序列化卫生 + deliverable 交付物契约）**；**剧本联动（导入即能用：`org import` 自动生成占位剧本，`org ask` / `org handoff` 剧本自动发现 —— 零参数直连，`--model deepseek` 换真实回答）**；**工具库治理三动作：导入你自己的 harness（`org import`）+ 选取保留（`org keep` / `org drop`）** —— 工厂产出是候选，用户选取转正后才参与 B 路径自动复用，导入即保留即刻可复用，动作进 git 账本；直连会话新增 **上下文窗口计量（Codex 风格 meter，`[ctx]` 每轮可见）**。另有 **OpenCode 级终端前端（`org tui`）** 与 **Windows/macOS/Linux 五目标单二进制分发**（无 bun 环境全功能）。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 128 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
+> **当前状态**：v0.4.11 可运行实现。新增 **回答 Markdown 渲染 + 消息级操作（`org web`：零依赖 renderMd —— 围栏代码块（语言标签 + 块级 copy 钮）·表格·嵌套列表·引用·行内码/链接，XSS 全量转义优先；每轮「复制」+ 末轮「重发」hover 浮现）**；**会话搜索（侧栏 id/预览过滤）· 移动端抽屉侧栏（≤720px 菜单钮 + 遮罩，不再消失）· 快捷键（⌘K 新会话 · `/` 聚焦输入）**； **Web GUI 工程化重设计（`org web`：Codex 风终端美学 —— 近黑 zinc · 等宽 chrome · tmux 式状态栏 · `❯` 转写行 · run log 终端窗口；正常 Agent 功能补全：停止生成 `POST /api/abort`（SIGKILL 子进程，该轮不落账本）、会话删除/重命名端点、失败重试、导出 Markdown、模型切换、智能滚动）**；**Web GUI 对话流式（`POST /api/ask-stream` SSE：open/start/stage/log/done 事件链，子进程 stdout 逐行实时推送）**；**Web GUI 原型（`org web`：Bun.serve 零依赖单页驾驶舱 —— 专家卡 + 会话侧栏 + 对话视图 + 观测元数据 tokens/耗时/ctx 窗口计量；scripted 占位剧本秒回）**；**B 路径执行面（导入 harness 被任务派单真实执行：注册表登记优先寻址 + 工单序列化卫生 + deliverable 交付物契约）**；**剧本联动（导入即能用：`org import` 自动生成占位剧本，`org ask` / `org handoff` 剧本自动发现 —— 零参数直连，`--model deepseek` 换真实回答）**；**工具库治理三动作：导入你自己的 harness（`org import`）+ 选取保留（`org keep` / `org drop`）** —— 工厂产出是候选，用户选取转正后才参与 B 路径自动复用，导入即保留即刻可复用，动作进 git 账本；直连会话新增 **上下文窗口计量（Codex 风格 meter，`[ctx]` 每轮可见）**。另有 **OpenCode 级终端前端（`org tui`）** 与 **Windows/macOS/Linux 五目标单二进制分发**（无 bun 环境全功能）。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 136 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
 
 ## ✨ 为什么是 ORG
 
@@ -172,7 +172,7 @@ OpenAI Codex CLI 的终端美学：**安静、致密、可工程信任** —— 
 复用 CLI 同一代码路径：
 
 ```
-┌ org · v0.4.9 · /…/demo-run ─────────── experts 3 · 12 turns ──┐
+┌ org · v0.4.11 · /…/demo-run ────────── experts 3 · 12 turns ──┐
 │ SESSIONS            │ ❯ 写一首关于秋夜湖面的四行现代诗          │
 │  + 新会话            │ org · poet · turn 1 · 19 tok · 48 ms     │
 │  sprint-42 · 2 轮   │ 月光在湖面铺开银箔，                     │
@@ -188,6 +188,20 @@ OpenAI Codex CLI 的终端美学：**安静、致密、可工程信任** —— 
 - **转写式消息流**：用户消息 = `❯` 提示符行；助手消息 = `org · 专家 ·
   turn · tokens · 耗时` 元信息行 + 正文 + run log 终端窗口（`▸` 折叠展开
   · 行计数徽标）；运行中 = braille 旋转 + 流水线阶段行 + 逐行实时日志；
+- **Markdown 渲染（v0.4.11，issue #13）**：回答正文不再是纯文本 ——
+  零依赖 `renderMd`（服务端导出可单测，`fn.toString()` 注入 GUI 同一
+  实现）：围栏代码块（语言标签 + 块级 copy 钥）· 表格 · 嵌套列表 ·
+  引用 · h1-h4 · 分割线 · 行内粗/斜/删/行内码/链接；流式期间即渐进
+  渲染（未闭合围栏 EOF 容忍）；XSS 优先：全量转义后再还原受控标签，
+  链接仅 http(s)；
+- **消息级操作（v0.4.11）**：每轮「复制」（Clipboard API + execCommand
+  兜底，按钮闪烁反馈）+ 末轮「重发」（账本为事实源，重发 = 追加新轮
+  次，不篡改历史）；hover 浮现不抢视觉；
+- **会话搜索（v0.4.11）**：侧栏过滤框（id / 首问预览匹配，`Esc` 清空）；
+- **移动端抽屉（v0.4.11）**：≤720px 侧栏不再 `display:none` 直接消失
+  —— 改抽屉（header 菜单钮 `≡` + 遮罩点击关闭，选会话/专家自动收起）；
+- **快捷键（v0.4.11）**：`⌘K`/`Ctrl+K` 新会话 · `/` 聚焦输入 · `Esc`
+  停止（既有）；
 - **正常 Agent 功能面**：停止生成（`POST /api/abort` SIGKILL 子进程，该轮
   不落账本，`Esc` 快捷键，空闲时人话拒绝）· 失败重试（错误块按钮，失败轮
   不落账本安全重发）· 会话重命名（行内编辑，`PATCH` mv 账本）· 会话删除
@@ -211,8 +225,10 @@ OpenAI Codex CLI 的终端美学：**安静、致密、可工程信任** —— 
   独立部署无需本机装 z-ai-web-dev-sdk；未配置时真实模型车道人话报错；
 - **实现**：`web/entry.ts`（进程内 import，与 tui 同模式；`startWebServer`
   可编程入口供测试用随机端口）；服务只听 127.0.0.1，expert/session 名
-  白名单校验（防路径穿越）；测试 `bun test tests/web.test.ts`（24 用例）；
-- 路线图第 4 点（事件总线 WebSocket 拓扑观测）见 issue #10，未做。
+  白名单校验（防路径穿越）；测试 `bun test tests/web.test.ts`（32 用例，
+  含 renderMd 单测 8 例：围栏/表格/嵌套列表/XSS/行内/块级/空输入）；
+- 擂台/对比方向已退役（issue #10 收口）：仓库只保留 Agent 本体；Web 拓扑
+  观测（事件总线 WebSocket）作为远期想法存档，不在当前路线图。
 
 ## 📦 三平台单二进制分发（Windows / macOS / Linux）
 
@@ -526,8 +542,9 @@ bun cli/org.ts check
 #    → 多轮直连 → 暖移交；结束时自动导出 dist/demo）
 bun cli/org.ts demo
 
-# 3) 机制级测试（128 个：结构闸门 / README 走读 / 动力学条件分支点火 /
-#    工具库治理 keep-drop-import / 上下文窗口计量 / Web GUI 原型 + SSE 流式）
+# 3) 机制级测试（136 个：结构闸门 / README 走读 / 动力学条件分支点火 /
+#    工具库治理 keep-drop-import / 上下文窗口计量 / Web GUI 原型 +
+#    SSE 流式 + Markdown 渲染单测）
 bun test tests/
 
 # 4) 团队模式派单（单轮）

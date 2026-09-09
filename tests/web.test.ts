@@ -17,7 +17,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { TEST_RUN, runOrg, makeWorkspace, exists } from "./helpers";
-import { startWebServer, parseLedgerRaw, parseAskOut, parseWebArgv } from "../web/entry.ts";
+import { startWebServer, parseLedgerRaw, parseAskOut, parseWebArgv, renderMd } from "../web/entry.ts";
 
 /** 诗人 harness 样本（导入测试用）：/// 人格文档 + #[capability] 注解，
  *  import 时自动生成占位剧本（direct:poet 轨道）—— scripted 秒回。 */
@@ -68,6 +68,11 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     expect(html).toContain('id="modelSeg"');        // 模型切换分段控制
     expect(html).toContain('"/api/abort"');         // 停止生成端点
     expect(html).toContain('id="jumpBtn"');         // 回到最新悬浮按钮
+    expect(html).toContain("renderMd");              // Markdown 渲染器注入（issue #13）
+    expect(html).toContain('id="sessSearch"');       // 会话搜索框
+    expect(html).toContain('id="menuBtn"');          // 移动端抽屉菜单钮
+    expect(html).toContain('id="backdrop"');         // 移动端遮罩
+    expect(html).toContain("mact-copy");             // 消息级复制钮
     expect(html).not.toMatch(/src="http|href="http/); // 零外链（无静态文件）
   });
 
@@ -509,5 +514,72 @@ describe("Web GUI 原型：纯函数（账本解析 / stdout 解析）", () => {
     expect(r.ok).toBe(false);
     expect(r.answer).toBe("");
     expect(r.tokens).toBeNull();
+  });
+});
+
+// ============================================================================
+// renderMd：零依赖 Markdown 渲染器（issue #13 · 与 GUI 注入同一实现）
+// 纪律：XSS 优先（全量转义后再还原受控标签）；未识别语法按原文降级。
+// ============================================================================
+
+describe("renderMd：Markdown 渲染器（服务端单测 = 浏览器同一实现）", () => {
+  test("围栏代码块：语言标签 + copy 钮 + 内容转义", () => {
+    const h = renderMd("```ts\nconst a = \"<b>\";\n```");
+    expect(h).toContain('<div class="mdcode">');
+    expect(h).toContain("<span>ts</span>");
+    expect(h).toContain('class="mdcopy"');
+    expect(h).toContain("const a = &quot;&lt;b&gt;&quot;");
+    expect(h).not.toContain("<b>"); // 代码块内不还原标签
+  });
+
+  test("未闭合围栏（流式 EOF）：先渲染已到内容，不崩", () => {
+    const h = renderMd("```js\nconsole.log(1)");
+    expect(h).toContain("console.log(1)");
+    expect(h).toContain("mdcode");
+  });
+
+  test("表格：thead/th + tbody/td + 行内码", () => {
+    const h = renderMd("| 名称 | 值 |\n|---|---|\n| `ctx` | 131k |\n| 轮次 | 2 |");
+    expect(h).toContain("<th>名称</th>");
+    expect(h).toContain('<td><code class="icd">ctx</code></td>');
+    expect(h).toContain("<td>131k</td>");
+    expect(h).toContain("<td>2</td>");
+  });
+
+  test("列表：嵌套（缩进 2 空格）+ 有序 + 续行", () => {
+    const h = renderMd("- 甲\n  - 甲子\n  续行\n- 乙\n\n1. 一\n2. 二");
+    expect(h).toContain("<ul><li>甲<ul><li>甲子<br>续行</li></ul></li><li>乙</li></ul>");
+    expect(h).toContain("<ol><li>一</li><li>二</li></ol>");
+  });
+
+  test("行内：粗体/斜体/行内码/链接（http(s) 限定）/裸 URL", () => {
+    const h = renderMd("**粗** *斜* `码` [文](https://x.io) 见 https://y.io/a?b=1");
+    expect(h).toContain("<b>粗</b>");
+    expect(h).toContain("<i>斜</i>");
+    expect(h).toContain('<code class="icd">码</code>');
+    expect(h).toContain('<a href="https://x.io" target="_blank" rel="noopener noreferrer">文</a>');
+    expect(h).toContain('<a href="https://y.io/a?b=1"');
+  });
+
+  test("XSS：script/onerror/javascript: 一律转义或拒绝", () => {
+    const h = renderMd('<script>alert(1)</script> <img src=x onerror=alert(1)> [x](javascript:alert(1))');
+    expect(h).toContain("&lt;script&gt;");     // 原文转义成纯文本展示
+    expect(h).toContain("&lt;img src=x");      // 同上（含属性一并转义）
+    expect(h).not.toMatch(/<img[^&]/);         // 不存在未转义的 img 标签
+    expect(h).not.toMatch(/<script/);          // 不存在未转义的 script 标签
+    expect(h).not.toContain('href="javascript'); // 链接仅 http(s)
+  });
+
+  test("块级：标题/引用/分割线/段落软换行", () => {
+    const h = renderMd("## 标题\n\n> 引用一\n> 引用二\n\n---\n\n甲行\n乙行");
+    expect(h).toContain("<h2>标题</h2>");
+    expect(h).toContain("<blockquote>引用一<br>引用二</blockquote>");
+    expect(h).toContain('<hr class="mdhr">');
+    expect(h).toContain("<p>甲行<br>乙行</p>");
+  });
+
+  test("空输入与纯文本：空串 → 空输出；纯文本 → 单段落", () => {
+    expect(renderMd("")).toBe("");
+    expect(renderMd("你好")).toBe("<p>你好</p>");
   });
 });

@@ -34,7 +34,7 @@ import {
   expertFixtureOf, dhvRun, resolveDhv, resolveBun,
 } from "../lib/engine.ts";
 
-const VERSION = "0.4.10";
+const VERSION = "0.4.11";
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const STOCK_FIXTURE = path.join(ROOT, "fixtures/run-notices.json");
 const DEFAULT_PORT = 4600; // 3000/3030/5000 被本机其他服务占用，绝不复用
@@ -667,6 +667,154 @@ export async function webMain(argv: string[]): Promise<number> {
   return 0;
 }
 
+// ---- Markdown 渲染（零依赖 · 自包含：服务端导出可单测，客户端同一实现）----
+// 注入方式：renderIndexHtml 用 fn.toString() 把本函数源码嵌进内联 JS ——
+// 浏览器与 tests/web.test.ts 永远跑同一实现，无双份漂移。纪律：XSS 优先
+// （全量转义后再还原受控标签）；未识别语法按原文降级显示，不猜测。
+// 支持面：围栏代码块（```lang + 块级 copy 钮）· 表格 · 有序/无序列表（缩进
+// 嵌套 + 续行）· 引用 · h1-h4 · 分割线 · 行内粗/斜/删/行内码/链接（http(s)）。
+export function renderMd(src: string): string {
+  function E(s: string): string {
+    return s.replace(/[&<>"']/g, function (c: string): string {
+      return c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">"
+        ? "&gt;" : c === '"' ? "&quot;" : "&#39;";
+    });
+  }
+  function inline(s: string): string {
+    let t = E(s);
+    t = t.replace(/`([^`]+)`/g, '<code class="icd">$1</code>');
+    t = t.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+    t = t.replace(/(^|[^*\w])\*([^*\s][^*]*?)\*/g, "$1<i>$2</i>");
+    t = t.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+    t = t.replace(/\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    t = t.replace(/(^|[\s(])(https?:\/\/[^<\s)"']+)/g,
+      '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+    return t;
+  }
+  function splitRow(l: string): string[] {
+    let s = l.trim();
+    if (s.startsWith("|")) s = s.slice(1);
+    if (s.endsWith("|")) s = s.slice(0, -1);
+    return s.split("|").map(function (c: string): string { return c.trim(); });
+  }
+  function kind(l: string): string {
+    if (/^\s*$/.test(l)) return "blank";
+    if (/^\s*```/.test(l)) return "fence";
+    if (/^#{1,4}\s+\S/.test(l)) return "heading";
+    if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(l)) return "hr";
+    if (/^>/.test(l)) return "quote";
+    if (/^\s*[-*+]\s+\S/.test(l)) return "ul";
+    if (/^\s*\d+[.)]\s+\S/.test(l)) return "ol";
+    return "text";
+  }
+  function closeAll(): void {
+    while (stack.length > 0) {
+      const top = stack.pop()!;
+      out.push((top.liOpen ? "</li>" : "") + "</" + top.tag + ">");
+    }
+  }
+  function isTableStart(idx: number): boolean {
+    const cur = lines[idx] ?? "";
+    const sep = lines[idx + 1] ?? "";
+    return cur.indexOf("|") >= 0 &&
+      /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/.test(sep);
+  }
+  const lines = String(src ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const out: string[] = [];
+  const stack: Array<{ tag: string; indent: number; liOpen: boolean }> = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i]!;
+    const k = kind(line);
+    if (k === "blank") { closeAll(); i++; continue; }
+    if (k === "fence") {
+      closeAll();
+      const lang = (line.match(/^\s*```\s*(\S*)/) ?? ["", ""])[1] ?? "";
+      const body: string[] = [];
+      i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i]!)) { body.push(lines[i]!); i++; }
+      if (i < lines.length) i++; // 收口 ```（EOF 容忍：流式未闭合也先渲染）
+      out.push('<div class="mdcode"><div class="mdcode-h"><span>' + E(lang) +
+        '</span><button class="mdcopy" type="button" title="复制代码">copy</button></div>' +
+        "<pre><code>" + E(body.join("\n")) + "</code></pre></div>");
+      continue;
+    }
+    if (isTableStart(i)) {
+      closeAll();
+      const header = splitRow(line);
+      i += 2; // 表头 + 分隔行
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i]!.indexOf("|") >= 0 && kind(lines[i]!) === "text") {
+        rows.push(splitRow(lines[i]!)); i++;
+      }
+      out.push('<div class="mdtable"><table><thead><tr>' +
+        header.map(function (c: string): string { return "<th>" + inline(c) + "</th>"; }).join("") +
+        "</tr></thead><tbody>" +
+        rows.map(function (r: string[]): string {
+          return "<tr>" + r.map(function (c: string): string {
+            return "<td>" + inline(c) + "</td>";
+          }).join("") + "</tr>";
+        }).join("") + "</tbody></table></div>");
+      continue;
+    }
+    if (k === "heading") {
+      closeAll();
+      const m = line.match(/^(#{1,4})\s+(.*)$/) ?? ["", "#", ""];
+      out.push("<h" + m[1]!.length + ">" + inline(m[2]!) + "</h" + m[1]!.length + ">");
+      i++; continue;
+    }
+    if (k === "hr") { closeAll(); out.push('<hr class="mdhr">'); i++; continue; }
+    if (k === "quote") {
+      closeAll();
+      const q: string[] = [];
+      while (i < lines.length && kind(lines[i]!) === "quote") {
+        q.push(lines[i]!.replace(/^>\s?/, "")); i++;
+      }
+      out.push("<blockquote>" + q.map(inline).join("<br>") + "</blockquote>");
+      continue;
+    }
+    if (k === "ul" || k === "ol") {
+      const m = line.match(k === "ul" ? /^(\s*)[-*+]\s+(.*)$/ : /^(\s*)\d+[.)]\s+(.*)$/)
+        ?? ["", "", ""];
+      const indent = Math.floor((m[1] ?? "").length / 2);
+      const tag = k === "ul" ? "ul" : "ol";
+      while (stack.length > 0 && stack[stack.length - 1]!.indent > indent) {
+        const top = stack.pop()!;
+        out.push((top.liOpen ? "</li>" : "") + "</" + top.tag + ">");
+      }
+      if (stack.length === 0 || stack[stack.length - 1]!.indent < indent) {
+        out.push("<" + tag + ">");
+        stack.push({ tag, indent, liOpen: false });
+      } else if (stack[stack.length - 1]!.tag !== tag) {
+        const top = stack.pop()!;
+        out.push((top.liOpen ? "</li>" : "") + "</" + top.tag + ">");
+        out.push("<" + tag + ">");
+        stack.push({ tag, indent, liOpen: false });
+      } else if (stack[stack.length - 1]!.liOpen) {
+        out.push("</li>");
+      }
+      i++;
+      out.push("<li>" + inline(m[2] ?? ""));
+      // 列表项续行（≥2 空格缩进的普通文本并入本项）
+      while (i < lines.length && /^\s{2,}\S/.test(lines[i]!) && kind(lines[i]!) === "text") {
+        out.push("<br>" + inline(lines[i]!.trim())); i++;
+      }
+      stack[stack.length - 1]!.liOpen = true;
+      continue;
+    }
+    // 段落：连续 text 行（遇表格头/块级语法即断）
+    const para: string[] = [line];
+    i++;
+    while (i < lines.length && kind(lines[i]!) === "text" && !isTableStart(i)) {
+      para.push(lines[i]!); i++;
+    }
+    out.push("<p>" + para.map(inline).join("<br>") + "</p>");
+  }
+  closeAll();
+  return out.join("");
+}
+
 // ---- 单页 GUI（内联 HTML：Codex 风终端美学 · 原生 fetch · 中文文案） ----
 // 设计语言（issue #12）：近黑 zinc 色板 + 1px 发丝边框 + 4px 小圆角 + 等宽
 // chrome（标签/元数据/状态栏）+ tmux 式底部状态栏 + ❯ 提示符转写行（无气泡）
@@ -712,6 +860,10 @@ function renderIndexHtml(): string {
   header .path { flex: 1; min-width: 0; overflow: hidden;
                  text-overflow: ellipsis; white-space: nowrap; }
   header .tstats { margin-left: auto; color: var(--muted); white-space: nowrap; }
+  #menuBtn { display: none; flex: none; width: 26px; height: 20px;
+           border: 1px solid var(--border); background: transparent; color: var(--muted);
+           font: 13px/1 var(--mono); border-radius: 3px; cursor: pointer; }
+  #menuBtn:hover { color: var(--text); border-color: var(--border2); }
 
   .app { flex: 1; display: flex; min-height: 0; }
 
@@ -727,6 +879,11 @@ function renderIndexHtml(): string {
   .newbtn:hover { border-color: var(--border2); color: var(--text);
                   background: var(--panel2); }
   .newbtn:disabled { opacity: .5; cursor: not-allowed; }
+  #sessSearch { flex: none; margin: 6px 10px 0; height: 26px; background: var(--bg);
+           border: 1px solid var(--border); border-radius: 3px; color: var(--text);
+           font: 11px var(--mono); padding: 0 8px; outline: none; }
+  #sessSearch:focus { border-color: var(--border2); }
+  #sessSearch::placeholder { color: var(--dim); }
   .sec { flex: none; display: flex; align-items: center; gap: 6px;
          padding: 12px 12px 4px; font: 10px var(--mono);
          letter-spacing: 1.5px; text-transform: uppercase; color: var(--dim); }
@@ -848,6 +1005,56 @@ function renderIndexHtml(): string {
   .errbox .retry:hover { color: var(--text); border-color: var(--redb); }
   .stoppedbox { font: 11px var(--mono); color: var(--dim); margin: 6px 0; }
 
+  /* ── Markdown 渲染面（回答正文 · Codex 式克制，issue #13）── */
+  .t-bot .body.md { white-space: normal; }
+  .md p { margin: 0 0 8px; }
+  .md > :last-child { margin-bottom: 0; }
+  .md h1 { font: 600 16px/1.45 var(--sans); margin: 16px 0 6px; color: #f4f4f5; }
+  .md h2 { font: 600 15px/1.45 var(--sans); margin: 14px 0 6px; color: #eeeef0; }
+  .md h3 { font: 600 14px/1.45 var(--sans); margin: 12px 0 4px; color: #e6e6e9; }
+  .md h4 { font: 600 13px/1.45 var(--sans); margin: 10px 0 4px; }
+  .md ul, .md ol { margin: 0 0 8px; padding-left: 22px; }
+  .md li { margin: 2px 0; }
+  .md blockquote { margin: 0 0 8px; padding: 2px 0 2px 12px;
+           border-left: 2px solid var(--border2); color: var(--muted); }
+  .md blockquote p { margin: 0; }
+  .md .icd { font: 12px var(--mono); background: var(--raise);
+           border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; }
+  .md a { color: var(--greenb); text-decoration: none;
+           border-bottom: 1px solid rgba(52, 211, 153, .35); }
+  .md a:hover { border-bottom-color: var(--greenb); }
+  .md .mdhr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+  .mdcode { border: 1px solid var(--border); border-radius: 4px;
+           background: #08080a; margin: 8px 0; overflow: hidden; }
+  .mdcode .mdcode-h { display: flex; align-items: center; gap: 6px; padding: 3px 10px;
+           border-bottom: 1px solid var(--border); font: 10px var(--mono);
+           color: var(--dim); }
+  .mdcopy { margin-left: auto; border: 1px solid var(--border); background: transparent;
+           color: var(--dim); font: 10px var(--mono); padding: 1px 8px;
+           border-radius: 2px; cursor: pointer; }
+  .mdcopy:hover { color: var(--text); border-color: var(--border2); }
+  .mdcopy.copied { color: var(--greenb); border-color: rgba(16,185,129,.35); }
+  .mdcode pre { margin: 0; padding: 10px 12px; font: 12px/1.6 var(--mono);
+           color: #c9c9d1; overflow-x: auto; }
+  .mdtable { margin: 8px 0; border: 1px solid var(--border); border-radius: 4px;
+           overflow-x: auto; }
+  .mdtable table { border-collapse: collapse; width: 100%; font: 12px/1.5 var(--mono); }
+  .mdtable th, .mdtable td { padding: 5px 10px; text-align: left;
+           border-bottom: 1px solid var(--border); }
+  .mdtable tr:last-child td { border-bottom: none; }
+  .mdtable th { color: var(--muted); font-weight: 600; background: var(--panel2); }
+
+  /* 消息级操作（hover 浮现，issue #13） */
+  .macts { display: flex; gap: 2px; margin-top: 4px; opacity: 0;
+           transition: opacity .12s; }
+  .t-bot:hover .macts { opacity: 1; }
+  .mact { border: 1px solid transparent; background: transparent; color: var(--dim);
+           font: 10px var(--mono); cursor: pointer; padding: 1px 8px;
+           border-radius: 2px; }
+  .mact:hover { color: var(--text); background: var(--raise);
+           border-color: var(--border); }
+  .mact.copied { color: var(--greenb); }
+
   /* 空态：终端 banner */
   .banner { max-width: 560px; margin: 8vh auto 0; border: 1px solid var(--border);
            border-radius: 4px; background: var(--panel); padding: 14px 16px;
@@ -894,6 +1101,7 @@ function renderIndexHtml(): string {
   #send:hover { background: var(--raise); }
   #send.running { border-color: rgba(239,68,68,.4); color: var(--redb); }
   #send.running:hover { background: rgba(239,68,68,.08); }
+  .khint { font: 10px var(--mono); color: var(--dim); white-space: nowrap; }
 
   /* ── 状态栏（tmux 式）─────────────────────────────────── */
   .statusbar { flex: none; height: 26px; display: flex; align-items: center;
@@ -906,22 +1114,33 @@ function renderIndexHtml(): string {
   .statusbar .sb-right .run::before { content: "● "; }
   .statusbar .idle::before { content: "○ "; }
 
+  /* 移动端：侧栏改抽屉（≤720px，issue #13 —— 不再 display:none 直接消失） */
+  #backdrop { display: none; position: fixed; inset: 34px 0 0 0;
+           background: rgba(0,0,0,.5); z-index: 25; }
   @media (max-width: 720px) {
-    aside { display: none; }
+    #menuBtn { display: inline-flex; align-items: center; justify-content: center; }
+    aside { position: fixed; left: 0; top: 34px; bottom: 0; z-index: 30;
+           width: min(280px, 84vw); transform: translateX(-102%);
+           transition: transform .18s ease; box-shadow: 12px 0 32px rgba(0,0,0,.5); }
+    aside.open { transform: translateX(0); }
+    .khint { display: none; }
     .chat { padding: 16px 12px 24px; }
   }
 </style>
 </head>
 <body>
 <header>
+  <button id="menuBtn" type="button" aria-label="打开侧栏">≡</button>
   <span class="brand">org</span>
   <span class="ver">v${VERSION}</span>
   <span class="path" id="wsPath"></span>
   <span class="tstats" id="topStats"></span>
 </header>
+<div id="backdrop" aria-hidden="true"></div>
 <div class="app">
   <aside>
     <button class="newbtn" id="newSession" type="button">+ 新会话</button>
+    <input id="sessSearch" type="text" placeholder="搜索会话（id / 预览）…" autocomplete="off" aria-label="搜索会话">
     <div class="sec">sessions<span class="cnt" id="sessCount"></span></div>
     <div class="list" id="sessions"></div>
     <div class="sec">experts<span class="cnt" id="expertCount"></span></div>
@@ -947,6 +1166,7 @@ function renderIndexHtml(): string {
           <button type="button" data-model="scripted" class="on">scripted</button>
           <button type="button" data-model="deepseek">deepseek</button>
         </div>
+        <span class="khint">⌘K 新会话 · / 聚焦</span>
         <button id="send" type="button">发送</button>
       </div>
     </div>
@@ -955,12 +1175,14 @@ function renderIndexHtml(): string {
 </div>
 <script>
 var VER = "${VERSION}";
+var renderMd = ${renderMd.toString()};
 var state = {
   experts: [], usages: [], currentExpert: null, currentSession: null,
   model: "scripted", running: false, myRunStarted: false,
   lastQuestion: "", turns: [], atBottom: true
 };
 var lastSessions = [];
+var sessFilter = "";
 var editId = null, editDraft = "", editErr = false, confirmId = null;
 var SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".split("");
 var spinIdx = 0, spinTimer = null;
@@ -1037,15 +1259,25 @@ function renderExperts() {
       '<div class="l2">' + esc(e.description) + '</div></div>';
   }).join("") || '<div class="l2" style="padding:4px 8px">注册表为空</div>';
   Array.prototype.forEach.call(el.querySelectorAll(".exp"), function (node) {
-    node.onclick = function () { if (!state.running) selectExpert(node.dataset.name); };
+    node.onclick = function () {
+      if (state.running) return;
+      selectExpert(node.dataset.name);
+      closeDrawer();
+    };
   });
 }
 
 function renderSessions() {
   var el = document.getElementById("sessions");
+  var f = sessFilter.toLowerCase();
+  var shown = lastSessions.filter(function (s) {
+    if (!f) return true;
+    return s.id.toLowerCase().indexOf(f) >= 0 ||
+      String(s.preview || "").toLowerCase().indexOf(f) >= 0;
+  });
   document.getElementById("sessCount").textContent =
     lastSessions.length ? String(lastSessions.length) : "";
-  el.innerHTML = lastSessions.map(function (s) {
+  el.innerHTML = shown.map(function (s) {
     var cls = "sess" + (s.id === state.currentSession ? " active" : "");
     if (s.id === editId) {
       return '<div class="' + cls + ' editing" data-id="' + esc(s.id) + '">' +
@@ -1067,7 +1299,9 @@ function renderSessions() {
       '<span class="acts"><button class="ic" data-act="rename" title="重命名">✎</button>' +
       '<button class="ic danger" data-act="del" title="删除会话（删 org 账本）">✕</button></span></div>' +
       '<div class="l2">' + relTime(s.lastAt) + " · " + esc(s.preview) + '</div></div>';
-  }).join("") || '<div class="l2" style="padding:4px 10px">暂无会话账本 · 提问即写账本</div>';
+  }).join("") || '<div class="l2" style="padding:4px 10px">' + (lastSessions.length === 0
+    ? "暂无会话账本 · 提问即写账本"
+    : "无匹配「" + esc(sessFilter) + "」") + "</div>";
   var inp = document.getElementById("renInput");
   if (inp) {
     if (editErr) inp.classList.add("err");
@@ -1097,7 +1331,7 @@ document.getElementById("sessions").addEventListener("click", function (e) {
   } else if (act === "delOk") {
     doDelete(id);
   } else if (act === "open") {
-    if (!state.running) selectSession(id);
+    if (!state.running) { selectSession(id); closeDrawer(); }
   }
 });
 
@@ -1165,23 +1399,45 @@ function bannerHtml() {
     esc(state.currentExpert || "—") + " @" + esc(expertVersion(state.currentExpert)) + '</span></div>' +
     '<div class="b-row"><span class="b-k">session</span><span class="b-v">' + esc(sess) + '</span></div>' +
     '<div class="b-hr"></div>' +
-    '<div class="b-row"><span class="b-k">keys</span><span class="b-v">enter 发送 · shift+enter 换行 · esc 停止</span></div>' +
+    '<div class="b-row"><span class="b-k">keys</span><span class="b-v">enter 发送 · shift+enter 换行 · esc 停止 · ⌘K 新会话 · / 聚焦</span></div>' +
     '</div>';
 }
 
-function turnHtml(t) {
+function turnHtml(t, isLast) {
   var meta = "org · " + (state.currentExpert || "?") + " · turn " + t.turn +
     " · " + t.tokens + " tok · ctx " + t.ctx_tokens;
   return '<div class="t-user"><span class="ps">❯</span><span class="q">' +
     esc(t.question) + '</span></div>' +
     '<div class="t-bot"><div class="who">' + esc(meta) + '</div>' +
-    '<div class="body">' + esc(t.answer || "（空回答）") + '</div></div>';
+    '<div class="body md">' + renderMd(t.answer || "（空回答）") + '</div>' +
+    mactsHtml(isLast) + '</div>';
+}
+
+/** 消息级操作行（hover 浮现）：复制（每轮）+ 重发（仅末轮；账本为事实源，
+ * 重发 = 追加新轮次，不篡改历史）。 */
+function mactsHtml(isLast) {
+  return '<div class="macts">' +
+    '<button class="mact mact-copy" type="button" title="复制本轮回答">复制</button>' +
+    (isLast ? '<button class="mact mact-rs" type="button" title="重发此问（账本为事实源，追加新轮次）">重发</button>' : "") +
+    "</div>";
+}
+
+/** 非末轮的「重发」钮清除（新轮落座后田刷新）。 */
+function markLast() {
+  var bots = document.querySelectorAll("#chat .t-bot");
+  for (var k = 0; k < bots.length - 1; k++) {
+    var rs = bots[k].querySelector(".mact-rs");
+    if (rs) rs.remove();
+  }
 }
 
 function renderChat() {
   var el = document.getElementById("chat");
   if (state.turns.length === 0) { el.innerHTML = bannerHtml(); return; }
-  el.innerHTML = state.turns.map(turnHtml).join("");
+  el.innerHTML = state.turns.map(function (t, k) {
+    return turnHtml(t, k === state.turns.length - 1);
+  }).join("");
+  markLast();
 }
 
 function selectExpert(name) {
@@ -1319,8 +1575,8 @@ function ask(text, isRetry) {
     var a = el("panswer");
     if (!a) return;
     a.style.display = "";
-    a.textContent = answerLines.join("\\n");
-    a.insertAdjacentHTML("beforeend", '<span class="caret">▌</span>');
+    a.className = "answering md";
+    a.innerHTML = renderMd(answerLines.join("\\n")) + '<span class="caret">▌</span>';
   }
 
   function onEvent(ev, d) {
@@ -1369,10 +1625,12 @@ function ask(text, isRetry) {
         (outcome.durationMs == null ? "" : " · " + outcome.durationMs + " ms");
       chat.insertAdjacentHTML("beforeend",
         '<div class="t-bot"><div class="who">' + esc(meta) + '</div>' +
-        '<div class="body">' + esc(outcome.answer || "（无回答）") + '</div>' +
+        '<div class="body md">' + renderMd(outcome.answer || "（无回答）") + '</div>' +
         '<div class="obs">' + meterHtml(outcome.ctxLine) +
         '<span>ledger 已落盘</span></div>' +
+        mactsHtml(true) +
         logWinHtml(outcome.logs || "", false) + '</div>');
+      markLast();
       state.turns.push({
         turn: outcome.turn == null ? state.turns.length + 1 : outcome.turn,
         question: question,
@@ -1457,11 +1715,62 @@ function logWinHtml(logs, open) {
     lines + '</span>行</div><pre>' + esc(logs) + '</pre></div>';
 }
 
-// 日志窗口折叠 / 重试按钮：对话区事件委托
+// ---- 剪贴板（Clipboard API + execCommand 兜底） ----
+
+function fallbackCopy(text, cb) {
+  var ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); } catch (e) { /* 忽略 */ }
+  ta.remove();
+  if (cb) cb();
+}
+function copyText(text, cb) {
+  var done = function () { if (cb) cb(); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done, function () {
+      fallbackCopy(text, done);
+    });
+  } else fallbackCopy(text, done);
+}
+function flashBtn(btn, text) {
+  var old = btn.textContent;
+  btn.textContent = text;
+  btn.classList.add("copied");
+  setTimeout(function () {
+    btn.textContent = old;
+    btn.classList.remove("copied");
+  }, 1200);
+}
+
+// 日志窗口折叠 / 重试 / 消息级操作 / 代码块复制：对话区事件委托
 document.getElementById("chat").addEventListener("click", function (e) {
   var lh = e.target.closest(".loghead");
   if (lh) {
     lh.parentElement.classList.toggle("open");
+    return;
+  }
+  var mc = e.target.closest(".mdcopy");
+  if (mc) {
+    var box = mc.closest(".mdcode");
+    var pre = box ? box.querySelector("pre") : null;
+    if (pre) copyText(pre.textContent || "", function () { flashBtn(mc, "已复制"); });
+    return;
+  }
+  var cp = e.target.closest(".mact-copy");
+  if (cp) {
+    var blk2 = cp.closest(".t-bot");
+    var body = blk2 ? blk2.querySelector(".body") : null;
+    if (body) copyText(body.innerText || body.textContent || "",
+      function () { flashBtn(cp, "已复制"); });
+    return;
+  }
+  var rs = e.target.closest(".mact-rs");
+  if (rs && !state.running) {
+    ask(state.lastQuestion, false);
     return;
   }
   var rt = e.target.closest(".retry");
@@ -1487,16 +1796,53 @@ question.addEventListener("keydown", function (e) {
 });
 document.addEventListener("keydown", function (e) {
   if (e.key === "Escape" && state.running) stopRun();
+  if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+    e.preventDefault();
+    newSession();
+  }
+  if (e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey &&
+      e.target === document.body) {
+    e.preventDefault();
+    document.getElementById("question").focus();
+  }
 });
 document.getElementById("send").onclick = function () {
   if (state.running) stopRun(); else ask();
 };
-document.getElementById("newSession").onclick = function () {
+function newSession() {
   if (state.running) return;
   state.currentSession = "web-" + Date.now().toString(36);
   state.turns = [];
   renderSessions(); renderChat(); renderCrumb(); renderStatusbar();
+}
+document.getElementById("newSession").onclick = newSession;
+
+// ---- 会话搜索（id / 首问预览匹配；esc 清空） ----
+
+var sessSearch = document.getElementById("sessSearch");
+sessSearch.addEventListener("input", function () {
+  sessFilter = this.value;
+  renderSessions();
+});
+sessSearch.addEventListener("keydown", function (e) {
+  if (e.key === "Escape") { this.value = ""; sessFilter = ""; renderSessions(); }
+  e.stopPropagation(); // 不触发全局 esc 停止
+});
+
+// ---- 移动端抽屉（≤720px：menuBtn 开关 + 遮罩点击关闭） ----
+
+var asideEl = document.querySelector("aside");
+var backdropEl = document.getElementById("backdrop");
+function closeDrawer() {
+  asideEl.classList.remove("open");
+  backdropEl.style.display = "none";
+}
+document.getElementById("menuBtn").onclick = function () {
+  var on = !asideEl.classList.contains("open");
+  asideEl.classList.toggle("open", on);
+  backdropEl.style.display = on ? "block" : "none";
 };
+backdropEl.onclick = closeDrawer;
 
 // 模型切换（scripted / deepseek）
 document.getElementById("modelSeg").addEventListener("click", function (e) {
