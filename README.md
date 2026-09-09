@@ -5,11 +5,11 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.4.9_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Status](https://img.shields.io/badge/status-v0.4.10_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
 [![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-快速开始v042-实测可用)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
-[![Tests](https://img.shields.io/badge/tests-127_passing-brightgreen.svg)](#-测试)
+[![Tests](https://img.shields.io/badge/tests-128_passing-brightgreen.svg)](#-测试)
 [![CI](https://github.com/myh2026/org/actions/workflows/ci.yml/badge.svg)](https://github.com/myh2026/org/actions/workflows/ci.yml)
 [![Release](https://github.com/myh2026/org/actions/workflows/release.yml/badge.svg)](https://github.com/myh2026/org/actions/workflows/release.yml)
 
@@ -19,7 +19,7 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **当前状态**：v0.4.9 可运行实现。新增 **Web GUI 工程化重设计（`org web`：Codex 风终端美学 —— 近黑 zinc · 等宽 chrome · tmux 式状态栏 · `❯` 转写行 · run log 终端窗口；正常 Agent 功能补全：停止生成 `POST /api/abort`（SIGKILL 子进程，该轮不落账本）、会话删除/重命名端点、失败重试、导出 Markdown、模型切换、智能滚动）**；**Web GUI 对话流式（`POST /api/ask-stream` SSE：open/start/stage/log/done 事件链，子进程 stdout 逐行实时推送）**；**Web GUI 原型（`org web`：Bun.serve 零依赖单页驾驶舱 —— 专家卡 + 会话侧栏 + 对话视图 + 观测元数据 tokens/耗时/ctx 窗口计量；scripted 占位剧本秒回）**；**B 路径执行面（导入 harness 被任务派单真实执行：注册表登记优先寻址 + 工单序列化卫生 + deliverable 交付物契约）**；**剧本联动（导入即能用：`org import` 自动生成占位剧本，`org ask` / `org handoff` 剧本自动发现 —— 零参数直连，`--model deepseek` 换真实回答）**；**工具库治理三动作：导入你自己的 harness（`org import`）+ 选取保留（`org keep` / `org drop`）** —— 工厂产出是候选，用户选取转正后才参与 B 路径自动复用，导入即保留即刻可复用，动作进 git 账本；直连会话新增 **上下文窗口计量（Codex 风格 meter，`[ctx]` 每轮可见）**。另有 **OpenCode 级终端前端（`org tui`）** 与 **Windows/macOS/Linux 五目标单二进制分发**（无 bun 环境全功能）。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 127 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
+> **当前状态**：v0.4.9 可运行实现。新增 **Web GUI 工程化重设计（`org web`：Codex 风终端美学 —— 近黑 zinc · 等宽 chrome · tmux 式状态栏 · `❯` 转写行 · run log 终端窗口；正常 Agent 功能补全：停止生成 `POST /api/abort`（SIGKILL 子进程，该轮不落账本）、会话删除/重命名端点、失败重试、导出 Markdown、模型切换、智能滚动）**；**Web GUI 对话流式（`POST /api/ask-stream` SSE：open/start/stage/log/done 事件链，子进程 stdout 逐行实时推送）**；**Web GUI 原型（`org web`：Bun.serve 零依赖单页驾驶舱 —— 专家卡 + 会话侧栏 + 对话视图 + 观测元数据 tokens/耗时/ctx 窗口计量；scripted 占位剧本秒回）**；**B 路径执行面（导入 harness 被任务派单真实执行：注册表登记优先寻址 + 工单序列化卫生 + deliverable 交付物契约）**；**剧本联动（导入即能用：`org import` 自动生成占位剧本，`org ask` / `org handoff` 剧本自动发现 —— 零参数直连，`--model deepseek` 换真实回答）**；**工具库治理三动作：导入你自己的 harness（`org import`）+ 选取保留（`org keep` / `org drop`）** —— 工厂产出是候选，用户选取转正后才参与 B 路径自动复用，导入即保留即刻可复用，动作进 git 账本；直连会话新增 **上下文窗口计量（Codex 风格 meter，`[ctx]` 每轮可见）**。另有 **OpenCode 级终端前端（`org tui`）** 与 **Windows/macOS/Linux 五目标单二进制分发**（无 bun 环境全功能）。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 128 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
 
 ## ✨ 为什么是 ORG
 
@@ -206,9 +206,12 @@ OpenAI Codex CLI 的终端美学：**安静、致密、可工程信任** —— 
   `POST /api/abort`（停止生成）；
 - **model 回落链**：请求体显式传 > 服务级（`org web --model deepseek`）>
   scripted —— GUI 分段控制即请求体逐次覆盖；
+- **deepseek 网关路由（v0.4.10）**：`org web --gateway http://127.0.0.1:3030/v1`
+  （或环境变量 `DHV_LLM_GATEWAY`）把 `$host.llm` 指向 OpenAI 兼容端点 ——
+  独立部署无需本机装 z-ai-web-dev-sdk；未配置时真实模型车道人话报错；
 - **实现**：`web/entry.ts`（进程内 import，与 tui 同模式；`startWebServer`
   可编程入口供测试用随机端口）；服务只听 127.0.0.1，expert/session 名
-  白名单校验（防路径穿越）；测试 `bun test tests/web.test.ts`（23 用例）；
+  白名单校验（防路径穿越）；测试 `bun test tests/web.test.ts`（24 用例）；
 - 路线图第 4 点（事件总线 WebSocket 拓扑观测）见 issue #10，未做。
 
 ## 📦 三平台单二进制分发（Windows / macOS / Linux）
@@ -523,7 +526,7 @@ bun cli/org.ts check
 #    → 多轮直连 → 暖移交；结束时自动导出 dist/demo）
 bun cli/org.ts demo
 
-# 3) 机制级测试（127 个：结构闸门 / README 走读 / 动力学条件分支点火 /
+# 3) 机制级测试（128 个：结构闸门 / README 走读 / 动力学条件分支点火 /
 #    工具库治理 keep-drop-import / 上下文窗口计量 / Web GUI 原型 + SSE 流式）
 bun test tests/
 

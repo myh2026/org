@@ -34,7 +34,7 @@ import {
   expertFixtureOf, dhvRun, resolveDhv, resolveBun,
 } from "../lib/engine.ts";
 
-const VERSION = "0.4.9";
+const VERSION = "0.4.10";
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const STOCK_FIXTURE = path.join(ROOT, "fixtures/run-notices.json");
 const DEFAULT_PORT = 4600; // 3000/3030/5000 被本机其他服务占用，绝不复用
@@ -45,6 +45,7 @@ export interface WebParsed {
   workspace: string;
   model: string;
   port: number;
+  gateway: string;
 }
 
 export function parseWebArgv(argv: string[]): WebParsed {
@@ -52,12 +53,14 @@ export function parseWebArgv(argv: string[]): WebParsed {
     workspace: process.env.ORG_WORKSPACE ?? DEFAULT_WORKSPACE,
     model: "scripted",
     port: DEFAULT_PORT,
+    gateway: process.env.DHV_LLM_GATEWAY ?? "",
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--workspace" || a === "-w") p.workspace = path.resolve(argv[++i] ?? p.workspace);
     else if (a === "--model" || a === "-m") p.model = argv[++i] ?? "scripted";
     else if (a === "--port" || a === "-p") p.port = Number(argv[++i] ?? DEFAULT_PORT) || DEFAULT_PORT;
+    else if (a === "--gateway" || a === "-g") p.gateway = argv[++i] ?? "";
   }
   return p;
 }
@@ -633,6 +636,12 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
 
 export async function webMain(argv: string[]): Promise<number> {
   const p = parseWebArgv(argv);
+  // 网关路由（deepseek 真实模型车道）：--gateway 或既有 DHV_LLM_GATEWAY
+  // 环境变量 → 注入子进程 env（spawn 车道继承 process.env）。缺省时
+  // $host.llm 直连 z-ai-web-dev-sdk（需要本机装包，仓库零依赖不内置）。
+  if (p.gateway) {
+    process.env.DHV_LLM_GATEWAY = p.gateway.replace(/\/+$/, "");
+  }
   let server: Bun.Server;
   try {
     server = startWebServer({ workspace: p.workspace, port: p.port, model: p.model });
@@ -648,6 +657,9 @@ export async function webMain(argv: string[]): Promise<number> {
   console.log(`  交互面     POST /api/ask-stream（SSE 流式）· POST /api/ask（JSON 整轮）`);
   console.log(`  停止       POST /api/abort（SIGKILL 当前直连，该轮不落账本）`);
   console.log(`  模型       ${p.model}（GUI 可切 scripted/deepseek，请求体可逐次覆盖）`);
+  console.log(p.gateway
+    ? `  网关       ${p.gateway}（$host.llm 走 OpenAI 兼容端点）`
+    : `  网关       未配置（--gateway http://127.0.0.1:3030/v1 可接 deepseek 车道）`);
   console.log(`  Ctrl+C 退出`);
   process.on("SIGINT", () => { server.stop(true); process.exit(0); });
   process.on("SIGTERM", () => { server.stop(true); process.exit(0); });
@@ -1350,7 +1362,7 @@ function ask(text, isRetry) {
     var pending = el("pending");
     if (pending) pending.remove();
     var chat = document.getElementById("chat");
-    if (outcome) {
+    if (outcome && outcome.ok) {
       var meta = "org · " + state.currentExpert + " · turn " +
         (outcome.turn == null ? "-" : outcome.turn) + " · " +
         (outcome.tokens == null ? "-" : outcome.tokens) + " tok" +
@@ -1369,6 +1381,13 @@ function ask(text, isRetry) {
         ctx_tokens: 0,
         durationMs: outcome.durationMs,
       });
+    } else if (outcome) {
+      // 引擎失败（ok:false，如网关限流/上游超时）：失败轮不落账本 → 重试安全；
+      // run log 默认展开呈现失败原因（banner/错误行一目了然）。
+      chat.insertAdjacentHTML("beforeend",
+        '<div class="t-bot"><div class="errbox"><span>✗ 直连失败：引擎返回失败（见下方 run log）</span>' +
+        '<button class="retry" type="button">重试</button></div>' +
+        logWinHtml(outcome.logs || "", true) + '</div>');
     } else if (aborted) {
       var partial = answerLines.join("\\n");
       var html = '<div class="t-bot">';

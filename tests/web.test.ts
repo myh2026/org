@@ -17,7 +17,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { TEST_RUN, runOrg, makeWorkspace, exists } from "./helpers";
-import { startWebServer, parseLedgerRaw, parseAskOut } from "../web/entry.ts";
+import { startWebServer, parseLedgerRaw, parseAskOut, parseWebArgv } from "../web/entry.ts";
 
 /** 诗人 harness 样本（导入测试用）：/// 人格文档 + #[capability] 注解，
  *  import 时自动生成占位剧本（direct:poet 轨道）—— scripted 秒回。 */
@@ -277,6 +277,8 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     expect(html).toContain('id="plogbody"');
     expect(html).toContain('id="panswer"');
     expect(html).toContain("sseFrame");
+    // 失败轮（done.ok=false）走错误块 + 重试，不再显示「无回答·已落盘」（v0.4.10 修复）
+    expect(html).toContain("outcome && outcome.ok");
     // 旧 JSON 端点仍在服务端（兼容并存），但 GUI 已切流式
     expect(html).not.toContain('"/api/ask"');
   });
@@ -402,6 +404,18 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     // 路径穿越（%2e%2e%2f 绕过 URL 规范化，在 handler 的 decode 后被拒）
     const r3 = await fetch(base + "/api/session/%2e%2e%2fregistry/index");
     expect(r3.status).toBe(400);
+  });
+
+  test("parseWebArgv：--gateway 解析（org web --gateway http://127.0.0.1:3030/v1 → deepseek 车道网关路由）", () => {
+    const p1 = parseWebArgv(["--gateway", "http://127.0.0.1:3030/v1"]);
+    expect(p1.gateway).toBe("http://127.0.0.1:3030/v1");
+    // 尾斜杠归一 + 短参 -g
+    const p2 = parseWebArgv(["-g", "http://127.0.0.1:3030/v1//"]);
+    expect(p2.gateway).toBe("http://127.0.0.1:3030/v1//"); // 解析层原样保留，webMain 归一
+    // 缺省：不配置（$host.llm 直连 SDK）
+    const p3 = parseWebArgv([]);
+    expect(p3.gateway).toBe("");
+    expect(p3.port).toBe(4600); // 默认端口（避开 3000/3030/5000）
   });
 
   test("未知端点 404（/api/* JSON 形态；其余纯文本）", async () => {

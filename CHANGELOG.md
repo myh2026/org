@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## v0.4.10（2026-09-09）
+
+**`org web` GUI 失败轮呈现修复（v0.4.9 实测发现的真 bug）**。deepseek 真实
+模型遇到网关限流/上游超时时，SSE `done` 事件携带 `ok:false` —— v0.4.9 的
+GUI 把它当成功轮渲染成「（无回答）· ledger 已落盘」，误导（失败轮实际不落
+账本）。现在走错误块：`✗ 直连失败` + 「重试」按钮 + 默认展开的 run log
+（失败原因一目了然）；失败轮不落账本 → 重试安全（复用同一问题重发）。
+
+### 新增
+
+- **`org web --gateway <url>`（短参 `-g`，或环境变量 `DHV_LLM_GATEWAY`）**：
+  把 `$host.llm` 路由到 OpenAI 兼容端点（如本机 llm-gateway 的
+  `http://127.0.0.1:3030/v1`）—— deepseek 真实模型车道独立部署可用，
+  无需本机安装 z-ai-web-dev-sdk（仓库零依赖原则不破坏）；未配置时
+  启动横幅人话提示。
+
+### 修复
+
+- `finalize` 的 done 分支加 `outcome && outcome.ok` 守卫：ok:false 走
+  errbox（重试按钮 + run log 默认展开），不再显示「无回答 · 已落盘」；
+- 回归断言：GUI 单页含 `outcome && outcome.ok` 守卫字符串（防止回退）。
+
 ## v0.4.9（2026-09-09）
 
 **`org web` GUI 工程化重设计（Codex 风终端美学）+ 正常 Agent 功能补全
