@@ -96,7 +96,7 @@ export struct PatchProposal {
 /// 工厂 graph：为「库中无匹配且具备复用价值」的子任务现场铸专家。
 ///
 /// 五步全部静态可追踪；任何一步失败即 Err（不允许半成品上岗）。
-export graph Factory(goal: String, skills: Vec<String>) -> Result<ExpertManifest, OrgError> {
+export graph Factory(goal: String, skills: Vec<String>, payload_preview: String) -> Result<ExpertManifest, OrgError> {
     // node 声明：管线各阶段的物化依赖
     node mut spec: ExpertSpec = ExpertSpec::blank();
     node mut source: String = String::new();
@@ -129,6 +129,20 @@ export graph Factory(goal: String, skills: Vec<String>) -> Result<ExpertManifest
             },
             MintStage::GenerateSource => {
                 let mut brief = format!("{}\n技能标签: {}", spec.description.clone(), skills.join(","));
+                if payload_preview.trim().len() > 0 {
+                    // v0.4.13：载荷形态织入生成器 brief —— mint_hsl 与 mint_fixture
+                    // 是两次独立模型调用，字段名词汇表会漂移（实测生成器找
+                    // "date" 字段而样本用「日期」→ 闸门必挂）。同一预览喂两侧，
+                    // 词汇表钉死在真实载荷上。
+                    let head = payload_preview.trim();
+                    let clipped: String = native typescript {
+                        return head.slice(0, 400);
+                    };
+                    brief = format!(
+                        "{}\n输入载荷形态（专家将收到此结构的载荷，字段名以此为准）：\n{}",
+                        brief, clipped
+                    );
+                }
                 if repair_feedback.len() > 0 {
                     // 携带 check 诊断的再生成（有界）：闸门拒绝不是终点，
                     // 诊断反馈给生成器 —— 与审查 Revise 的有界返工同构。
@@ -164,7 +178,7 @@ export graph Factory(goal: String, skills: Vec<String>) -> Result<ExpertManifest
             },
             MintStage::FixtureExam => {
                 println!("[factory] stage=Exam");
-                let sample = sample_spec(spec.clone())?;
+                let sample = sample_spec(spec.clone(), payload_preview.clone())?;
                 // 显式约定车道（不走 resolve_dispatch_paths）：此时新专家尚未注册，
                 // 若注册表恰有同名导入专家，按名解析会劫持 Exam 寻址跑错文件。
                 let entry = format!("registry/experts/{}.hsl", spec.name);
@@ -175,10 +189,18 @@ export graph Factory(goal: String, skills: Vec<String>) -> Result<ExpertManifest
                 gate.exam_log = out.output;
                 if gate.exam_ok {
                     stage = MintStage::Register;
+                } else if mint_attempts < MAX_MINT_ATTEMPTS {
+                    // v0.4.13：Exam 失败也走有界再生成（与 check 失败同构）——
+                    // 此前行为闸门一挂直接 Err 炸工厂，但行为缺陷（字段名错认/
+                    // 覆盖率不足）恰恰是诊断反馈最能修的形态（实测：生成器找
+                    // "date" 而样本用「日期」，一次反馈即可对齐词汇表）。
+                    println!("[factory] exam 未过（第 {}/{} 次），携带行为诊断再生成", mint_attempts, MAX_MINT_ATTEMPTS);
+                    repair_feedback = out.output;
+                    stage = MintStage::GenerateSource;
                 } else {
                     return Err(OrgError::factory(format!(
-                        "fixture 验收未通过（行为不合格不允许上岗）：\n{}",
-                        out.output
+                        "fixture 验收未通过（{} 次再生成均不合格，不允许上岗）：\n{}",
+                        mint_attempts, out.output
                     )));
                 }
             },
@@ -193,12 +215,18 @@ export graph Factory(goal: String, skills: Vec<String>) -> Result<ExpertManifest
     }
 
     // 登记位产出：从磁盘注册表取回（register_expert 已写入并提交）
+    // v0.4.13：按名取回（身份已知）—— 此前按 goal+skills 语义检索，B 复用
+    // 语义地板（REUSE_AFFINITY_RATIO）落地后，mint_spec 描述与 goal 的词面
+    // 漂移会让登记后检索落空 →「管线状态不一致」假 Err（登记是事实，检索
+    // 是路由 —— 身份已知时语义检索是多余的自由度）。
     println!("[factory] stage=Done");
     let disk_registry = Registry::load(String::from("registry"))?;
-    let found = disk_registry.find(goal.clone(), &skills);
+    let found = disk_registry.find_by_name(spec.name.clone());
     match found {
         Some(m) => Ok(m),
-        None => Err(OrgError::factory(String::from("登记后检索失败（管线状态不一致）"))),
+        None => Err(OrgError::factory(format!(
+            "登记后按名检索失败（{} 未在注册表 —— 管线状态不一致）", spec.name
+        ))),
     }
 }
 
@@ -587,11 +615,27 @@ fn write_source(name: String, source: String) -> Result<String, OrgError> {
 }
 
 /// 验收样本（从任务规格反推；scripted 模式由剧本轨道提供）。
+/// v0.4.13：brief 织入真实载荷预览 —— 此前只给 acceptance，样本格式纯靠
+/// 模型想象（实测单引号伪 JSON `'record_id':'R001'`），minted 专家按真实
+/// 载荷格式解析必然挂自己的闸门（工厂 3 连 mint 全废的根因）。
 /// 同时落盘两类资产：
 ///   factory/samples/<name>.json          验收样本工单（补丁 smoke 的重放原料）
 ///   factory/fixtures/<name>.fixture.json 嵌套运行的空剧本（机械专家零轨道）
-async fn sample_spec(spec: ExpertSpec) -> Result<TaskSpec, OrgError> {
-    let raw = ask(String::from("mint_fixture"), MINT_SAMPLE_PROMPT.clone(), spec.acceptance.clone()).await?;
+async fn sample_spec(spec: ExpertSpec, payload_preview: String) -> Result<TaskSpec, OrgError> {
+    let mut brief = spec.acceptance.clone();
+    if payload_preview.trim().len() > 0 {
+        // 截断预览（前 400 字符）：格式约束而非内容注入 —— 样本必须用与真实
+        // 载荷相同的结构形态，否则闸门检验的是另一个世界的行为。
+        let head = payload_preview.trim();
+        let clipped: String = native typescript {
+            return head.slice(0, 400);
+        };
+        brief = format!(
+            "{}\n\nThe expert will receive payloads in EXACTLY this format (produce your sample payload in the same structure, valid JSON):\n{}",
+            brief, clipped
+        );
+    }
+    let raw = ask(String::from("mint_fixture"), MINT_SAMPLE_PROMPT.clone(), brief).await?;
     let fields: HashMap<String, String> = native typescript {
         try {
             return $host.json.fields(raw);

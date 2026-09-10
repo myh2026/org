@@ -1,5 +1,110 @@
 # CHANGELOG
 
+# CHANGELOG
+
+## v0.4.13（2026-09-10）
+
+**DeepSeek 官方 API 直连（v4.1 flash / `deepseek-flash`）+ 实测驱动的数据路由
+与工厂健壮性批次**。v0.4.10 的 `DHV_LLM_GATEWAY` 假设「网关自持鉴权/限流」
+的内网部署形态；用户提供 DeepSeek 官方 key 实测直连
+`https://api.deepseek.com/v1` 抓到三个缺口（401 无鉴权头 / model 字段缺失
+无法路由 / 无超时挂死），随后跑真实 E2E 又暴露五个系统性缺陷（任务数据
+不达专家 / 技能标签盲配复用 / 自生成验收样本格式漂移 / Exam 失败无重试 /
+推理型模型预算失控），本批全部修复。
+
+### 新增：网关直连（vendored dhv-ts v0.2.59）
+
+- **网关三件套 + 思考量控制**：
+  - `DHV_LLM_API_KEY` → `Authorization: Bearer <key>`（缺省不发，内网网关
+    行为不变）；
+  - `DHV_LLM_MODEL` → 请求体 `model` 字段（缺省不写，网关侧默认路由不变）；
+  - `DHV_LLM_TIMEOUT_MS` → fetch 超时保护（默认 180s，显式 0 关闭）；
+  - `DHV_LLM_THINKING` → `off` → `thinking:{type:"disabled"}`，
+    `low/medium/high` → `reasoning_effort`（实测 DeepSeek 均接受，off 时
+    reasoning_len=0）；缺省不发送（服务商默认，兼容严格校验的网关）；
+  - 429/瞬断退避仍由 `providers/model.hsl` 有界重试承担（1s→3s 三次），
+    工具链层错误原样传播可诊断；
+  - 超时实现用 AbortController + finally clearTimeout（不用
+    AbortSignal.timeout —— 实测 Bun 的 fetch 完成路径与 timeout 信号交互
+    可丢延续：响应已达但 await 不恢复，进程 park 在 sigsuspend 空事件
+    循环，且每调用泄漏一个 180s timer）。
+- **Web 横幅网关可见性**：`org web` 启动横幅回显网关地址 · 模型名 · 鉴权
+  状态（防「配了没生效」——环境变量经 spawn 车道继承，横幅是唯一确认面）；
+- **README 直连服务商速查**：DeepSeek / OpenRouter / vLLM / Ollama 环境变量
+  即插即用示例。
+
+### 新增：推理型模型适配（E2E 实测根因修复）
+
+- **maxTokens 2048→8192**：deepseek-flash 的 reasoning 计入 `max_tokens`
+  同一预算 —— 实测 mint 调用 reasoning 吃满 2048（finish_reason=length、
+  content 空）→ 三连 "empty completion" 炸穿 run；
+- **空 content 可诊断化**：网关路径空 content 抛错携带 `finish_reason` +
+  `usage`（预算截断 vs 真空返回可区分，实测抓根因的关键观测面）；
+- **退避升级**：`finish_reason=length`（推理失控）时下一次重试自动关思考
+  直接产出 —— 实测 reasoning 可膨胀到 32k 字符仍零正文，加预算是烧钱
+  不是修复；与工厂 check 闸门「诊断反馈重试」同构的有界自适应；
+- **mint 轨道默认关思考**：推理型模型在代码生成上推理失控是常态
+  （~45s/次的烧预算税），check + Exam 双闸门保证 mint 质量 —— 闸门优先
+  于信任；显式 `DHV_LLM_THINKING` 配置优先（用户要思考就给思考）。E2E
+  实测：烧预算税消除后全链路 560s+ 超时 → 176s 完成。
+
+### 新增：任务物料路由（mission 数据不达专家 → 专家编造数据）
+
+- **SubTask.input 物料提示**：分解器标注每个子任务的输入物料在哪儿
+  （`mission` = 使命文本内联数据 / `workspace` = 工作区 raw 材料）；
+  DECOMPOSE_PROMPT 按数据实际位置路由，缺省 workspace（旧剧本不带此字段
+  行为不变）；
+- **prepare_payload 三级路由**：validate → 上游交付物机械编接（不变）；
+  input=mission → 使命文本即输入材料；workspace 缺材料时回落使命文本
+  （诚实边界：空载荷下专家只能编造 —— 实测 `total_reviews: 25` 凭空
+  出现）；
+- **内联通道同款回落**：无 raw 材料不再硬错「raw/notices.txt 缺失」（新
+  工作区跑任意任务都被演示约定卡死）；parse 角色的内联交付物 = 真实材料
+  原文（占位符实测流进 mint_fixture 预览与 validate 载荷）。
+
+### 新增：B 复用语义地板（技能标签命中 ≠ 语义匹配）
+
+- **REUSE_AFFINITY_RATIO = 0.3**：serves 只看技能交集、affinity 只用于
+  选优 —— 实测情感分析任务的 parse 子任务被复用到公告解析器（词面重合
+  2/22=9%）→ 产出 5 条旧公告记录。命中比例达地板才可复用，否则 C 现场
+  生成（工厂成为活跃路径）；比例制统一处理中文二元滑窗膨胀与英文/短 goal
+  （minted 描述由 goal 派生，重派命中率高 —— 记忆化重派不误伤）；
+- **工厂登记后按名取回**：身份已知时语义检索是多余自由度（地板落地后
+  mint_spec 描述漂移会让登记后检索落空 →「管线状态不一致」假 Err）。
+
+### 新增：工厂健壮性（自生成验收样本的格式漂移）
+
+- **载荷预览织入 mint_hsl 与 mint_fixture 双侧 brief**（前 400 字符）：
+  mint_hsl 与 mint_fixture 是两次独立模型调用，字段名词汇表会漂移（实测
+  生成器找 "date" 而样本用「日期」→ 闸门必挂；样本单引号伪 JSON
+  `'record_id':'R001'`）；同一预览喂两侧，词汇表钉死在真实载荷上；
+- **Exam 失败有界再生成**：与 check 失败同构（诊断反馈重试）—— 此前
+  行为闸门一挂直接 Err 炸工厂，但行为缺陷恰恰是诊断反馈最能修的形态。
+
+### 测试
+
+- 新增 `tests/gateway.test.ts` 6 例：鉴权头+model 字段贯通（mock 网关回显
+  闭环）/ 缺省行为不变 / 超时中止（300ms 慢网关 + `DHV_LLM_TIMEOUT_MS=1`）/
+  4xx 错误体传播（401）/ 空 content 诊断（finish_reason=length +
+  reasoning_tokens）/ 思考量控制三态（off→thinking、low→reasoning_effort、
+  缺省→均不发送）；
+- 新增 `tests/fixes.test.ts` 5 例：input=mission 路由（1 块而非 5 条公告）/
+  缺省 workspace 行为不变 / 无材料回落不硬错 / 低亲和 goal 走 C:generate /
+  高亲和 goal 仍 B:reuse；
+- 全量 147→**158** 通过；HSL 上游 run-all 163/163（版本联动 0.2.59）。
+
+### E2E 实测（DeepSeek 官方 API · deepseek-flash）
+
+- `org ask` 直连问答 3.4s 真实结构化回答；
+- 团队模式全链路（分解 → 路由 → 工厂 mint → check → Exam → Register →
+  监督 → 汇总）多轮验证：语义地板下情感任务三个子任务全部正确走工厂；
+  烧预算全部被思考升级救回；公告域任务高亲和正确复用 notice-parser
+  （5 条记录 + 日期归一化，coverage 1.00）；z-ai-web-dev-sdk 账号级 429
+  配额不再是真实模式唯一出口；
+- 已知边界（诚实声明）：minted 专家质量存在生成方差（词典覆盖度参差），
+  check/Exam 双闸门尽职拦截不合格生成物 —— 闸门拒绝率即基座模型能力的
+  真实度量（论文可用的实测数据点）。
+
 ## v0.4.12（2026-09-10）
 
 **实测驱动的健壮性批次：deepseek 真实模式全链路打通 + Web GUI 工具库治理**。

@@ -188,3 +188,82 @@ describe("v0.4.12 修复：crystallize 序列化卫生", () => {
     expect(() => readJson(memoPath)).not.toThrow();
   });
 });
+
+describe("v0.4.13 修复：任务物料路由（mission 数据不达专家 → 专家编造数据）", () => {
+  // 实测根因：prepare_payload 无条件读 raw/notices.txt —— 任意任务都拿演示
+  // 样本（情感分析任务解析出 5 条旧公告）；无 raw 文件时载荷为空 → minted
+  // 专家无据编造（total_reviews: 25 凭空出现）。
+  test("input=mission：分解器路由提示 → 解析子任务载荷 = 使命文本（1 块而非 5 条公告）", () => {
+    const ws = makeWorkspace("fix-payload-mission");
+    const fx = fixtureVariant((f) => {
+      // decompose 轨道产物加 input:"mission"（只在 parse 子任务上）
+      const plan = JSON.parse(f.tracks["decompose"][0]);
+      for (const t of plan) {
+        if (t.id === 2) t.input = "mission";
+      }
+      f.tracks["decompose"] = [JSON.stringify(plan)];
+    });
+    const r = runVariant(ws, path.join(ws, "out-a"), fx);
+    if (!r.ok) console.error(r.stdout + r.stderr);
+    expect(r.ok).toBe(true);
+    // 使命文本作为载荷 → notice-parser 把整条使命切成 1 块（工作区有
+    // raw/notices.txt 也不该再用 —— input=mission 是分解器的权威路由）
+    const records = readJson(path.join(ws, "work/parse-output.json"));
+    expect(Array.isArray(records)).toBe(true);
+    expect(records.length).toBe(1);
+  });
+
+  test("缺省 workspace：不带 input 字段的旧剧本行为不变（载荷 = raw/notices.txt 5 条）", () => {
+    const ws = makeWorkspace("fix-payload-default");
+    const r = runVariant(ws, path.join(ws, "out-a"), FIXTURE);
+    if (!r.ok) console.error(r.stdout + r.stderr);
+    expect(r.ok).toBe(true);
+    const records = readJson(path.join(ws, "work/parse-output.json"));
+    expect(records.length).toBe(5);
+  });
+
+  test("无工作区材料回落：删 raw/notices.txt → 内联不硬错、载荷回落使命文本", () => {
+    const ws = makeWorkspace("fix-payload-fallback");
+    fs.rmSync(path.join(ws, "raw/notices.txt"));
+    const r = runVariant(ws, path.join(ws, "out-a"), FIXTURE);
+    if (!r.ok) console.error(r.stdout + r.stderr);
+    expect(r.ok).toBe(true);
+    // 旧代码：内联通道 raw/notices.txt 缺失 → OrgError 硬错炸整场 run
+    const records = readJson(path.join(ws, "work/parse-output.json"));
+    expect(records.length).toBe(1); // 使命文本 1 块（诚实回落，不编造数据）
+  });
+});
+
+describe("v0.4.13 修复：B 复用语义地板（技能标签命中 ≠ 语义匹配）", () => {
+  // 实测根因：serves 只看技能交集、affinity 只用于选优 —— 情感分析任务的
+  // parse 子任务被复用到公告解析器（词面重合 2/22=9%）→ 产出 5 条旧公告。
+  // 地板：命中比例 ≥ REUSE_AFFINITY_RATIO(0.3) 才可复用，否则 C 现场生成。
+  test("低亲和 parse goal（9% 命中）→ 不再复用 notice-parser，走 C:generate", () => {
+    const ws = makeWorkspace("fix-route-floor");
+    const fx = fixtureVariant((f) => {
+      // 演示 goal（14/26≈54%）换成情感分析 goal（2/22≈9%，技能仍 parse）
+      const plan = JSON.parse(f.tracks["decompose"][0]);
+      for (const t of plan) {
+        if (t.id === 2) t.goal = "解析客户反馈文本并抽取情感极性与关键短语";
+      }
+      f.tracks["decompose"] = [JSON.stringify(plan)];
+    });
+    const r = runVariant(ws, path.join(ws, "out-a"), fx);
+    // 注：剧本合成的 mint 产物是 record-validator（校验器干 parse 活儿，
+    // 验收不过 → run Err 收场）—— 下游剧本局限不影响本断言：地板只测路由。
+    const evs = fs.readFileSync(path.join(ws, "out-a/events.jsonl"), "utf-8");
+    // 路由观测：parse 子任务必须走 C:generate（旧代码：B:reuse notice-parser）
+    expect(evs).toContain("task#2 parse -> C:generate");
+    expect(evs).toContain("channel=factory mint");
+    expect(evs).not.toContain("channel=reuse notice-parser");
+  });
+
+  test("高亲和 parse goal（54% 命中，演示场景）→ 仍 B:reuse notice-parser", () => {
+    const ws = makeWorkspace("fix-route-floor-keep");
+    const r = runVariant(ws, path.join(ws, "out-a"), FIXTURE);
+    if (!r.ok) console.error(r.stdout + r.stderr);
+    expect(r.ok).toBe(true);
+    const evs = fs.readFileSync(path.join(ws, "out-a/events.jsonl"), "utf-8");
+    expect(evs).toContain("task#2 parse -> B:reuse");
+  });
+});

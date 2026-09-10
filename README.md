@@ -229,6 +229,21 @@ OpenAI Codex CLI 的终端美学：**安静、致密、可工程信任** —— 
 - **deepseek 网关路由（v0.4.10）**：`org web --gateway http://127.0.0.1:3030/v1`
   （或环境变量 `DHV_LLM_GATEWAY`）把 `$host.llm` 指向 OpenAI 兼容端点 ——
   独立部署无需本机装 z-ai-web-dev-sdk；未配置时真实模型车道人话报错；
+- **直连 OpenAI 兼容服务商（v0.4.13，vendored dhv-ts v0.2.59）**：环境变量
+  即插即用（DeepSeek / OpenRouter / vLLM / Ollama …），429 退避由
+  `providers/model.hsl` 有界重试承担，超时保护默认 180s：
+  ```bash
+  export DHV_LLM_GATEWAY=https://api.deepseek.com/v1   # <base>/v1 形态
+  export DHV_LLM_API_KEY=sk-***                         # Bearer 鉴权（可缺省）
+  export DHV_LLM_MODEL=deepseek-flash                   # 服务商侧模型路由（可缺省）
+  # 可选：export DHV_LLM_THINKING=off                     # 关思考（快而省）
+  bun cli/org.ts run --model deepseek --task "…"
+  ```
+  实测口径：DeepSeek 官方 API `deepseek-flash`（v4.1 flash），全链路
+  （工厂 mint → check → register → done）E2E 见 `tests/gateway.test.ts`
+  与 CHANGELOG v0.4.13；推理型模型 reasoning 计入 max_tokens 预算 ——
+  `providers/model.hsl` 已留足 8192 余量，预算吃满时错误带 finish_reason
+  可诊断；
 - **实现**：`web/entry.ts`（进程内 import，与 tui 同模式；`startWebServer`
   可编程入口供测试用随机端口）；服务只听 127.0.0.1，expert/session 名
   白名单校验（防路径穿越）；测试 `bun test tests/web.test.ts`（32 用例，

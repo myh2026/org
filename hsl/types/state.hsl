@@ -24,11 +24,16 @@ export struct SubTask {
     expert: Option<String>,
     /// 已发生的 Revise 次数（G7 有界返工的计数器）。
     revises: u32,
+    /// 输入物料路由提示（v0.4.13）："mission" = 使命文本内联数据（用户把
+    /// 材料写进了任务描述，一等材料）；"workspace" = 工作区 raw 材料
+    /// （公告/演示场景的既约定）。缺省 workspace —— 旧剧本与存量工单不带
+    /// 此字段，行为不变（诚实边界：物料路由是分解器的判断，不是硬编码）。
+    input: String,
 }
 
 impl SubTask {
     fn new(id: u32, goal: String, role: String, skills: Vec<String>,
-           depends_on: Vec<u32>, priority: u8) -> SubTask {
+           depends_on: Vec<u32>, priority: u8, input: String) -> SubTask {
         SubTask {
             id: id,
             goal: goal,
@@ -39,6 +44,7 @@ impl SubTask {
             done: false,
             expert: None,
             revises: 0,
+            input: input,
         }
     }
 

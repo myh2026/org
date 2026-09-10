@@ -24,22 +24,42 @@ export async fn ask(track: String, system: String, user: String) -> Result<Strin
             // v0.4.12：429/网络瞬断的有界退避重试（1s → 3s，共 3 次）—— 限流是
             // 真实模型车道的常态（实测 z-ai 网关 429），裸错误此前直接炸穿整次
             // run。重试仍失败则抛出（错误信息原样保留可诊断）。
-            const call = () => $host.llm.complete({
+            // v0.4.13：maxTokens 2048 → 8192 —— 推理型模型（deepseek-flash 等）
+            // 的 reasoning 计入同一 max_tokens 预算；实测工厂 mint 调用 reasoning
+            // 吃满 2048（finish_reason=length、content 空），三连「empty
+            // completion」炸穿 run。8192 给 reasoning + 正文留足余量（DeepSeek
+            // 实测接受；仍截断时工具层错误带 finish_reason 可诊断）。
+            // 退避升级：finish_reason=length（推理失控吃满预算）时，下一次重试
+            // 关思考（thinking off）直接产出 —— 与工厂 check 闸门「诊断反馈
+            // 重试」同构的有界自适应，而非无限加预算（实测 reasoning 可膨胀到
+            // 32k 字符仍零正文，加预算是烧钱不是修复）。
+            // mint 轨道默认关思考（v0.4.13）：推理型模型在代码生成上推理失控
+            // 是常态（每次 ~45s 烧预算税），而 check + Exam 双闸门保证 mint
+            // 质量 —— 闸门优先于信任，思考的边际收益低于失控成本（实测
+            // thinking-off 的 mint 生成物 4-5k 字符稳定过 check）。显式
+            // DHV_LLM_THINKING 配置优先（用户要思考就给思考）。
+            const envThinking = String(process.env.DHV_LLM_THINKING || "").trim();
+            const mintTrack = String(track).indexOf("mint_") === 0;
+            const thinkOff = envThinking === "" && mintTrack;
+            const call = (escalated) => $host.llm.complete({
                 messages: [
                     { role: "system", content: system },
                     { role: "user", content: user },
                 ],
                 temperature: 0.1,
-                maxTokens: 2048,
+                maxTokens: 8192,
+                ...((thinkOff || escalated) ? { thinking: "off" } : {}),
             });
             let lastErr = null;
+            let budgetBurned = false;
             for (let i = 0; i < 3; i++) {
                 try {
-                    const r = await call();
+                    const r = await call(budgetBurned);
                     if (r !== undefined && r !== null && String(r).length > 0) return String(r);
                     lastErr = new Error("empty completion");
                 } catch (e) {
                     lastErr = e;
+                    if (String((e && e.message) || e).indexOf("finish_reason=length") >= 0) budgetBurned = true;
                 }
                 if (i < 2) await new Promise((res) => setTimeout(res, 1000 * (i + 1)));
             }

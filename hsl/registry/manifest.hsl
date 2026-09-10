@@ -156,6 +156,22 @@ impl ExpertManifest {
         score
     }
 
+    /// 语义命中地板（v0.4.13，B 路径闸门判据）：词面重合比例 ≥
+    /// REUSE_AFFINITY_RATIO。此前 serves 命中即复用 —— 技能标签是类型
+    /// 兼容信号不是语义信号（parse 技能的公告解析器 vs 情感分析任务）。
+    /// 比例制而非绝对值：中文 goal 的二元滑窗信号膨胀（演示 goal 命中 14）、
+    /// 英文/短 goal 词元少（2-3 个词元命中 2 个就是强信号）—— 统一按比例。
+    fn affinity_hit(self, goal: String) -> bool {
+        let words = goal_words(goal.clone());
+        let total = words.len();
+        if total == 0 {
+            return false;
+        }
+        let score = self.clone().affinity(goal);
+        let ratio = score as f64 / total as f64;
+        ratio >= REUSE_AFFINITY_RATIO
+    }
+
     /// manifest 序列化（JSON；写入注册表）。
     fn to_json(self) -> String {
         // join 序列化（无尾逗号）；字符串字段一律过 json_escape（序列化卫生）
@@ -269,10 +285,15 @@ impl Registry {
 
     /// 检索：能力交集 + 语义适配（B 路径判定；不筛保留 —— C 路径记忆化
     /// 与显式寻址也走这里，未保留候选必须仍可被找到）。
+    /// v0.4.13 语义地板：serves 只看技能标签命中，affinity 只用于选优 ——
+    /// 实测情感分析任务的 parse 子任务被复用到公告解析器（技能交集命中、
+    /// 词面重合 2/22=9%）→ 产出 5 条旧公告记录。现在命中比例需达
+    /// REUSE_AFFINITY_RATIO 才算命中；minted 专家描述由 goal 派生
+    /// （mint_spec 提示词约束），重派命中率高 —— 地板不误伤记忆化重派。
     fn find(self, goal: String, skills: &Vec<String>) -> Option<ExpertManifest> {
         let mut best: Option<ExpertManifest> = None;
         for m in self.experts.iter() {
-            if m.clone().serves(skills) {
+            if m.clone().serves(skills) && m.clone().affinity_hit(goal.clone()) {
                 let take = match best.clone() {
                     Some(b) => b.clone().affinity(goal.clone()) < m.clone().affinity(goal.clone()),
                     None => true,
@@ -287,12 +308,12 @@ impl Registry {
 
     /// 可复用检索（B 路径专用：只命中用户保留的资产 —— factory 候选必须
     /// 经用户选取（org keep）转正后才参与自动复用；manual/import 例外，
-    /// 它们本来就是随系统交付的存量资产）。
+    /// 它们本来就是随系统交付的存量资产）。语义地板同 find（v0.4.13）。
     fn find_reusable(self, goal: String, skills: &Vec<String>) -> Option<ExpertManifest> {
         let mut best: Option<ExpertManifest> = None;
         for m in self.experts.iter() {
             let reusable = m.source != String::from("factory") || m.retained;
-            if reusable && m.clone().serves(skills) {
+            if reusable && m.clone().serves(skills) && m.clone().affinity_hit(goal.clone()) {
                 let take = match best.clone() {
                     Some(b) => b.clone().affinity(goal.clone()) < m.clone().affinity(goal.clone()),
                     None => true,
@@ -523,3 +544,12 @@ fn parse_u32(text: String) -> u32 {
     };
     out
 }
+
+/// B 复用语义地板（v0.4.13）：goal 词元命中描述的比例阈值。
+/// 校准（goal_words = 空格词 + CJK 二元滑窗）：
+///   演示 parse goal vs notice-parser   14/26 ≈ 54% → 复用 ✓
+///   演示 validate goal vs validator    12/22 ≈ 55% → 复用 ✓
+///   情感 parse goal vs notice-parser    2/22 ≈  9% → 生成（工厂铸新）✓
+///   情感 validate goal vs validator      5/22 ≈ 23% → 生成 ✓
+///   minted 描述由 goal 派生 → 重派命中率高 → 记忆化重派不受误伤
+export const REUSE_AFFINITY_RATIO: f64 = 0.3;

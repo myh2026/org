@@ -18,7 +18,7 @@ import { renderRail, railWidth } from "./components/rail.tsx";
 import { renderThread } from "./components/thread.tsx";
 import { renderInput, renderStatus, renderHelp } from "./components/input.tsx";
 
-export const ORG_VERSION = "v0.4.12";
+export const ORG_VERSION = "v0.4.13";
 
 function hline(width: number, left: string, mid: string, right: string): string {
   return left + mid.repeat(Math.max(0, width)) + right;

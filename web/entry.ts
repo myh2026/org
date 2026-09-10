@@ -685,9 +685,13 @@ export async function webMain(argv: string[]): Promise<number> {
   console.log(`  交互面     POST /api/ask-stream（SSE 流式）· POST /api/ask（JSON 整轮）`);
   console.log(`  停止       POST /api/abort（SIGKILL 当前直连，该轮不落账本）`);
   console.log(`  模型       ${p.model}（GUI 可切 scripted/deepseek，请求体可逐次覆盖）`);
+  // v0.4.13：网关三件套可见性 —— 直连服务商（DeepSeek 等）的鉴权/模型/超时
+  // 经环境变量注入（spawn 车道继承 process.env），横幅回显防「配了没生效」。
+  const llmModel = process.env.DHV_LLM_MODEL ?? "";
+  const llmKey = process.env.DHV_LLM_API_KEY ?? "";
   console.log(p.gateway
-    ? `  网关       ${p.gateway}（$host.llm 走 OpenAI 兼容端点）`
-    : `  网关       未配置（--gateway http://127.0.0.1:3030/v1 可接 deepseek 车道）`);
+    ? `  网关       ${p.gateway}${llmModel ? ` · 模型 ${llmModel}` : ""}${llmKey ? " · 鉴权 ✓" : "（未配 DHV_LLM_API_KEY，若服务商需鉴权将 401）"}`
+    : `  网关       未配置（--gateway https://api.deepseek.com/v1 + DHV_LLM_API_KEY/DHV_LLM_MODEL 直连服务商）`);
   console.log(`  Ctrl+C 退出`);
   process.on("SIGINT", () => { server.stop(true); process.exit(0); });
   process.on("SIGTERM", () => { server.stop(true); process.exit(0); });

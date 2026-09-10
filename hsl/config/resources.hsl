@@ -103,6 +103,9 @@ You are the acceptance fixture generator of an expert factory.
 Given the expert acceptance rule, produce ONE JSON object:
 {"goal": "sample goal", "acceptance": "<the rule>", "payload": <sample input JSON>, "feedback": []}
 The sample must be representative and pass the acceptance rule.
+- "payload" MUST be valid JSON (double quotes only, no single-quoted pseudo-JSON).
+- If a payload format example is provided in the input, mirror its EXACT structure
+  (field names, nesting, types) — the expert is built to parse that format.
 Output EXACTLY ONE JSON object. No prose. No markdown fences.
 }
 
@@ -124,7 +127,7 @@ Rules:
 export block DECOMPOSE_PROMPT {
 You are the task decomposer of an organization harness.
 Given a mission, produce ONE JSON array of subtasks:
-[{"id":1,"goal":"...","role":"fetch|parse|validate|summarize|...","skills":["tag"],"depends_on":[],"priority":1}]
+[{"id":1,"goal":"...","role":"fetch|parse|validate|summarize|...","skills":["tag"],"depends_on":[],"priority":1,"input":"mission"}]
 Rules:
 - 2-4 subtasks; ids unique; depends_on forms a DAG (no cycles).
 - skills use known capability tags (fetch/parse/validate/summarize).
@@ -132,6 +135,12 @@ Rules:
   workspace-local material (input files already on disk) has NO reusable
   process — give it skills: [] so it runs inline. Do NOT create subtasks
   that require live network fetching; input material is already local.
+- "input" routes the subtask's input material (v0.4.13): "mission" when the
+  data to process is INLINE in the mission text itself (the user typed/pasted
+  the actual content, e.g. feedback text to analyze); "workspace" when the
+  mission asks to process files/material that exist in the workspace (e.g.
+  "解析工作区公告文件" — the material is on disk, NOT in the mission text).
+  Choose by where the actual data lives, not by convenience.
 Output EXACTLY ONE JSON array. No prose. No markdown fences.
 }
 

@@ -479,7 +479,14 @@ async fn decompose(mission: String) -> Result<Vec<SubTask>, OrgError> {
             const n = parseInt(priority_raw, 10);
             return Number.isFinite(n) ? Math.max(0, Math.min(255, n)) : 5;
         };
-        out.push(SubTask::new(id, goal, role, skills, deps, priority));
+        // v0.4.13：物料路由提示（缺省 workspace —— 旧剧本不带此字段，行为不变）
+        let input_hint = row.get(String::from("input")).unwrap_or(String::new());
+        let input = if input_hint == String::from("mission") {
+            String::from("mission")
+        } else {
+            String::from("workspace")
+        };
+        out.push(SubTask::new(id, goal, role, skills, deps, priority, input));
     }
     Ok(out)
 }
@@ -560,17 +567,38 @@ async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
     match decision.clone() {
         RoutePath::Inline => {
             // A 内联：机械读取（强依赖主控上下文的琐碎任务）
+            // v0.4.13：物料路由 —— input=mission 的内联子任务无需工作区材料
+            // （使命文本即材料）；工作区无 raw 材料时同款回落（此前硬错
+            // 「raw/notices.txt 缺失」—— 新工作区跑任意任务都被演示约定卡死）。
+            let use_mission = subtask.input == String::from("mission");
             let raw: String = native typescript {
                 try {
+                    if (use_mission) return "";
                     return $host.fs.read("raw/notices.txt");
                 } catch (e) {
                     return "";
                 }
             };
             if raw.len() == 0 {
-                return Err(OrgError::route(String::from("内联通道：raw/notices.txt 缺失")));
+                let mission: String = native typescript {
+                    return String($host.config.task || "");
+                };
+                let mut report = StatusReport::new(subtask.id, String::from("(mission material)"), 1.0);
+                // fetched 材料即使命全文（下游 payload 同源；notes 留观测痕）
+                report.notes.push(mission);
+                report.notes.push(String::from("inline channel: mission text as material"));
+                return Ok(report);
             }
-            let mut report = StatusReport::new(subtask.id, String::from("(fetched raw notices)"), 1.0);
+            // v0.4.13：parse 角色的内联交付物 = 真实材料原文（而非占位符）——
+            // role=parse 的交付物会落盘 work/parse-output.json 作为下游输入
+            // 契约，占位符「(fetched raw notices)」被实测当作材料流进
+            // mint_fixture 预览与 validate 载荷（诚实边界：读什么交付什么）。
+            let deliverable = if subtask.role == String::from("parse") {
+                raw.clone()
+            } else {
+                String::from("(fetched raw notices)")
+            };
+            let mut report = StatusReport::new(subtask.id, deliverable, 1.0);
             report.notes.push(String::from("inline channel: workspace raw material"));
             Ok(report)
         },
@@ -627,7 +655,12 @@ async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
                     // （客观闸门 Revise → 有界返工重试工厂；耗尽后强制收货时
                     // 失败标注随报告可见）。deepseek 真实模式实测：闸门尽职拒绝
                     // 不可上岗的生成物，不该连累已完成的其余子任务。
-                    let fresh = match Factory::run(subtask.goal.clone(), subtask.skills.clone()).await {
+                    // v0.4.13：载荷预览织入 mint_fixture brief —— 自生成验收
+                    // 样本此前纯靠模型想象格式（实测单引号伪 JSON），minted 专家
+                    // 按真实载荷格式解析必挂自己的闸门。预览即 prepare_payload
+                    // 的真实产物（与正式派单同一物料的形态）。
+                    let preview = prepare_payload(subtask.clone());
+                    let fresh = match Factory::run(subtask.goal.clone(), subtask.skills.clone(), preview).await {
                         Ok(m) => m,
                         Err(e) => {
                             journal.log(String::from("factory"), String::from("mint-failed"),
@@ -725,7 +758,16 @@ fn read_redundancy() -> u32 {
     raw
 }
 
-/// 载荷准备（上游交付物 → 下游工单 payload；机械编接）。
+/// 载荷准备（输入物料路由；v0.4.13 修复「任务数据不达专家」）。
+///
+/// 路由序：① validate → 上游交付物机械编接（不变）；② 其余角色按分解器的
+/// 物料提示 —— input=mission → 使命文本即输入材料（用户内联在任务里的数据
+/// 是一等材料）；input=workspace（或缺省）→ raw/notices.txt 存在时用之
+/// （公告/演示场景既约定），**缺失时回落使命文本**（诚实边界：不编造数据
+/// —— 空载荷下专家只能瞎猜，实测 total_reviews: 25 凭空出现）。
+/// v0.4.13 前无条件读 raw/notices.txt：任意任务都拿演示样本（实测情感
+/// 分析任务解析出 5 条旧公告 —— minted harness 词典法本身质量很好，
+/// 纯数据路由断了）。
 fn prepare_payload(subtask: SubTask) -> String {
     if subtask.role == String::from("validate") {
         let upstream: String = native typescript {
@@ -737,6 +779,12 @@ fn prepare_payload(subtask: SubTask) -> String {
         };
         upstream
     } else {
+        let mission: String = native typescript {
+            return String($host.config.task || "");
+        };
+        if subtask.input == String::from("mission") {
+            return mission;
+        }
         let raw: String = native typescript {
             try {
                 return $host.fs.read("raw/notices.txt");
@@ -744,7 +792,11 @@ fn prepare_payload(subtask: SubTask) -> String {
                 return "";
             }
         };
-        raw
+        if raw.trim().len() > 0 {
+            raw
+        } else {
+            mission
+        }
     }
 }
 
