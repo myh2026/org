@@ -1,22 +1,22 @@
-1|2026-09-10T13:34:07.313Z|1:decompose|kernel|open|抓取某站点近一周公告，输出结构化表格
-2|2026-09-10T13:34:07.318Z|1:decompose|kernel|decompose|抓取某站点近一周公告，输出结构化表格
-3|2026-09-10T13:34:07.322Z|1:decompose|kernel|clarify|输出字段偏好：标题、日期、部门、分类？
-4|2026-09-10T13:34:07.322Z|1:decompose|kernel|clarify|日期格式用 ISO 8601 还是保留原文？
-5|2026-09-10T13:34:07.323Z|1:decompose|kernel|answer|字段偏好：标题、日期、部门、分类
-6|2026-09-10T13:34:07.323Z|1:decompose|kernel|answer|日期用 ISO 8601，无法解析的保留原文并标注
-7|2026-09-10T13:34:07.325Z|2:route|router|route|task#1 fetch -> A:inline
-8|2026-09-10T13:34:07.326Z|3:supervise|pool|dispatch|task#1 channel=inline (kernel context)
-9|2026-09-10T13:34:07.328Z|3:supervise|supervisor|review|task#1 fetch verdict=Accept coverage=1.00
-10|2026-09-10T13:34:07.331Z|3:supervise|pool|worker-done|task#1 coverage=1.00 tokens=0
-11|2026-09-10T13:34:07.332Z|2:route|router|route|task#2 parse -> B:reuse
-12|2026-09-10T13:34:07.333Z|3:supervise|pool|dispatch|task#2 channel=reuse notice-parser
-13|2026-09-10T13:34:07.347Z|3:supervise|supervisor|review|task#2 parse verdict=Accept coverage=1.00
-14|2026-09-10T13:34:07.350Z|3:supervise|pool|worker-done|task#2 coverage=1.00 tokens=480
-15|2026-09-10T13:34:07.351Z|2:route|router|route|task#3 validate -> C:generate
-16|2026-09-10T13:34:07.352Z|3:supervise|pool|dispatch|task#3 channel=factory mint
-17|2026-09-10T13:34:07.496Z|2:route|factory|mint-register|record-validator@1.0.0 eval=1
-18|2026-09-10T13:34:07.563Z|3:supervise|supervisor|review|task#3 validate verdict=Revise coverage=0.80
-19|2026-09-10T13:34:07.565Z|3:supervise|supervisor|re-dispatch|task#3 revise #1: remedy: count date_status=unparsed as valid (flagged, not excluded)
-20|2026-09-10T13:34:07.565Z|3:supervise|pool|dispatch|task#3 channel=factory mint
-21|2026-09-10T13:34:07.632Z|3:supervise|supervisor|review|task#3 validate verdict=Accept coverage=1.00
-22|2026-09-10T13:34:07.633Z|3:supervise|pool|worker-done|task#3 coverage=1.00 tokens=0
+1|2026-09-10T16:49:13.115Z|1:decompose|kernel|open|抓取某站点近一周公告，输出结构化表格
+2|2026-09-10T16:49:13.120Z|1:decompose|kernel|decompose|抓取某站点近一周公告，输出结构化表格
+3|2026-09-10T16:49:13.125Z|1:decompose|kernel|clarify|输出字段偏好：标题、日期、部门、分类？
+4|2026-09-10T16:49:13.125Z|1:decompose|kernel|clarify|日期格式用 ISO 8601 还是保留原文？
+5|2026-09-10T16:49:13.125Z|1:decompose|kernel|answer|字段偏好：标题、日期、部门、分类
+6|2026-09-10T16:49:13.126Z|1:decompose|kernel|answer|日期用 ISO 8601，无法解析的保留原文并标注
+7|2026-09-10T16:49:13.128Z|2:route|router|route|task#1 fetch -> A:inline
+8|2026-09-10T16:49:13.130Z|3:supervise|pool|dispatch|task#1 channel=inline (kernel context)
+9|2026-09-10T16:49:13.131Z|3:supervise|supervisor|review|task#1 fetch verdict=Accept coverage=1.00
+10|2026-09-10T16:49:13.135Z|3:supervise|pool|worker-done|task#1 coverage=1.00 tokens=0
+11|2026-09-10T16:49:13.137Z|2:route|router|route|task#2 parse -> B:reuse
+12|2026-09-10T16:49:13.138Z|3:supervise|pool|dispatch|task#2 channel=reuse notice-parser
+13|2026-09-10T16:49:13.158Z|3:supervise|supervisor|review|task#2 parse verdict=Accept coverage=1.00
+14|2026-09-10T16:49:13.161Z|3:supervise|pool|worker-done|task#2 coverage=1.00 tokens=480
+15|2026-09-10T16:49:13.163Z|2:route|router|route|task#3 validate -> C:generate
+16|2026-09-10T16:49:13.163Z|3:supervise|pool|dispatch|task#3 channel=factory mint
+17|2026-09-10T16:49:13.306Z|2:route|factory|mint-register|record-validator@1.0.0 eval=1
+18|2026-09-10T16:49:13.373Z|3:supervise|supervisor|review|task#3 validate verdict=Revise coverage=0.80
+19|2026-09-10T16:49:13.374Z|3:supervise|supervisor|re-dispatch|task#3 revise #1: remedy: count date_status=unparsed as valid (flagged, not excluded)
+20|2026-09-10T16:49:13.375Z|3:supervise|pool|dispatch|task#3 channel=factory mint
+21|2026-09-10T16:49:13.442Z|3:supervise|supervisor|review|task#3 validate verdict=Accept coverage=1.00
+22|2026-09-10T16:49:13.444Z|3:supervise|pool|worker-done|task#3 coverage=1.00 tokens=0
