@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
 // ============================================================================
-// org/cli/org.ts — ORG 命令行（v0.4.8）
+// org/cli/org.ts — ORG 命令行（v0.4.12）
 // ----------------------------------------------------------------------------
 //   org run --task "..."          团队模式派单（监督回路全流程）
 //   org demo                      全叙事演示：铸专家 → 用户选取保留 → 复用+补丁+金丝雀
 //                                 → 蓝绿验证 → 多轮直连 → 暖移交
-//   org ask <expert> "q" [--session id] [--turns "q1","q2"]
+//   org ask <expert> "q" [--session id] [--turns "q1|q2"]
 //                                 直连指定专家（记账 + 纪要回写 + 会话账本）
 //   org web [--port N]            Web GUI 原型（Bun.serve 零依赖：会话侧栏 +
 //                                 对话视图 + 观测元数据；实现见 web/entry.ts）
@@ -31,7 +31,7 @@ import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          loadRegistryIndex, setRetained, keepAllCandidates,
          importHarness, listContextUsage, renderContextMeter, expertFixtureOf } from "../lib/engine.ts";
 
-const VERSION = "0.4.11";
+const VERSION = "0.4.12";
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const HANDOFF_ENTRY = path.join(ROOT, "hsl/pool/handoff.hsl");

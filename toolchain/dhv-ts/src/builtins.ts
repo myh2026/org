@@ -93,10 +93,25 @@ export const STRING_METHODS: Record<string, BuiltinMethod> = {
       return s.endsWith(p) ? someV(s.slice(0, s.length - p.length)) : noneV();
     },
   },
+  // v0.2.58 修复（实测复现）：find 的索引空间统一为码点 —— 此前 indexOf
+  // 返回 UTF-16 码元索引，而 len/char_at/take/chars 全部是码点口径：
+  // `"é😊x".find("x")` 得 3（码元），`char_at(2)` 却是 "x"（码点），
+  // 两套索引空间静默组合必错位（`s.char_at(s.find(x)?)` 取错字符）。
+  // 码点口径与 len/char_at 的既有行为一致，属破坏面最小的对齐方向。
   find: {
     fn: (r, a) => {
-      const idx = S(r).indexOf(S(a[0]));
-      return idx >= 0 ? someV(idx) : noneV();
+      const s = S(r), needle = S(a[0]);
+      if (needle === '') return someV(0);
+      const hay = [...s], nee = [...needle];
+      const n = nee.length;
+      for (let i = 0; i + n <= hay.length; i++) {
+        let hit = true;
+        for (let j = 0; j < n; j++) {
+          if (hay[i + j] !== nee[j]) { hit = false; break; }
+        }
+        if (hit) return someV(i);
+      }
+      return noneV();
     },
   },
   parse: {

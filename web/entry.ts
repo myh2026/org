@@ -9,6 +9,8 @@
 //   GET    /                        单页 GUI（Codex 风终端美学：近黑 zinc ·
 //                                   等宽 chrome · 发丝边框 · tmux 式状态栏）
 //   GET    /api/status              专家清单 + 会话上下文占用 + 服务级 model
+//   POST   /api/keep                工具库治理：选取保留（候选转正，git 留痕）
+//   POST   /api/drop                工具库治理：取消保留（退出 B 路径自动复用）
 //   GET    /api/sessions?expert=X   会话列表（runtime/sessions/<expert>/*.jsonl）
 //   GET    /api/session/<E>/<S>     逐轮 question/answer/tokens/ctx_tokens
 //   DELETE /api/session/<E>/<S>     删除会话（删账本文件 = 删会话）
@@ -31,10 +33,10 @@ import * as path from "node:path";
 import { ROOT, DEFAULT_WORKSPACE } from "../lib/root.ts";
 import {
   ensureWorkspace, loadRegistryIndex, listContextUsage,
-  expertFixtureOf, dhvRun, resolveDhv, resolveBun,
+  expertFixtureOf, dhvRun, resolveDhv, resolveBun, setRetained,
 } from "../lib/engine.ts";
 
-const VERSION = "0.4.11";
+const VERSION = "0.4.12";
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const STOCK_FIXTURE = path.join(ROOT, "fixtures/run-notices.json");
 const DEFAULT_PORT = 4600; // 3000/3030/5000 被本机其他服务占用，绝不复用
@@ -528,6 +530,32 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
             model: opts.model, // 服务级 model（GUI 初始值对齐 org web --model）
           });
         }
+        // ---- 工具库治理（v0.4.12：用户在 GUI 选取哪些 harness 保留到工具库）----
+        // 与 CLI 的 org keep / org drop 同一代码路径（setRetained：翻转
+        // retained 标志 + 双写注册表 + git 留痕「(user curation)」）—— GUI
+        // 只是薄渲染层的设计纪律不变。工厂产出是候选（retained=false），用户
+        // 选取转正后才参与 B 路径自动复用；「哪些 harness 值得留下」是用户的
+        // 决策权，不是系统的默认行为。
+        const retainRoute = url.pathname.match(/^\/api\/(keep|drop)$/);
+        if (retainRoute && req.method === "POST") {
+          const body = await req.json().catch(() => ({})) as { expert?: unknown };
+          const expert = String(body.expert ?? "");
+          if (!SAFE_NAME.test(expert)) return json({ error: "expert 名不合法" }, 400);
+          const rws = readWorkspaceOf(ws);
+          // dist/demo 是入库快照（只读，与 CLI keep/drop 同守卫）
+          if (path.resolve(rws) === path.join(ROOT, "dist", "demo")) {
+            return json({ error: "dist/demo 是入库快照（只读）。请以可写工作区启动 org web。" }, 400);
+          }
+          if (!fs.existsSync(path.join(rws, "registry/index.json"))) {
+            return json({ error: "工作区无注册表（先 org demo / org run）" }, 400);
+          }
+          const retained = retainRoute[1] === "keep";
+          const out = setRetained(rws, [expert], retained);
+          if (out.kept.length === 0) {
+            return json({ ok: false, error: `专家不存在：${expert}` }, 404);
+          }
+          return json({ ok: true, expert, retained, kept: out.kept });
+        }
         if (route === "GET /api/sessions") {
           const expert = url.searchParams.get("expert") ?? "";
           if (!SAFE_NAME.test(expert)) return json({ error: "expert 名不合法" }, 400);
@@ -907,6 +935,14 @@ function renderIndexHtml(): string {
           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .acts { display: none; gap: 2px; }
   .sess:hover .acts, .sess.editing .acts { display: flex; }
+  .exp:hover .acts { display: flex; }
+  .hintline { position: fixed; left: 50%; transform: translateX(-50%); bottom: 34px;
+          max-width: 72%; padding: 4px 10px; border: 1px solid var(--line);
+          border-radius: 4px; background: var(--raise); color: var(--dim);
+          font: 11px var(--mono); opacity: 0; pointer-events: none;
+          transition: opacity .18s; z-index: 60; white-space: nowrap;
+          overflow: hidden; text-overflow: ellipsis; }
+  .hintline.on { opacity: 1; }
   .ic { border: none; background: transparent; color: var(--dim);
         font: 11px var(--mono); cursor: pointer; padding: 1px 4px;
         border-radius: 2px; line-height: 1.4; }
@@ -1171,6 +1207,7 @@ function renderIndexHtml(): string {
       </div>
     </div>
     <footer class="statusbar" id="statusbar"></footer>
+    <div id="hintline" class="hintline" role="status" aria-live="polite"></div>
   </main>
 </div>
 <script>
@@ -1204,11 +1241,13 @@ function relTime(iso) {
 }
 // [ctx] 行 → 细计量条（emerald，极小占比保底 1.2% 可见宽）
 function meterHtml(ctxLine) {
-  var m = /(\\d+)\\/([\\d.]+)k/.exec(ctxLine || "");
+  // v0.4.12 修复：used 侧 ≥1000 tokens 时 CLI 打印 "8.4k/131.1k"（fmt_k 加 k 后缀），
+  // 此前 /(\\d+)\\// 只认纯数字 → 长会话的计量条永远失配降级纯文本。
+  var m = /([\\d.]+)k?\\/([\\d.]+)k/.exec(ctxLine || "");
   var p = /([\\d.]+)%/.exec(ctxLine || "");
   if (!m) return esc(ctxLine || "");
   var pct = p ? Math.max(1.2, Math.min(100, parseFloat(p[1]))) : 1.2;
-  var txt = m[1] + "/" + m[2] + "k";
+  var txt = m[0];
   return '<span class="meter" aria-hidden="true"><i style="width:' + pct +
     '%"></i></span><span>ctx ' + esc(txt) + '</span>';
 }
@@ -1252,10 +1291,16 @@ function renderExperts() {
       : (e.retained ? '<span class="bdg">★</span>' : '<span class="bdg">○</span>');
     var title = e.source === "import" ? "用户导入（入库即保留）"
       : (e.retained ? "保留（B 路径自动复用）" : "候选（未保留）");
+    // 工具库治理（v0.4.12）：★/○ 切换钮（hover 浮现，与消息级操作同交互形态）。
+    // 导入专家免切换（导入即保留是既有语义）；运行中禁用（派单寻址变更需空闲态）。
+    var act = e.source === "import" ? "" :
+      '<span class="acts"><button class="ic" data-retain="' + (e.retained ? "drop" : "keep") +
+      '" title="' + (e.retained ? "取消保留（退出 B 路径自动复用）" : "选取保留（候选转正，git 留痕）") + '">' +
+      (e.retained ? "○ drop" : "★ keep") + '</button></span>';
     return '<div class="exp' + (state.currentExpert === e.name ? " active" : "") +
       '" data-name="' + esc(e.name) + '" title="' + esc(title + " · " + e.description) + '">' +
       '<div class="l1"><span class="nm">' + esc(e.name) + '</span>' +
-      '<span class="vr">@' + esc(e.version) + '</span>' + bdg + '</div>' +
+      '<span class="vr">@' + esc(e.version) + '</span>' + bdg + act + '</div>' +
       '<div class="l2">' + esc(e.description) + '</div></div>';
   }).join("") || '<div class="l2" style="padding:4px 8px">注册表为空</div>';
   Array.prototype.forEach.call(el.querySelectorAll(".exp"), function (node) {
@@ -1265,6 +1310,38 @@ function renderExperts() {
       closeDrawer();
     };
   });
+  // 保留切换：stopPropagation 避免触发卡片选中
+  Array.prototype.forEach.call(el.querySelectorAll(".exp button[data-retain]"), function (btn) {
+    btn.onclick = function (ev) {
+      ev.stopPropagation();
+      if (state.running) { flashHint("运行中不可切换保留（Esc 停止后再试）"); return; }
+      retainToggle(btn.closest(".exp").dataset.name, btn.dataset.retain === "keep");
+    };
+  });
+}
+
+// 工具库治理：POST /api/keep|drop → 刷新注册表（与 CLI org keep/drop 同代码路径）
+function retainToggle(name, retained) {
+  api("/api/" + (retained ? "keep" : "drop"), { method: "POST", body: JSON.stringify({ expert: name }) })
+    .then(function (r) {
+      if (r && r.ok) {
+        flashHint(retained ? "★ 已选取保留 " + name + "（git 留痕，B 路径自动复用从下轮派单命中）"
+          : "○ 已取消保留 " + name + "（显式寻址仍可用）");
+        return refreshStatus();
+      }
+      flashHint((r && r.error) || "操作失败");
+    })
+    .catch(function (e) { flashHint(String(e && e.message || e)); });
+}
+
+// 轻量提示（状态栏闪现，2.6s 自清；无侵入）
+function flashHint(text) {
+  var el = document.getElementById("hintline");
+  if (!el) return;
+  el.textContent = text;
+  el.classList.add("on");
+  clearTimeout(flashHint._t);
+  flashHint._t = setTimeout(function () { el.classList.remove("on"); el.textContent = ""; }, 2600);
 }
 
 function renderSessions() {
@@ -1891,6 +1968,15 @@ document.getElementById("exportBtn").onclick = function () {
 };
 
 // ---- 启动装载 + 顶栏摘要周期刷新（15s，只重读占用不动对话区） ----
+
+// 工具库治理后刷新：重读注册表 + 占用，重渲染侧栏（不动当前选中与对话区）
+function refreshStatus() {
+  return api("/api/status").then(function (r) {
+    state.experts = r.experts || [];
+    state.usages = r.usages || [];
+    renderTop(); renderExperts(); renderSeg(); renderStatusbar();
+  });
+}
 
 api("/api/status").then(function (r) {
   state.experts = r.experts || [];

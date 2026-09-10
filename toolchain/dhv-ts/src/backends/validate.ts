@@ -14,6 +14,21 @@ import * as fs from 'node:fs';
 
 const execFileP = promisify(execFile);
 
+/** 跨平台 python 启动：python3 优先，宿主无该别名（Windows 常态：只有
+ *  python）时回退 python；并注入 PYTHONUTF8=1（Windows 默认 cp1252 代码页
+ *  读 UTF-8 生成物会 UnicodeDecodeError —— 三平台 CI 实测）。 */
+async function execPy(args: string[], opts: { timeout?: number; env?: NodeJS.ProcessEnv; maxBuffer?: number } = {}) {
+  const env = { ...process.env, PYTHONUTF8: '1', ...(opts.env ?? {}) };
+  try {
+    return await execFileP('python3', args, { ...opts, env });
+  } catch (err) {
+    if ((err as { code?: string }).code === 'ENOENT') {
+      return await execFileP('python', args, { ...opts, env });
+    }
+    throw err;
+  }
+}
+
 export interface ValidationResult {
   ok: boolean;
   tool: string;
@@ -24,7 +39,7 @@ export async function validateGeneratedFile(absPath: string, langId: string): Pr
   try {
     switch (langId) {
       case 'python': {
-        await execFileP('python3', ['-m', 'py_compile', absPath], { timeout: 15_000 });
+        await execPy(['-m', 'py_compile', absPath], { timeout: 15_000 });
         return { ok: true, tool: 'python3 -m py_compile' };
       }
       case 'typescript': {

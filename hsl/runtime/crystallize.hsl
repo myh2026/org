@@ -16,6 +16,7 @@
 
 import { ExpertError } from "../types/errors.hsl";
 import { ask } from "../providers/model.hsl";
+import { json_escape } from "../registry/manifest.hsl";
 
 /// 固化观测：同一输入的最近输出与连续稳定次数。
 #[derive(Debug, Clone)]
@@ -287,16 +288,20 @@ fn remove_key(map: HashMap<String, String>, key: String) -> HashMap<String, Stri
 }
 
 /// 固化状态 → JSON（持久化格式：memos + observations 观测账本）。
+/// v0.4.12：键值一律过 json_escape —— memo 键是归一化输入、值是模型输出，
+/// 含引号/反斜杠时裸 format! 会写坏 registry/memos/<expert>.json（与
+/// recurrence/B-11 同类的序列化卫生漏网点；读侧 load 有 try/catch 兜底，
+/// 但写侧脏数据会静默丢观测计数）。
 fn crystallize_to_json(memos: HashMap<String, String>, observations: HashMap<String, Observation>) -> String {
     let mut memo_items: Vec<String> = Vec::new();
     for (k, v) in memos {
-        memo_items.push(format!("\"{}\":\"{}\"", k.clone(), v.clone()));
+        memo_items.push(format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)));
     }
     let mut obs_items: Vec<String> = Vec::new();
     for (k, o) in observations {
         obs_items.push(format!(
             "\"{}\":{{\"last_output\":\"{}\",\"stable\":{}}}",
-            k.clone(), o.last_output.clone(), o.stable.clone()
+            json_escape(k), json_escape(o.last_output.clone()), o.stable.clone()
         ));
     }
     format!("{{\"memos\":{{{}}},\"observations\":{{{}}}}}", memo_items.join(","), obs_items.join(","))

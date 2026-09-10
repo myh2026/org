@@ -16,7 +16,7 @@
 import { TaskSpec, StatusReport, Verdict, COVERAGE_BAR, DEFAULT_BUDGET_TOKENS, DEFAULT_MAX_REVISES, normalize_note } from "./contracts/contract.hsl";
 import { OrgError } from "./types/errors.hsl";
 import { SubTask, OrgState, OrgReport, RoutePath, Asset, RECURRENCE_PATCH_THRESHOLD } from "./types/state.hsl";
-import { ExpertManifest, Registry } from "./registry/manifest.hsl";
+import { ExpertManifest, Registry, json_escape } from "./registry/manifest.hsl";
 import { NoticeParser } from "./registry/experts/notice-parser.hsl";
 import { Pool, POOL_CONCURRENCY_CAP } from "./pool/lifecycle.hsl";
 import { Factory, PatchProposal, run_expert, merge_patch } from "./factory/pipeline.hsl";
@@ -622,7 +622,27 @@ async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
             let minted = match existing {
                 Some(m) => m,
                 None => {
-                    let fresh = Factory::run(subtask.goal.clone(), subtask.skills.clone()).await?;
+                    // v0.4.12 优雅降级：工厂失败不再 `?` 直接炸整次 run —— 转为
+                    // 失败报告（coverage 0 + factory-failed 标注）交监督回路处理
+                    // （客观闸门 Revise → 有界返工重试工厂；耗尽后强制收货时
+                    // 失败标注随报告可见）。deepseek 真实模式实测：闸门尽职拒绝
+                    // 不可上岗的生成物，不该连累已完成的其余子任务。
+                    let fresh = match Factory::run(subtask.goal.clone(), subtask.skills.clone()).await {
+                        Ok(m) => m,
+                        Err(e) => {
+                            journal.log(String::from("factory"), String::from("mint-failed"),
+                                format!("task#{} 工厂生成失败：{}", subtask.id, e.message.clone()));
+                            return Ok(StatusReport {
+                                task_id: spec.task_id,
+                                deliverable: String::from("(factory failed)"),
+                                coverage: 0.0,
+                                notes: vec![format!("factory-failed: {}", e.message)],
+                                tokens_used: 0,
+                                node_trace: Vec::new(),
+                                model_calls: 0,
+                            });
+                        },
+                    };
                     journal.log(String::from("factory"), String::from("mint-register"),
                         format!("{}@{} eval={}", fresh.name, fresh.version, fresh.eval_score));
                     registry.upsert_memory(fresh.clone());
@@ -911,9 +931,16 @@ fn load_recurrence() -> HashMap<String, u32> {
     let mut out: HashMap<String, u32> = HashMap::new();
     if raw.len() > 0 {
         let pairs: Vec<Vec<String>> = native typescript {
-            const obj = JSON.parse(raw);
             const out = [];
-            for (const [k, v] of Object.entries(obj)) out.push([String(k), String(v)]);
+            try {
+                const obj = JSON.parse(raw);
+                for (const kv of Object.entries(obj)) out.push([String(kv[0]), String(kv[1])]);
+            } catch (e) {
+                // 损坏容错（v0.4.12）：历史版本写侧无转义，note 含引号即写坏 JSON
+                // 且读侧裸 JSON.parse 使后续每次 run 崩溃。计数是启发式状态 ——
+                // 降级为空表（save 侧重写即自愈），不炸整次运行。
+                console.error("[recurrence] runtime/recurrence.json 损坏，降级为空表（下次 save 自愈）");
+            }
             return out;
         };
         for p in pairs.iter() {
@@ -929,9 +956,14 @@ fn load_recurrence() -> HashMap<String, u32> {
 }
 
 fn save_recurrence(map: HashMap<String, u32>) {
+    // 序列化卫生（v0.4.12）：键是 expert::note，note 来自模型审查意见
+    // （normalize_note 仅折叠空白，引号/反斜杠原样存活）—— 裸 format! 插值
+    // 会写坏 JSON（deepseek 真实模式实测：一条含引号的 Revise note 即污染
+    // runtime/recurrence.json，之后每次 org run 崩溃）。与 manifest 的
+    // json_escape 同源（B-11 同类问题的漏网点）。
     let mut items: Vec<String> = Vec::new();
     for (k, v) in map {
-        items.push(format!("\"{}\":{}", k, v));
+        items.push(format!("\"{}\":{}", json_escape(k), v));
     }
     let body = format!("{{{}}}", items.join(","));
     let _ = native typescript {

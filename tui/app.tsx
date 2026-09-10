@@ -412,7 +412,12 @@ export class App {
   }
 
   private runTeam(task: string): void {
-    const session = `out-${new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14)}`;
+    // v0.4.12 修复：会话名与 lib/engine.ts 的 makeOutDir 同格式
+    // （out-YYYYMMDD-HHMMSS）—— 此前 toISOString 抹全部连字符生成
+    // out-YYYYMMDDHHMMSS，状态栏 currentSession 与真实产物目录永远对不上。
+    const d = new Date();
+    const p = (n: number): string => String(n).padStart(2, "0");
+    const session = `out-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
     this.dispatch({ type: "runStart", mode: "team", session, userText: task });
     void this.pump(startRun({
       entry: "org", task,

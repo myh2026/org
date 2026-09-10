@@ -431,6 +431,71 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     const r2 = await fetch(base + "/no-such-page");
     expect(r2.status).toBe(404);
   });
+
+  // ---- 工具库治理（v0.4.12：用户在 GUI 选取哪些 harness 保留到工具库）----
+
+  test("POST /api/keep|drop：retained 翻转 + git 留痕 + /api/status 反映", async () => {
+    // drop：notice-parser（模板自带 retained=true）→ 取消保留
+    const d = await fetch(base + "/api/drop", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expert: "notice-parser" }),
+    });
+    expect(d.status).toBe(200);
+    const dropBody = (await d.json()) as { ok: boolean; expert: string; retained: boolean };
+    expect(dropBody.ok).toBe(true);
+    expect(dropBody.retained).toBe(false);
+    // 状态面与注册表数据面一致
+    const s1 = (await (await fetch(base + "/api/status")).json()) as { experts: Array<{ name: string; retained: boolean }> };
+    expect(s1.experts.find((e) => e.name === "notice-parser")!.retained).toBe(false);
+    const idx1 = JSON.parse(fs.readFileSync(path.join(ws, "registry/index.json"), "utf-8")) as Array<{ name: string; retained: boolean }>;
+    expect(idx1.find((e) => e.name === "notice-parser")!.retained).toBe(false);
+    // keep：转正回保留
+    const k = await fetch(base + "/api/keep", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expert: "notice-parser" }),
+    });
+    expect(k.status).toBe(200);
+    const keepBody = (await k.json()) as { ok: boolean; retained: boolean };
+    expect(keepBody.ok).toBe(true);
+    expect(keepBody.retained).toBe(true);
+    const idx2 = JSON.parse(fs.readFileSync(path.join(ws, "registry/index.json"), "utf-8")) as Array<{ name: string; retained: boolean }>;
+    expect(idx2.find((e) => e.name === "notice-parser")!.retained).toBe(true);
+    // git 留痕（user curation 提交 ×2）
+    const git = Bun.spawnSync(["git", "log", "--oneline"], { cwd: ws, stdout: "pipe" });
+    const logLines = git.stdout.toString().split("\n");
+    const curation = logLines.filter((l) => l.includes("(user curation)"));
+    expect(curation.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("keep/drop 防呆：非法名 400 · 不存在专家 404", async () => {
+    const bad = await fetch(base + "/api/keep", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expert: "../escape" }),
+    });
+    expect(bad.status).toBe(400);
+    const missing = await fetch(base + "/api/keep", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expert: "no-such-expert" }),
+    });
+    expect(missing.status).toBe(404);
+    const missingBody = (await missing.json()) as { ok: boolean; error: string };
+    expect(missingBody.ok).toBe(false);
+  });
+
+  test("GUI HTML：专家卡渲染 ★/○ 切换钮 + hintline 元素（v0.4.12 治理面）", async () => {
+    const html = await (await fetch(base + "/")).text();
+    // 切换钮渲染逻辑（renderExperts 的 data-retain + retainToggle/flashHint 函数）
+    expect(html).toContain("data-retain=");
+    expect(html).toContain("retainToggle");
+    expect(html).toContain("flashHint");
+    expect(html).toContain('id="hintline"');
+    // 端点文档行（头部注释渲染进源码字符串）
+    expect(html).toContain("/api/keep");
+  });
 });
 
 describe("Web GUI 原型：纯函数（账本解析 / stdout 解析）", () => {

@@ -20,17 +20,80 @@ Output EXACTLY ONE JSON object. No prose. No markdown fences.
 }
 
 /// 工厂第 2 步：HSL 源码生成提示词（规格 → 信封契约专家）。
+/// v0.4.12 实测修复（deepseek 真实模式）：基座模型不认识 HSL —— 无语法
+/// 骨架时首生成物是 Rust 风格（`use std::...` / serde_json / $host.http），
+/// dhv check 正确拒绝后整个 run 直接 Err。补齐：语法铁律清单 + 经 check/run
+/// 实测验证的最小完整示例（见 /tmp 探针：0 error 0 warning + acceptance.json
+/// 产出正确）+ 不存在的 API 负面清单。配合 pipeline 的有界再生成（诊断
+/// 反馈重试），真实模型车道首次可通过闸门。
 export block MINT_SOURCE_PROMPT {
 You are the HSL source generator of an expert factory.
-Write ONE complete HSL file implementing this expert:
-- Envelope contract: a `main()` that reads the task spec from
-  "factory/current-spec.json" ($host.fs.read), executes, and returns Result<(), String>.
+Write ONE complete HSL file implementing this expert.
+
+HSL is a Rust-like language. SYNTAX RULES (violations fail the dhv check gate):
+- Vec / HashMap / String / Option / Result are BUILT-IN (prelude) — use them directly,
+  NEVER import them. There is NO "./std/collections.hsl" file. Do not import anything
+  unless you genuinely need a std module.
+- Import user modules (rarely needed) like: import { Foo } from "./dir/file.hsl";
+  Import std modules (rarely needed) like: import { now } from "std/time";
+  (std modules: core/collections/text/math/io/json/time/random/env/iter)
+- Functions: fn name(x: String) -> Result<(), String> { ... }
+- The entry point MUST be: export fn main() -> Result<(), String> { ... }
+- Call host APIs ONLY inside `native typescript { ... }` blocks (they are JS/TS).
+- Error handling: `?` propagates Result; constructors Ok(x) / Err(String::from("...")).
+- match on Option/Result must be exhaustive: match opt { Option::Some(v) => ..., Option::None => ... }
+- Types are String/Vec<T>/HashMap<K,V>/Option<T>/Result<T,E>/u32/i64/f64/bool.
+- NOT available anywhere: `use`, serde_json, reqwest, std::fs, $host.http — none exist.
+- Inside native typescript blocks ONLY these exist:
+  $host.fs.read/write/edit/list, $host.json.parse/stringify/fields,
+  $host.artifacts.write, $host.events.emit, $host.config, $host.log.
+- Safe String/Vec/HashMap methods: len trim split split_once lines contains
+  starts_with ends_with strip_prefix find char_at replace to_string push_str;
+  Vec: push len iter iter_mut map filter contains join first last;
+  HashMap: insert get contains_key.
+
+Envelope contract:
+- main() reads the task spec from "factory/current-spec.json", executes, returns Result<(), String>.
+- NO network access: never call fetch/HTTP/axios — all input material arrives inside the
+  spec's payload field. Process the payload content only.
 - Mechanical validation/transform logic stays in pure HSL (no LLM calls unless the
   spec demands judgment; if so use $host.fixture tracks named "<node>").
-- Write your verdict artifact with $host.artifacts.write("acceptance.json", ...).
-- Only std methods you know exist: lines/split/join/contains/starts_with/strip_prefix/
-  len/trim/replace; Vec push/len/iter/map/filter/contains; HashMap insert/get/contains_key.
+- Write your verdict artifact with $host.artifacts.write("acceptance.json", ...) —
+  JSON string with fields: coverage (0..1 number), summary, note, and optionally
+  deliverable (the output artifact JSON string).
 - Print a one-line summary with println!.
+
+COMPLETE MINIMAL EXAMPLE (verified to pass dhv check and run):
+fn run(goal: String, payload: String) -> Result<String, String> {
+    let items: Vec<String> = payload.split("\n").map(|l| l.trim().to_string()).filter(|l| l.len() > 0);
+    let total: u32 = items.len() as u32;
+    let mut valid: u32 = 0;
+    for item in items.iter() {
+        if item.contains(":") { valid = valid + 1; }
+    }
+    let coverage: f64 = if total > 0 { (valid as f64) / (total as f64) } else { 0.0 };
+    let summary = format!("validated {} of {}", valid, total);
+    let _ = native typescript {
+        $host.artifacts.write("acceptance.json", JSON.stringify({ coverage: coverage, summary: summary, note: "", deliverable: "[]" }));
+        return true;
+    };
+    println!("[expert] {}", summary);
+    Ok(summary)
+}
+
+export fn main() -> Result<(), String> {
+    let payload: String = native typescript {
+        const raw = await $host.fs.read("factory/current-spec.json");
+        const spec = JSON.parse(raw);
+        return String(spec.payload ?? "");
+    };
+    match run(String::from("validate"), payload) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+Adapt the example's validation logic to this expert's goal and acceptance rule.
 Output ONLY the HSL source code. No markdown fences. No commentary.
 }
 
@@ -64,7 +127,11 @@ Given a mission, produce ONE JSON array of subtasks:
 [{"id":1,"goal":"...","role":"fetch|parse|validate|summarize|...","skills":["tag"],"depends_on":[],"priority":1}]
 Rules:
 - 2-4 subtasks; ids unique; depends_on forms a DAG (no cycles).
-- skills use known capability tags.
+- skills use known capability tags (fetch/parse/validate/summarize).
+- skills are for REUSABLE process value only. A subtask that merely reads
+  workspace-local material (input files already on disk) has NO reusable
+  process — give it skills: [] so it runs inline. Do NOT create subtasks
+  that require live network fetching; input material is already local.
 Output EXACTLY ONE JSON array. No prose. No markdown fences.
 }
 

@@ -5,7 +5,7 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.4.11_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Status](https://img.shields.io/badge/status-v0.4.12_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
 [![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-快速开始v042-实测可用)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
@@ -19,7 +19,7 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **当前状态**：v0.4.11 可运行实现。新增 **回答 Markdown 渲染 + 消息级操作（`org web`：零依赖 renderMd —— 围栏代码块（语言标签 + 块级 copy 钮）·表格·嵌套列表·引用·行内码/链接，XSS 全量转义优先；每轮「复制」+ 末轮「重发」hover 浮现）**；**会话搜索（侧栏 id/预览过滤）· 移动端抽屉侧栏（≤720px 菜单钮 + 遮罩，不再消失）· 快捷键（⌘K 新会话 · `/` 聚焦输入）**； **Web GUI 工程化重设计（`org web`：Codex 风终端美学 —— 近黑 zinc · 等宽 chrome · tmux 式状态栏 · `❯` 转写行 · run log 终端窗口；正常 Agent 功能补全：停止生成 `POST /api/abort`（SIGKILL 子进程，该轮不落账本）、会话删除/重命名端点、失败重试、导出 Markdown、模型切换、智能滚动）**；**Web GUI 对话流式（`POST /api/ask-stream` SSE：open/start/stage/log/done 事件链，子进程 stdout 逐行实时推送）**；**Web GUI 原型（`org web`：Bun.serve 零依赖单页驾驶舱 —— 专家卡 + 会话侧栏 + 对话视图 + 观测元数据 tokens/耗时/ctx 窗口计量；scripted 占位剧本秒回）**；**B 路径执行面（导入 harness 被任务派单真实执行：注册表登记优先寻址 + 工单序列化卫生 + deliverable 交付物契约）**；**剧本联动（导入即能用：`org import` 自动生成占位剧本，`org ask` / `org handoff` 剧本自动发现 —— 零参数直连，`--model deepseek` 换真实回答）**；**工具库治理三动作：导入你自己的 harness（`org import`）+ 选取保留（`org keep` / `org drop`）** —— 工厂产出是候选，用户选取转正后才参与 B 路径自动复用，导入即保留即刻可复用，动作进 git 账本；直连会话新增 **上下文窗口计量（Codex 风格 meter，`[ctx]` 每轮可见）**。另有 **OpenCode 级终端前端（`org tui`）** 与 **Windows/macOS/Linux 五目标单二进制分发**（无 bun 环境全功能）。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 136 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
+> **当前状态**：v0.4.12 可运行实现。新增 **Web GUI 工具库治理（用户选取哪些 harness 保留到工具库：`POST /api/keep|drop` + 专家卡 ★/○ 切换钮，与 CLI `org keep` / TUI `:keep` 三端同权）**；**deepseek 真实模式全链路打通（实测驱动的健壮性批次：工厂生成有界再生成 —— check 拒绝后携带诊断重试（与监督回路有界返工同构）+ 生成提示词补齐 HSL 语法铁律与实测验证的最小完整示例 + 能力并集登记，修复「模型不认识 HSL 写出 Rust 风格→check 拒绝→整场 Err 崩溃」的链路；工厂失败优雅降级（失败报告交监督回路，不连累其余子任务））**；**序列化卫生三处（recurrence 键转义+损坏容错自愈 / handoff 账本续写 / crystallize memo 转义）**；**vendored dhv-ts 与上游 v0.2.58 统一（终止双向漂移）**；另有 回答 Markdown 渲染 + 消息级操作（`org web`：零依赖 renderMd —— 围栏代码块（语言标签 + 块级 copy 钮）·表格·嵌套列表·引用·行内码/链接，XSS 全量转义优先；每轮「复制」+ 末轮「重发」hover 浮现）；**会话搜索（侧栏 id/预览过滤）· 移动端抽屉侧栏（≤720px 菜单钮 + 遮罩，不再消失）· 快捷键（⌘K 新会话 · `/` 聚焦输入）**； **Web GUI 工程化重设计（`org web`：Codex 风终端美学 —— 近黑 zinc · 等宽 chrome · tmux 式状态栏 · `❯` 转写行 · run log 终端窗口；正常 Agent 功能补全：停止生成 `POST /api/abort`（SIGKILL 子进程，该轮不落账本）、会话删除/重命名端点、失败重试、导出 Markdown、模型切换、智能滚动）**；**Web GUI 对话流式（`POST /api/ask-stream` SSE：open/start/stage/log/done 事件链，子进程 stdout 逐行实时推送）**；**Web GUI 原型（`org web`：Bun.serve 零依赖单页驾驶舱 —— 专家卡 + 会话侧栏 + 对话视图 + 观测元数据 tokens/耗时/ctx 窗口计量；scripted 占位剧本秒回）**；**B 路径执行面（导入 harness 被任务派单真实执行：注册表登记优先寻址 + 工单序列化卫生 + deliverable 交付物契约）**；**剧本联动（导入即能用：`org import` 自动生成占位剧本，`org ask` / `org handoff` 剧本自动发现 —— 零参数直连，`--model deepseek` 换真实回答）**；**工具库治理三动作：导入你自己的 harness（`org import`）+ 选取保留（`org keep` / `org drop`）** —— 工厂产出是候选，用户选取转正后才参与 B 路径自动复用，导入即保留即刻可复用，动作进 git 账本；直连会话新增 **上下文窗口计量（Codex 风格 meter，`[ctx]` 每轮可见）**。另有 **OpenCode 级终端前端（`org tui`）** 与 **Windows/macOS/Linux 五目标单二进制分发**（无 bun 环境全功能）。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁（知识 / 流程 / 能力变更）、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因（客观档 + 裁判档）、固化管线（精确匹配档 + 自动降级）全部落地，由 144 个机制级测试逐条验证（`bun test`），全叙事可复现（`org demo`，约 2s）。仓库采用「源码（`hsl/`）+ 编译产物（`dist/`，入库）+ CI/CD（GitHub Actions：check / 测试 / 三连跑冒烟 / 产物回写 / tag 发布）」布局。路线图后半段见[实施路线图](#-实施路线图)与[已知边界](#%EF%B8%8F-已知边界诚实声明)。
 
 ## ✨ 为什么是 ORG
 
@@ -172,7 +172,7 @@ OpenAI Codex CLI 的终端美学：**安静、致密、可工程信任** —— 
 复用 CLI 同一代码路径：
 
 ```
-┌ org · v0.4.11 · /…/demo-run ────────── experts 3 · 12 turns ──┐
+┌ org · v0.4.12 · /…/demo-run ────────── experts 3 · 12 turns ──┐
 │ SESSIONS            │ ❯ 写一首关于秋夜湖面的四行现代诗          │
 │  + 新会话            │ org · poet · turn 1 · 19 tok · 48 ms     │
 │  sprint-42 · 2 轮   │ 月光在湖面铺开银箔，                     │
@@ -212,6 +212,12 @@ OpenAI Codex CLI 的终端美学：**安静、致密、可工程信任** —— 
   model，与 `org status` 同数据源）· `GET /api/sessions?expert=X` ·
   `GET /api/session/<E>/<S>`（逐轮 question/answer/tokens/ctx_tokens，
   账本健壮解析：记录边界重组 + 修复式正则，兼容存量坏账本）；
+- **工具库治理端点（v0.4.12）**：`POST /api/keep` / `POST /api/drop`
+  （body `{expert}`）—— 与 CLI `org keep` / TUI `:keep` 同一代码路径
+  （`setRetained`：翻转 retained + 双写注册表 + git「(user curation)」
+  留痕）；专家卡 hover 浮现 ★/○ 切换钮，导入专家免切换（导入即保留），
+  运行中禁用；「哪些 harness 值得留下来」是用户的决策权——GUI 与
+  CLI / TUI 三端同权；
 - **交互端点**：`POST /api/ask`（JSON 整轮，兼容并存）· `POST
   /api/ask-stream`（SSE 流式：`open`（排队状态回显）→ `start` → `stage*`
   （2.6s 轮换 direct.hsl 真实阶段）→ `log*`（子进程 stdout 逐行实时）→

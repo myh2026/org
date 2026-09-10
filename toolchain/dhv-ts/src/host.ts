@@ -351,7 +351,24 @@ export class Host {
     if (!fs.existsSync(abs)) return { ok: false, error: `文件不存在：${p}` };
     const src = fs.readFileSync(abs, 'utf-8');
     const count = src.split(oldText).length - 1;
-    if (count === 0) return { ok: false, error: `old_text 未找到（0 处）` };
+    if (count === 0) {
+      // CRLF 容忍（Windows 宿主实测：git autocrlf 使工作区文件为 \r\n，而
+      // 剧本/fixture 的 old_text 通常是 LF → 精确匹配静默失败）。归一化重试：
+      // 按 LF 匹配替换，写回保持原文件主导行尾风格（CRLF 文件不被迫整体转 LF）。
+      const crlf = (src.match(/\r\n/g) ?? []).length;
+      const lf = (src.match(/(?<!\r)\n/g) ?? []).length;
+      if (crlf > 0) {
+        const norm = src.replace(/\r\n/g, '\n');
+        const n = norm.split(oldText).length - 1;
+        if (n === 1) {
+          const patched = norm.replace(oldText, newText);
+          fs.writeFileSync(abs, crlf >= lf ? patched.replace(/\n/g, '\r\n') : patched, 'utf-8');
+          return { ok: true };
+        }
+        if (n > 1) return { ok: false, error: `old_text 非唯一（CRLF 归一化后 ${n} 处）` };
+      }
+      return { ok: false, error: `old_text 未找到（0 处）` };
+    }
     if (count > 1) return { ok: false, error: `old_text 非唯一（${count} 处）` };
     fs.writeFileSync(abs, src.replace(oldText, newText), 'utf-8');
     return { ok: true };
@@ -473,9 +490,10 @@ export class Host {
   }
 
   private async llmComplete(req: { messages: { role: string; content: string }[]; temperature?: number; maxTokens?: number }): Promise<string> {
-    // LLM 网关路由：DHV_LLM_GATEWAY 指向 OpenAI 兼容端点（如本机
-    // llm-gateway）时走 HTTP —— 多 Agent 共享同一底座/限流桶，互不打死；
-    // 缺省直连 z-ai-web-dev-sdk（行为不变）。
+    // LLM 网关路由（v0.2.58，自 ORG vendored 副本上游化）：DHV_LLM_GATEWAY 指向
+    // OpenAI 兼容端点（如 <base>/v1 形态）时走 HTTP —— 独立部署无需本机安装
+    // z-ai-web-dev-sdk，多 Agent 共享同一底座/限流桶；缺省直连 z-ai-web-dev-sdk
+    // （行为不变）。
     const gateway = (process.env.DHV_LLM_GATEWAY || "").replace(/\/+$/, "");
     if (gateway) {
       return this.llmViaGateway(gateway, req);

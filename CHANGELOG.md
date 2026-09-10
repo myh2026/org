@@ -1,5 +1,70 @@
 # CHANGELOG
 
+## v0.4.12（2026-09-10）
+
+**实测驱动的健壮性批次：deepseek 真实模式全链路打通 + Web GUI 工具库治理**。
+外部实测（真实模型跑团队模式全流程）发现五个缺陷面并全部修复；同时把用户
+「选取哪些 harness 保留到工具库」的决策权搬进 Web GUI。
+
+### 修复（实测发现）
+
+- **工厂生成有界再生成（本批核心）**：deepseek 真实模式下首生成物是 Rust
+  风格（`use std::…` / serde_json / `$host.http`——基座模型不认识 HSL），
+  `dhv check` 正确拒绝后**整个 run 直接 Err 崩溃**。三层修复：
+  ① `MINT_SOURCE_PROMPT` 补齐 HSL 语法铁律 + 经 check/run 实测验证的完整
+  最小示例 + 不存在的 API 负面清单（内建 prelude 无需 import / 无网络访问 /
+  宿主 API 只在 native 块内）；
+  ② 管线有界再生成（`MAX_MINT_ATTEMPTS=3`，与监督回路的有界返工同构）：
+  check 拒绝后把诊断信息反馈给生成器重试，耗尽才 Err（错误文案含次数与
+  诊断）；
+  ③ mint_spec 提示词把子任务技能标签织入 brief + 登记时取能力并集 ——
+  分解器 skills 与规格 capabilities 是两次独立模型输出，词汇表漂移会让
+  登记后检索 `serves` 失配（「管线状态不一致」Err）；
+- **工厂失败优雅降级**：C 路径工厂失败不再 `?` 炸全场 —— 转为失败报告
+  （coverage 0 + factory-failed 标注）交监督回路处理（有界返工重试 /
+  耗尽后强制收货时失败标注随报告可见），不连累已完成的其余子任务；
+- **recurrence 序列化卫生**：`save_recurrence` 键（`expert::note`，note 来自
+  模型审查意见）裸 `format!` 插值 —— 一条含引号的 Revise note 即写坏
+  `runtime/recurrence.json`，且 `load_recurrence` 裸 `JSON.parse` 使之后
+  **每次 org run 崩溃**（需手工删文件）。写侧过 `json_escape` + 读侧损坏
+  容错（降级空表 + stderr 提示，save 重写自愈）；
+- **handoff 账本续写**：`$host.artifacts.write` 覆写语义使重复暖移交把
+  账本截断到只剩最后一条（与 direct.hsl 的多轮累加不一致）；改为读旧续写
+  （与 direct.hsl 同款）+ task 过 `json_escape`；
+- **Web GUI ctx meter 正则**：used 侧 ≥1k tokens 时 CLI 打印 `8.4k/131.1k`
+  （fmt_k 加 k 后缀），旧正则 `(\d+)\/` 只认纯数字 → 长会话的计量条永远
+  失配降级纯文本。正则改 `([\d.]+)k?\/` 并用整段匹配展示；
+- **crystallize 序列化卫生**：memo 键值裸插值（含引号写坏
+  `registry/memos/<expert>.json`）→ 过 `json_escape`；
+- **版本号联动修复**：`tui/frame.ts` 的 `ORG_VERSION` 停在 v0.4.3（README
+  声称的版本联动自 v0.4.3 后失守）+ `cli/org.ts` 头注释 v0.4.8 → 统一
+  v0.4.12；`--turns` 用法注释的分隔符（`,` → 实际的 `|`）；TUI 会话名格式
+  与 `lib/engine.ts` 的 `makeOutDir` 对齐（`out-YYYYMMDD-HHMMSS`，此前
+  状态栏 currentSession 与真实产物目录永远对不上）。
+
+### 新增
+
+- **Web GUI 工具库治理（用户点名的功能）**：`POST /api/keep` / `POST /api/drop`
+  端点（复用 CLI `setRetained` 同一代码路径：翻转 retained + 双写注册表 +
+  git「(user curation)」留痕）+ 专家卡 hover 浮现 ★/○ 切换钮（导入专家免
+  切换——导入即保留；运行中禁用防派单寻址漂移）+ hintline 轻量提示条；
+  dist/demo 快照只读守卫与 CLI 同款。「哪些 harness 值得留下来」是用户的
+  决策权——现在 GUI 与 CLI / TUI 三端同权；
+- **vendored dhv-ts 与上游统一**：同步至上游 v0.2.58（吸收本仓库 B-6/B-7/
+  网关的上游化版本 + 上游 CRLF 容忍/execPy 跨平台回退/PYTHONUTF8 + 位运算
+  BigInt 语义与 String::find 码点索引两修复）—— 终止双向漂移，恢复单一
+  事实源（HSL 仓库 issue #8）。
+
+### 测试
+
+- 新增 `tests/fixes.test.ts` 8 例：recurrence 写侧/读侧 round-trip/损坏容错、
+  工厂再生成（重试成功 + 耗尽显式 Err）、handoff 账本两行、meter 正则双形
+  态、crystallize 含引号 round-trip；
+- web.test.ts 新增 3 例：keep/drop 端到端（retained 翻转 + git 留痕 ×2 +
+  /api/status 反映）、防呆（非法名 400 / 不存在 404）、GUI HTML 治理面断言；
+- 全套 144 个机制级测试通过（136 + 16 新增）；`org demo` 全叙事 2.3s 复现
+  model_calls 5→1→0 不变。
+
 ## v0.4.11（2026-09-09）
 
 **`org web` GUI 正常 Agent 化收尾（issue #13）**。方向背景：擂台/对比

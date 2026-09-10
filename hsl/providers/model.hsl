@@ -21,7 +21,10 @@ export async fn ask(track: String, system: String, user: String) -> Result<Strin
     };
     if model == String::from("deepseek") {
         let raw: String = native typescript {
-            const r = await $host.llm.complete({
+            // v0.4.12：429/网络瞬断的有界退避重试（1s → 3s，共 3 次）—— 限流是
+            // 真实模型车道的常态（实测 z-ai 网关 429），裸错误此前直接炸穿整次
+            // run。重试仍失败则抛出（错误信息原样保留可诊断）。
+            const call = () => $host.llm.complete({
                 messages: [
                     { role: "system", content: system },
                     { role: "user", content: user },
@@ -29,8 +32,18 @@ export async fn ask(track: String, system: String, user: String) -> Result<Strin
                 temperature: 0.1,
                 maxTokens: 2048,
             });
-            if (r === undefined || r === null) return "";
-            return String(r);
+            let lastErr = null;
+            for (let i = 0; i < 3; i++) {
+                try {
+                    const r = await call();
+                    if (r !== undefined && r !== null && String(r).length > 0) return String(r);
+                    lastErr = new Error("empty completion");
+                } catch (e) {
+                    lastErr = e;
+                }
+                if (i < 2) await new Promise((res) => setTimeout(res, 1000 * (i + 1)));
+            }
+            throw lastErr;
         };
         if raw.len() == 0 {
             Err(ExpertError::new(

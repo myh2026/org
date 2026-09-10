@@ -30,6 +30,12 @@ enum MintStage {
     Done,
 }
 
+/// 生成有界再生成上限（v0.4.12）：首生成 + 2 次携带诊断的再生成 ——
+/// 与监督回路的有界返工（DEFAULT_MAX_REVISES=2）同构：审查意见可返工，
+/// 生成物的 check 诊断同样应反馈给生成器而不是直接炸全场（deepseek
+/// 真实模式实测：首生成物是 Rust 风格，check 拒绝后整个 run 直接 Err）。
+const MAX_MINT_ATTEMPTS: u32 = 3;
+
 /// 边事件（G5）。
 enum MintSignal {
     SpecReady,
@@ -105,19 +111,37 @@ export graph Factory(goal: String, skills: Vec<String>) -> Result<ExpertManifest
 
     // 主控提案的补丁位（复用同管线的闸门）
     let mut stage = MintStage::ExtractSpec;
+    // 有界再生成状态（v0.4.12）：尝试计数 + 上一次 check 诊断（反馈给生成器）
+    let mut mint_attempts: u32 = 0;
+    let mut repair_feedback: String = String::new();
 
     // AgentLoop（G1）：阶段状态机推进
     loop {
         match stage.clone() {
             MintStage::ExtractSpec => {
-                let raw = ask(String::from("mint_spec"), MINT_SPEC_PROMPT.clone(), goal.clone()).await?;
+                // v0.4.12：把子任务技能标签织入 brief —— mint_spec 的 capabilities
+                // 必须逐字包含（否则登记后检索 serves 会失配：分解器与规格提取是
+                // 两次独立模型输出，词汇表会漂移，deepseek 实测抓到）。
+                let brief = format!("{}\n子任务技能标签（capabilities 必须逐字包含）: {}", goal.clone(), skills.join(","));
+                let raw = ask(String::from("mint_spec"), MINT_SPEC_PROMPT.clone(), brief).await?;
                 spec = parse_spec(raw)?;
                 stage = MintStage::GenerateSource;
             },
             MintStage::GenerateSource => {
-                let brief = format!("{}\n技能标签: {}", spec.description.clone(), skills.join(","));
+                let mut brief = format!("{}\n技能标签: {}", spec.description.clone(), skills.join(","));
+                if repair_feedback.len() > 0 {
+                    // 携带 check 诊断的再生成（有界）：闸门拒绝不是终点，
+                    // 诊断反馈给生成器 —— 与审查 Revise 的有界返工同构。
+                    // 附最常犯三错的速查（真实模型实测：use→Rust 风格、
+                    // 虚构 ./std/*.hsl 路径、调用不存在的宿主 API）。
+                    brief = format!(
+                        "{}\n\n上一次生成物未通过 dhv check（结构闸门，第 {} 次）。诊断信息：\n{}\n请针对诊断修复，重新输出完整的 HSL 文件。速查：Vec/HashMap/String/Option/Result 是内建类型（绝不 import、绝无 use）；用户模块 import {{ Foo }} from \"./dir/file.hsl\"；宿主 API 只能在 native typescript 块内调用（$host.fs / $host.json / $host.artifacts）。",
+                        brief, mint_attempts, repair_feedback
+                    );
+                }
                 let raw = ask(String::from("mint_hsl"), MINT_SOURCE_PROMPT.clone(), brief).await?;
                 source = raw.trim();
+                mint_attempts = mint_attempts + 1;
                 stage = MintStage::StructuralCheck;
             },
             MintStage::StructuralCheck => {
@@ -127,10 +151,14 @@ export graph Factory(goal: String, skills: Vec<String>) -> Result<ExpertManifest
                 gate.check_log = out.output;
                 if out.ok {
                     stage = MintStage::FixtureExam;
+                } else if mint_attempts < MAX_MINT_ATTEMPTS {
+                    println!("[factory] check 未过（第 {}/{} 次），携带诊断再生成", mint_attempts, MAX_MINT_ATTEMPTS);
+                    repair_feedback = out.output;
+                    stage = MintStage::GenerateSource;
                 } else {
                     return Err(OrgError::factory(format!(
-                        "dhv check 拒绝生成物（结构不合格不允许上岗）：\n{}",
-                        out.output
+                        "dhv check 拒绝生成物（{} 次再生成均未过结构闸门，不允许上岗）：\n{}",
+                        mint_attempts, out.output
                     )));
                 }
             },
@@ -156,7 +184,7 @@ export graph Factory(goal: String, skills: Vec<String>) -> Result<ExpertManifest
             },
             MintStage::Register => {
                 println!("[factory] stage=Register");
-                let manifest = register_expert(spec.clone(), gate.clone())?;
+                let manifest = register_expert(spec.clone(), gate.clone(), skills.clone())?;
                 let _ = manifest;
                 stage = MintStage::Done;
             },
@@ -618,13 +646,28 @@ impl ExpertSpec {
 }
 
 /// 入库登记（manifest 建档 + 注册表提交 + git 版本记录）。
-fn register_expert(spec: ExpertSpec, gate: MintGate) -> Result<ExpertManifest, OrgError> {
+fn register_expert(spec: ExpertSpec, gate: MintGate, skills: Vec<String>) -> Result<ExpertManifest, OrgError> {
     let eval_score = if gate.exam_ok { 1.0 } else { 0.0 };
+    // 能力并集（v0.4.12）：分解器的 skills 与 mint_spec 的 capabilities 是两次
+    // 独立的模型输出，词汇表会漂移（deepseek 实测：登记后检索 serves 失配 →
+    // 「管线状态不一致」Err）。专家是为带这些 skills 的子任务铸造的，机械并集
+    // 保证 serves 恒真（登记后检索的后置条件 + 未来 B 路径复用的前置条件）。
+    let mut caps: Vec<String> = Vec::new();
+    for c in spec.capabilities.iter() {
+        if caps.contains(c.clone()) == false {
+            caps.push(c.clone());
+        }
+    }
+    for s in skills.iter() {
+        if caps.contains(s.clone()) == false {
+            caps.push(s.clone());
+        }
+    }
     let manifest = ExpertManifest::forge(
         spec.name.clone(),
         String::from("1.0.0"),
         spec.description.clone(),
-        spec.capabilities.clone(),
+        caps,
         String::from("factory"),
         eval_score,
         format!("factory/samples/{}.json", spec.name),

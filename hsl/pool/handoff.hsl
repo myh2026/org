@@ -16,7 +16,7 @@
 
 import { AccessMode, CapabilityPolicy } from "../policy/capability.hsl";
 import { OrgError } from "../types/errors.hsl";
-import { ExpertManifest, Registry } from "../registry/manifest.hsl";
+import { ExpertManifest, Registry, json_escape } from "../registry/manifest.hsl";
 import { ask } from "../providers/model.hsl";
 
 /// 移交会话（一次 org handoff = 一份摘要 + 一次代答）。
@@ -91,13 +91,28 @@ export async fn handoff(expert: String, task: String) -> Result<HandoffSession, 
     let answer = ask(track, system, task.clone()).await?;
 
     // 记账（与直连同科目，channel 标记 handoff）
+    // v0.4.12 修复：①读旧续写（此前 artifacts.write 覆写 —— 重复暖移交会把
+    // 账本截断到只剩最后一条，与 direct.hsl 的多轮累加语义不一致）；
+    // ②task 过 json_escape（序列化卫生，与 direct.hsl 同源）。
     let tokens = ((task.len() + answer.len() + brief.len()) / 3) as u32;
     let ledger_line = format!(
         "{{\"expert\":\"{}\",\"channel\":\"handoff\",\"task\":\"{}\",\"tokens\":{},\"accepted\":1}}\n",
-        expert, task, tokens
+        json_escape(expert), json_escape(task), tokens
     );
     let _ = native typescript {
-        $host.artifacts.write("direct-ledger.jsonl", ledger_line);
+        let prev = "";
+        try {
+            // 产物目录在工作区内时（org 默认布局）读取既有账本续写（与 direct.hsl 同款）
+            const outdir = String($host.config.outdir || "");
+            const ws = String($host.config.workspace || "");
+            if (outdir.startsWith(ws)) {
+                const rel = outdir.slice(ws.length + 1).replace(/\\/g, "/") + "/direct-ledger.jsonl";
+                prev = $host.fs.read(rel);
+            }
+        } catch (e) {
+            prev = "";
+        }
+        $host.artifacts.write("direct-ledger.jsonl", prev + ledger_line);
         return true;
     };
 
