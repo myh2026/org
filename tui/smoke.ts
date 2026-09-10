@@ -12,7 +12,7 @@
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { initialState, reducer, pushEngineEvent, cardMatchesFilter, parseFilterArg } from "./store.ts";
-import { renderFrame } from "./frame.ts";
+import { renderFrame , ORG_VERSION } from "./frame.ts";
 import { Screen } from "./renderer.ts";
 import { replayRun, readScorecard, startRun, scanWorkspace } from "../lib/engine.ts";
 
@@ -39,7 +39,7 @@ async function main(): Promise<number> {
   console.log("① renderFrame 纯渲染");
   const base = initialState({ cols: 118, rows: 38, workspace: path.join(ROOT, "demo-run") });
   const f = plain(base);
-  check("标题栏 ORG + 版本", f.includes("ORG — Organization Harness") && f.includes("v0.4.12"));
+  check("标题栏 ORG + 版本", f.includes("ORG — Organization Harness") && f.includes(ORG_VERSION));
   check("三区：会话/专家库/池与固化（宽终端）", f.includes("会话") && f.includes("专家库") && f.includes("池与固化"));
   check("空态引导（输入任务回车派单）", f.includes("输入任务回车派单"));
   check("输入栏提示符 ›", f.includes("›"));
