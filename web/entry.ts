@@ -18,8 +18,10 @@
 //   POST   /api/ask                 进程内直连（JSON 整轮，兼容并存）
 //   POST   /api/ask-stream          SSE 流式（open → queued? → start →
 //                                   stage* → log* → done/error）
-//   POST   /api/abort               停止生成（SIGKILL 当前 org 子进程，
-//                                   该轮不落账本；SSE 发 error{aborted:true}）
+//   POST   /api/abort               停止生成：body {id} 可选 —— 无 id/
+//                                   id=运行轮 → SIGKILL 当前 org 子进程
+//                                   （该轮不落账本）；id=排队轮 → 预先取消
+//                                   （轮到时拒绝执行，SSE 发 error{aborted,queued}）
 //
 // 入口形态（与 tui/entry.ts 同模式）：
 //   cli/org.ts cmdWeb      org web 子命令（进程内 import 本文件；bun compile
@@ -35,8 +37,9 @@ import {
   ensureWorkspace, loadRegistryIndex, listContextUsage,
   expertFixtureOf, dhvRun, resolveDhv, resolveBun, setRetained,
 } from "../lib/engine.ts";
+import { AskGate, QueueCancelledError } from "./gate.ts";
+import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14 漂移治理：此前本文件落后两版）
 
-const VERSION = "0.4.12";
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const STOCK_FIXTURE = path.join(ROOT, "fixtures/run-notices.json");
 const DEFAULT_PORT = 4600; // 3000/3030/5000 被本机其他服务占用，绝不复用
@@ -245,21 +248,14 @@ export function parseAskOut(out: string): AskOutcome {
 
 // ask 串行锁：direct 流水线固定写 workspace/out-ask（与 org ask 同产物约定），
 // 并发 POST 会让两个运行互踩产物目录 —— 原型用单飞队列（一次一轮）。
-// askBusy 供 SSE 端点诚实告知「排队中」（多用户并发原型取舍）。
-let askChain: Promise<unknown> = Promise.resolve();
-let askBusy = false;
+// v0.4.14：串行门抽到 web/gate.ts（排队票据化，排队轮可预先取消 ——
+// 此前 abort 只认 runningProc，排队中的第二轮既撤不回、还可能误伤前一轮）；
+// gate.busy 供 SSE 端点诚实告知「排队中」（多用户并发原型取舍）。
+const gate = new AskGate();
 
-function askSerialized<T>(fn: () => Promise<T>): Promise<T> {
-  const run = askChain.then(async () => {
-    askBusy = true;
-    try {
-      return await fn();
-    } finally {
-      askBusy = false;
-    }
-  });
-  askChain = run.then(() => undefined, () => undefined);
-  return run;
+// 兼容旧名（非 SSE 端点与内部语义沿用）
+function askSerialized<T>(fn: () => Promise<T>, ticket: Parameters<AskGate["enter"]>[1]): Promise<T> {
+  return gate.enter(fn, ticket);
 }
 
 /** 进程内执行一轮直连（DIRECT_ENTRY + env ORG_ASK_* + expertFixtureOf 剧本
@@ -424,6 +420,9 @@ function sseAsk(
 ): Response {
   const enc = new TextEncoder();
   let closed = false;
+  // v0.4.14：发票入队 —— open 事件回显 ticketId，排队中可 POST /api/abort {id}
+  // 预先取消本轮（轮到时拒绝执行，不占流水线、不落账本）
+  const ticket = gate.issue();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const send = (event: string, data: unknown): void => {
@@ -434,10 +433,10 @@ function sseAsk(
           closed = true; // 客户端已断开：静默，运行继续（账本照写）
         }
       };
-      send("open", { expert: req.expert, session: req.session, model: req.model, queued: askBusy });
+      send("open", { expert: req.expert, session: req.session, model: req.model, queued: gate.busy, ticketId: ticket.id });
       try {
         const outcome = await askSerialized(async () => {
-          send("start", { model: req.model });
+          send("start", { model: req.model, ticketId: ticket.id });
           abortRequested = false; // 队列轮到本轮：复位停止标记
           let stageIdx = 0;
           const ticker = setInterval(() => {
@@ -449,16 +448,21 @@ function sseAsk(
           } finally {
             clearInterval(ticker);
           }
-        });
+        }, ticket);
         if (abortRequested && !outcome.ok) {
           send("error", { aborted: true, message: "已停止：本轮未落账本" });
         } else {
           send("done", outcome);
         }
       } catch (err) {
-        send("error", { message: (err as Error).message });
+        if (err instanceof QueueCancelledError) {
+          send("error", { aborted: true, queued: true, message: err.message });
+        } else {
+          send("error", { message: (err as Error).message });
+        }
       } finally {
         abortRequested = false;
+        gate.release(ticket);
         try {
           controller.close();
         } catch { /* 已关闭 */ }
@@ -494,8 +498,30 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
             headers: { "content-type": "text/html; charset=utf-8" },
           });
         }
-        // ---- 停止生成（issue #12：SIGKILL 当前直连子进程，本轮不落账本）----
+        // ---- 停止/取消（issue #12：运行轮 SIGKILL；v0.4.14：排队轮可预取消）----
         if (route === "POST /api/abort") {
+          // 可选 body {id}：票据 id（SSE open 事件回显）。无 body / 无 id →
+          // 传统语义（停止当前运行轮）。id 命中排队轮 → 预先取消（轮到时
+          // 拒绝执行，SSE 发 error{aborted,queued}）；id 命中运行轮 → 落到
+          // 传统 SIGKILL 路径；查无此票 → 人话告知。
+          let abortId: number | null = null;
+          try {
+            const body = (await req.json()) as { id?: unknown };
+            if (body && typeof body.id === "number" && Number.isInteger(body.id)) abortId = body.id;
+          } catch { /* 空 body / 非 JSON：传统语义 */ }
+          if (abortId !== null) {
+            const res = gate.cancel(abortId);
+            if (res === "cancelled") {
+              return json({ ok: true, aborted: true, queued: true });
+            }
+            if (res === "unknown") {
+              return json({
+                ok: false, aborted: false,
+                message: "该轮不在排队中（可能已开始或已结束）",
+              });
+            }
+            // res === "running"：票据是当前运行轮 → 落到下方 SIGKILL 路径
+          }
           if (runningProc) {
             abortRequested = true;
             try {
@@ -625,8 +651,18 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
           if (!SAFE_NAME.test(expert) || !SAFE_NAME.test(session)) {
             return json({ error: "expert/session 名不合法" }, 400);
           }
-          const outcome = await askSerialized(() => askOnce(ws, { expert, question, session, model }));
-          return json(outcome as unknown as Record<string, unknown>, outcome.ok ? 200 : 500);
+          const ticket = gate.issue();
+          try {
+            const outcome = await askSerialized(() => askOnce(ws, { expert, question, session, model }), ticket);
+            return json(outcome as unknown as Record<string, unknown>, outcome.ok ? 200 : 500);
+          } catch (err) {
+            if (err instanceof QueueCancelledError) {
+              return json({ ok: false, aborted: true, queued: true, message: err.message });
+            }
+            throw err;
+          } finally {
+            gate.release(ticket);
+          }
         }
         // ---- 交互面（SSE 流式） ----
         if (route === "POST /api/ask-stream") {
@@ -683,7 +719,7 @@ export async function webMain(argv: string[]): Promise<number> {
   console.log(`  只读面     GET /api/status · /api/sessions?expert=… · /api/session/<专家>/<会话>`);
   console.log(`  会话管理   DELETE /api/session/<E>/<S>（删除）· PATCH（重命名 body {to}）`);
   console.log(`  交互面     POST /api/ask-stream（SSE 流式）· POST /api/ask（JSON 整轮）`);
-  console.log(`  停止       POST /api/abort（SIGKILL 当前直连，该轮不落账本）`);
+  console.log(`  停止       POST /api/abort（运行轮 SIGKILL / body{id} 取消排队轮）`);
   console.log(`  模型       ${p.model}（GUI 可切 scripted/deepseek，请求体可逐次覆盖）`);
   // v0.4.13：网关三件套可见性 —— 直连服务商（DeepSeek 等）的鉴权/模型/超时
   // 经环境变量注入（spawn 车道继承 process.env），横幅回显防「配了没生效」。
@@ -1219,7 +1255,7 @@ var VER = "${VERSION}";
 var renderMd = ${renderMd.toString()};
 var state = {
   experts: [], usages: [], currentExpert: null, currentSession: null,
-  model: "scripted", running: false, myRunStarted: false,
+  model: "scripted", running: false, myRunStarted: false, ticketId: 0,
   lastQuestion: "", turns: [], atBottom: true
 };
 var lastSessions = [];
@@ -1590,7 +1626,14 @@ function stopSpin() {
 function stopRun() {
   if (!state.running) return;
   if (!state.myRunStarted) {
-    setStage("排队中：前一轮仍在运行，尚不能停止");
+    // v0.4.14：排队轮可预先取消（按票据 id，不误伤前一轮）
+    api("/api/abort", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: state.ticketId })
+    }).then(function (r) {
+      if (r && !r.ok) setStage(r.message || "取消失败");
+    });
     return;
   }
   api("/api/abort", { method: "POST" }).then(function (r) {
@@ -1618,6 +1661,7 @@ function ask(text, isRetry) {
   if (!state.currentSession) state.currentSession = session;
   state.lastQuestion = question;
   state.myRunStarted = false;
+  state.ticketId = 0;
   setRunning(true);
   document.getElementById("question").value = "";
   document.getElementById("question").style.height = "auto";
@@ -1663,7 +1707,8 @@ function ask(text, isRetry) {
   function onEvent(ev, d) {
     if (settled) return;
     if (ev === "open") {
-      if (d && d.queued) setStage("排队中（前一轮直连仍在运行）…");
+      state.ticketId = (d && d.ticketId) || 0;
+      if (d && d.queued) setStage("排队中（前一轮直连仍在运行）· esc 取消本轮");
     } else if (ev === "start") {
       state.myRunStarted = true;
       setStage("direct 流水线启动（" + ((d && d.model) || "scripted") + "）");
@@ -1688,11 +1733,11 @@ function ask(text, isRetry) {
     } else if (ev === "done") {
       finalize(d);
     } else if (ev === "error") {
-      finalize(null, (d && d.message) || "引擎失败", d && d.aborted);
+      finalize(null, (d && d.message) || "引擎失败", d && d.aborted, d && d.queued);
     }
   }
 
-  function finalize(outcome, errMsg, aborted) {
+  function finalize(outcome, errMsg, aborted, queuedCancel) {
     if (settled) return;
     settled = true;
     stopSpin();
@@ -1730,11 +1775,11 @@ function ask(text, isRetry) {
     } else if (aborted) {
       var partial = answerLines.join("\\n");
       var html = '<div class="t-bot">';
-      if (partial) {
+      if (partial && !queuedCancel) {
         html += '<div class="who">org · ' + esc(state.currentExpert) + ' · stopped</div>' +
           '<div class="body">' + esc(partial) + '</div>';
       }
-      html += '<div class="stoppedbox">■ 已停止 · 本轮未落账本</div></div>';
+      html += '<div class="stoppedbox">■ ' + (queuedCancel ? "已取消排队 · 本轮未开始" : "已停止 · 本轮未落账本") + '</div></div>';
       chat.insertAdjacentHTML("beforeend", html);
     } else {
       chat.insertAdjacentHTML("beforeend",

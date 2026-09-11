@@ -18,7 +18,11 @@ import { renderRail, railWidth } from "./components/rail.tsx";
 import { renderThread } from "./components/thread.tsx";
 import { renderInput, renderStatus, renderHelp } from "./components/input.tsx";
 
-export const ORG_VERSION = "v0.4.13";
+// 版本单一来源（v0.4.14）：字面量收敛到 lib/version.ts；本地以 ORG_VERSION
+// 名字使用（渲染标题栏），同时重导出保持 `import { ORG_VERSION } from
+// "./frame.ts"` 消费面（smoke 等）不变。
+import { ORG_VERSION_TAG as ORG_VERSION } from "../lib/version.ts";
+export { ORG_VERSION };
 
 function hline(width: number, left: string, mid: string, right: string): string {
   return left + mid.repeat(Math.max(0, width)) + right;

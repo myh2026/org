@@ -274,6 +274,98 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     expect(r2.status).toBe(400);
   });
 
+  // ---- 停止/取消（v0.4.14：排队轮票据化预取消）----
+
+  test("POST /api/abort：空转时诚实告知（无 body → 传统语义 ok:false）", async () => {
+    const r = await fetch(base + "/api/abort", { method: "POST" });
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { ok: boolean; aborted: boolean; message: string };
+    expect(j.ok).toBe(false);
+    expect(j.aborted).toBe(false);
+    expect(j.message).toContain("没有运行中的直连");
+  });
+
+  test("POST /api/abort {id}：查无此票 → 人话告知（不误报）", async () => {
+    const r = await fetch(base + "/api/abort", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: 999999 }),
+    });
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { ok: boolean; message: string };
+    expect(j.ok).toBe(false);
+    expect(j.message).toContain("不在排队中");
+  });
+
+  test("排队轮可预先取消（open{queued,ticketId} → abort{id} → error{aborted,queued}；不误伤前一轮）", async () => {
+    // A：第一轮直连（spawn 车道真实运行，至少数百 ms —— 保证 B 稳定排队）
+    const aP = fetch(base + "/api/ask-stream", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expert: "poet", question: "第一轮：写一句诗", session: "web-queue-a" }),
+    });
+    // B：紧随其后入队（不等待 A 完成）
+    const b = await fetch(base + "/api/ask-stream", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expert: "poet", question: "第二轮：排队后被取消", session: "web-queue-b" }),
+    });
+    expect(b.status).toBe(200);
+
+    // 增量读 B 的流：拿到 open 帧（queued=true + ticketId 回显）
+    const reader = b.body!.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    let open: { queued: boolean; ticketId: number } | null = null;
+    while (!open) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const m = buf.match(/event: open\ndata: (.*)\n\n/);
+      if (m) open = JSON.parse(m[1]!) as { queued: boolean; ticketId: number };
+    }
+    expect(open).not.toBeNull();
+    expect(open!.queued).toBe(true); // A 仍在跑（spawn 车道耗时 > 本测试的读帧时间）
+    expect(open!.ticketId).toBeGreaterThan(0);
+
+    // 取消排队的 B（不误伤 A）
+    const ab = await fetch(base + "/api/abort", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: open!.ticketId }),
+    });
+    const abj = (await ab.json()) as { ok: boolean; aborted: boolean; queued: boolean };
+    expect(abj.ok).toBe(true);
+    expect(abj.aborted).toBe(true);
+    expect(abj.queued).toBe(true);
+
+    // B 的流以 error{aborted:true, queued:true} 收尾（服务端关流后 done）
+    let bText = buf;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bText += dec.decode(value, { stream: true });
+    }
+    const bEvents = parseSse(bText);
+    expect(bEvents.has("start")).toBe(false); // 从未开跑
+    expect(bEvents.has("done")).toBe(false); // 没有完整收轮
+    const bErr = (bEvents.get("error") as Array<{ aborted: boolean; queued: boolean; message: string }>)[0]!;
+    expect(bErr.aborted).toBe(true);
+    expect(bErr.queued).toBe(true);
+    expect(bErr.message).toContain("已取消排队");
+
+    // A 完整收场（被取消的是 B，不误伤）
+    const aRes = await aP;
+    const aEvents = parseSse(await aRes.text());
+    const aDone = (aEvents.get("done") as Array<{ ok: boolean; turn: number | null }>)[0]!;
+    expect(aDone.ok).toBe(true);
+    expect(aDone.turn).toBe(1);
+
+    // 账本事实源：A 落盘、B 未落（取消的轮次从未运行）
+    expect(exists(path.join(ws, "runtime/sessions/poet/web-queue-a.jsonl"))).toBe(true);
+    expect(exists(path.join(ws, "runtime/sessions/poet/web-queue-b.jsonl"))).toBe(false);
+  });
+
   test("GUI 单页含 SSE 消费实现（渐进渲染要素齐备）", async () => {
     const html = await (await fetch(base + "/")).text();
     // 前端走 /api/ask-stream + 阶段行 + 运行日志折叠区 + 渐进答案

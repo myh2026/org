@@ -1,25 +1,25 @@
 {
-  "captured_at": "2026-09-10T16:49:14.452Z",
+  "captured_at": "2026-09-11T12:23:26.886Z",
   "commits": [
     {
-      "sha": "1fac787",
+      "sha": "a580242",
       "subject": "patch record-validator -> 1.0.1 (remedy: count date_status=unparsed as valid (flagged, not excluded))",
-      "date": "2026-09-10 16:49:13 +0000"
+      "date": "2026-09-11 12:23:25 +0000"
     },
     {
-      "sha": "93a223e",
+      "sha": "e0e822a",
       "subject": "keep record-validator@1.0.0 (user curation)",
-      "date": "2026-09-10 16:49:13 +0000"
+      "date": "2026-09-11 12:23:25 +0000"
     },
     {
-      "sha": "ffc7b3f",
+      "sha": "a357795",
       "subject": "mint record-validator@1.0.0 (factory)",
-      "date": "2026-09-10 16:49:13 +0000"
+      "date": "2026-09-11 12:23:24 +0000"
     },
     {
-      "sha": "bb8d6c3",
+      "sha": "1038154",
       "subject": "registry template (notice-parser@1.0.0)",
-      "date": "2026-09-10 16:49:13 +0000"
+      "date": "2026-09-11 12:23:24 +0000"
     }
   ]
 }

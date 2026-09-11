@@ -2,6 +2,64 @@
 
 # CHANGELOG
 
+## v0.4.14（2026-09-11）
+
+**Web GUI 排队轮可预先取消 + 版本单一来源治理批次**。排队取消：`org web`
+的 ask 是单飞串行（direct 流水线固定写 `workspace/out-ask`，并发互踩产物），
+但纯 promise 链没有句柄 —— 第二轮排队期间既无法撤回（Esc 提示「尚不能停止」
+形同虚设），`POST /api/abort` 又只认 `runningProc`：想停 B 却把运行中的 A
+误杀。版本漂移：v0.4.13 批次后 `web/entry.ts` 仍硬编码 `0.4.12`（GUI chrome
+徽标落后两版）—— worklog 记录的 TUI 版本漂移 bug 在 web 侧复发，本轮把
+版本字面量收敛到单一来源模块根治。
+
+### 新增：排队票据化（web/gate.ts）
+
+- **AskGate 串行门**：`issue()` 发票（id 唯一递增）· `enter()` 轮到执行
+  （票据已取消则抛 `QueueCancelledError`，不占流水线、不落账本）·
+  `cancel(id)` → `cancelled`/`running`/`unknown` 三态 · `release()` 流终
+  态清理（排队中的票据不摘：客户端断开 ≠ 取消，轮次照常落账本 —— 与
+  「账本是事实源」同一语义）；「查取消 → 置 running → 摘票」同步临界区，
+  JS 单线程事件循环保证与 `cancel()` 无交织；
+- **SSE 协议**：`open` 事件新增 `ticketId` 回显；排队轮被取消时流以
+  `error{aborted:true, queued:true}` 收尾（`start`/`done` 不出现 ——
+  本轮从未开跑）；
+- **`POST /api/abort` 语义升级**（向后兼容）：无 body / 无 `id` → 传统
+  行为（SIGKILL 运行轮）；`{id}` 命中排队轮 → 预先取消（不误伤前一轮，
+  这是本轮修的交互性 bug 的核心）；`{id}` 命中运行轮 → 等价传统路径；
+  查无此票 → 人话告知；JSON 端点 `POST /api/ask` 同享票据语义（取消的
+  轮返回 `{ok:false, aborted:true, queued:true}`）；
+- **GUI**：排队等待行从「尚不能停止」改为「esc 取消本轮」；取消收场
+  专属提示「已取消排队 · 本轮未开始」。
+
+### 修复：版本单一来源（lib/version.ts）
+
+- 新增 `lib/version.ts`（`ORG_VERSION` / `ORG_VERSION_TAG`），`cli/org.ts` ·
+  `tui/frame.ts`（重导出保持消费面不变）· `web/entry.ts` 三处统一引用；
+  根治「每发一版总有某个入口的徽标忘记改」的结构性问题；
+- `package.json` 0.4.14；README 徽章与状态行同步。
+
+### 同步：vendored dhv-ts v0.2.60（上游 S-20 字面量字段闸门 + 宿主面三修）
+
+- 上游 HSL v0.2.60 新增 `S-20` 静态校验（struct/变体字面量未知/缺失/重复
+  字段 —— 实测：构造不存在字段 check 全绿、run 静默收下），本仓 vendored
+  同步 → **工厂闸门随之变严**：minted harness 的坏字段字面量从此被
+  `dhv check` 拦截（与既有「check 拒绝 → 诊断反馈有界再生成」链路天然
+  衔接）；ORG 自身 HSL 源与全部 fixture 经全量回归零误报；
+- 同步宿主面三修：`nextReview` 耗尽抛错（审查判定不可静默伪造 accept ——
+  验收闸门证据源完整性）；`fs.list` 深度默认 8 层可配（原 2 层硬编码，
+  深层文件对 harness 静默不可见）；**路径监狱 symlink 实解析**（实测
+  workspace 内符号链可把 read/write 送到监狱外 —— 双向量穿越修复，
+  脚本化 harness 的安全边界即保证）；
+- payload 再生（指纹 37cdaea…）。
+
+### 测试
+
+- 新增 `tests/gate.test.ts`（7 例：FIFO 串行 / 取消拒绝执行 / 不误伤 /
+  running/unknown 判别 / release 语义 / 失败不堵队列 / id 递增）；
+- `tests/web.test.ts` +3 例（abort 空转诚实告知 / 查无此票 / 排队取消
+  E2E：真实 spawn 车道 A 运行中 B 排队 → 取消 B → A 完整收场 + A 落账本
+  B 未落）；全量 168/168 通过。
+
 ## v0.4.13（2026-09-10）
 
 **DeepSeek 官方 API 直连（v4.1 flash / `deepseek-flash`）+ 实测驱动的数据路由
