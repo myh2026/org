@@ -1,5 +1,30 @@
 # CHANGELOG
 
+## v0.4.16（2026-09-11）—— 用户模型/API 持久配置（org config）
+
+对标 codex（`~/.codex/config.toml`）/ opencode（`opencode.json`）的模型
+持久配置面 —— 用户可自己配置模型与 API，不必每次 export 环境变量：
+
+- **`org config` 子命令**（lib/config.ts · 全新模块）：`~/.org/config.json`
+  跨版本持久（`ORG_CONFIG` 可重定向）；原子写（tmp → rename）；
+- **六服务商预设**：deepseek / openai / openrouter / ollama / lmstudio /
+  vllm 一键写入（`org config preset <name>`，本地推理预设免 key 即用）；
+- **来源归因**：`org config`（无参）逐项标注 ← 环境变量 / 配置文件 / 缺省；
+  优先级 **CLI 旗标 > 环境变量 > 配置文件 > 内建缺省**（Unix 惯例）；
+- **`org config test` 连通验证**：当前生效配置发一次 1-token 真实请求
+  （延迟 · 回复 · tokens 回显）——「配了没生效」立即暴露；
+- **`default_lane` 缺省车道**：`org config set default_lane deepseek` 后
+  `org chat` / `org run` / `org ask` 免每次 `--model`（modelExplicit
+  显式旗标优先，不打架）；
+- **api_key 脱敏**：显示只露首 3 尾 4（`sk-…9402`）；
+- **双入口注入**：cli/org.ts main() 启动即注入 + cli/chat.ts 独立入口
+  幂等补注入 —— 全部子命令 / 子进程（dhv run 嵌套车道）统一继承；
+- 测试 20 例锁定（tests/config.test.ts：键归一别名 / 原子写往返 / 损坏
+  容错 / env>file 优先级 / 预设不动 api_key / 三态归因 / 脱敏），
+  全量 **205/205 全绿**（11 文件）；
+- 实测：deepseek 预设 + 真实 key `org config test` 181ms 连通 ✓；
+  `default_lane=deepseek` 后无旗标 `org ask` 直连真实车道（1.2s 应答）。
+
 ## v0.4.15（2026-09-11）—— 交互式聊天 REPL + Token 流式输出（对标主流 Agent）
 
 把 ORG 从「批处理流水线」补齐为「真正的交互式 Agent」—— 对标 codex /

@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-v0.4.15_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
-[![Tests](https://img.shields.io/badge/tests-185%2F185_passing-brightgreen.svg)](#-测试与验证状态)
+[![Tests](https://img.shields.io/badge/tests-205%2F205_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.61-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
 [![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-三平台单二进制分发)
@@ -19,7 +19,7 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **v0.4.15 当前状态**：可运行实现，**185/185 机制级测试全绿**。本版新增**交互式聊天 REPL（`org chat`：多轮对话 · Token 流式输出 · 思考指示器 · 斜杠命令 `/model` `/expert` `/sessions` `/compact` …）**与**流式基础设施三端贯通（宿主 SSE 逐块解析 → `llm-stream.jsonl` append-only 增量落盘 → 引擎泵 150ms 尾随 → `llm_delta` 事件 → CLI 逐 token 渲染 / Web SSE `delta` 事件 / TUI 优雅忽略）**；此前批次已落地：**Web GUI 排队轮预取消（AskGate 票据化）**、**版本单一来源（`lib/version.ts`）**、**DeepSeek 官方 API 直连（网关三件套 + 思考量控制 + 429 退避）**、**工厂有界再生成 + 优雅降级**、**B 复用语义地板（`REUSE_AFFINITY_RATIO=0.3`）**、**工具库治理三动作（`org import` / `org keep` / `org drop`，CLI·TUI·Web 三端同权）**、**Web GUI 工程化重设计（Codex 风终端美学 + Markdown 渲染 + SSE 流式 + 排队取消）**、**OpenCode 级 TUI 驾驶舱**、**Windows/macOS/Linux 五目标单二进制分发**。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因、固化管线（精确匹配档 + 自动降级）全部落地。全叙事可复现（`org demo`，约 2.3s，model_calls 5→1→0）。
+> **v0.4.16 当前状态**：可运行实现，**205/205 机制级测试全绿**。本版新增**用户模型/API 持久配置（`org config`：`~/.org/config.json` + 六服务商预设 + 来源归因 + 连通测试 + `default_lane` 缺省车道）**；上一版 v0.4.15 落地**交互式聊天 REPL（`org chat`：多轮对话 · Token 流式输出 · 思考指示器 · 斜杠命令 `/model` `/expert` `/sessions` `/compact` …）**与**流式基础设施三端贯通（宿主 SSE 逐块解析 → `llm-stream.jsonl` append-only 增量落盘 → 引擎泵 150ms 尾随 → `llm_delta` 事件 → CLI 逐 token 渲染 / Web SSE `delta` 事件 / TUI 优雅忽略）**；此前批次已落地：**Web GUI 排队轮预取消（AskGate 票据化）**、**版本单一来源（`lib/version.ts`）**、**DeepSeek 官方 API 直连（网关三件套 + 思考量控制 + 429 退避）**、**工厂有界再生成 + 优雅降级**、**B 复用语义地板（`REUSE_AFFINITY_RATIO=0.3`）**、**工具库治理三动作（`org import` / `org keep` / `org drop`，CLI·TUI·Web 三端同权）**、**Web GUI 工程化重设计（Codex 风终端美学 + Markdown 渲染 + SSE 流式 + 排队取消）**、**OpenCode 级 TUI 驾驶舱**、**Windows/macOS/Linux 五目标单二进制分发**。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因、固化管线（精确匹配档 + 自动降级）全部落地。全叙事可复现（`org demo`，约 2.3s，model_calls 5→1→0）。
 
 ## 📑 目录
 
@@ -689,7 +689,7 @@ ORG 是 [HSL（Harness Specification Language）](https://github.com/myh2026/har
 
 ## 🎓 创新点（毕业论文核心）
 
-> 每条创新点附一句**实证**——全部来自本仓库真实代码、`org demo` 可复现叙事、185 个机制级测试与 DeepSeek 官方 API 的 E2E 实测记录（详见 [✅ 测试与验证状态](#-测试与验证状态)）。
+> 每条创新点附一句**实证**——全部来自本仓库真实代码、`org demo` 可复现叙事、205 个机制级测试与 DeepSeek 官方 API 的 E2E 实测记录（详见 [✅ 测试与验证状态](#-测试与验证状态)）。
 
 1. **Harness 即代码** —— 专家不是「提示词 + 工具白名单」，而是用 HSL 语言（BNF v1.5.0 严格文法）描述的可编译校验程序：node 是物理依赖、edge 是带守卫的消息通道、`#[capability]` 注解在编译期执行最小权限。**实证**：`org check` 对 hsl/ 源码 + dist/ 铸出专家共 34 个模块执行 dhv check（S1–S8 / G1–G6 / P 铁律 + S-20 字面量字段）全绿；v0.4.12 DeepSeek 实测中基座模型产出的 Rust 风格「harness」被结构闸门正确拒绝。
 2. **组织化多智能体监督回路** —— 分解 → 路由 → 派单（契约先行：交付物规格/验收标准/预算水位/返工上限）→ 审查（客观闸门先行 + 四态裁决 + 有界返工）→ 汇总 → 资产沉淀，主控为唯一手写内核，事件拓扑 microkernel。**实证**：`org demo` 全叙事 2.3s 复现 model_calls **5 → 1 → 0**、返工 1 → 1 → 0；README 走读与动力学点火测试逐条断言（tests/demo.test.ts 25 例 + dynamics.test.ts）。
@@ -700,11 +700,11 @@ ORG 是 [HSL（Harness Specification Language）](https://github.com/myh2026/har
 7. **治理铁律：调度权可绕，知情权与记账权不可绕** —— 团队/转接/直连三通道共享事件总线、独立记账科目、纪要回写三件不可协商义务；权限跟随委托链；能力天花板调升仅属用户（`ORG_CAPABILITY_APPROVED=1` 环境门）。**实证**：每次直连发 `direct_open`/`direct_close` 事件 + `direct-ledger.jsonl` 独立记账 + `runtime/direct-memos.md` 纪要回写；chat REPL 零旁路复用同一治理（v0.4.15）。
 8. **观测面三端贯通 + Codex 风格 ctx 窗口计量** —— CLI chat 流式 REPL / TUI 驾驶舱 / Web GUI（SSE）三端共享同一事件流与 token 级流式（reasoning / content / reset 三通道）；每轮 `[ctx] ▓░░ 8.4k/131.1k（6.4%）` 计量条 + 账本 `ctx_tokens` 字段 + `/compact` 上下文压缩。**实证**：DeepSeek E2E：chat REPL 思考 889 chars 流式指示 → 逐 token 正文 → `turn 1 · 47 tokens · 1.7s`；Web GUI 160 个 SSE delta 事件；848 行增量（1 reset + 357 reasoning + 490 content）保序落盘。
 9. **零依赖单二进制分发** —— `bun build --compile` 五目标交叉编译（linux-x64/arm64 · darwin-x64/arm64 · windows-x64）；hsl 源码 + vendored 解释器 + 工作区模板 + 剧本打包为 `build/payload.json` 随二进制分发，运行期按内容指纹解包 `~/.org/runtime-<sha1>/`；无 bun 环境自动切进程内车道（`$host.dhv.{check,run}`）。**实证**：无 bun 单二进制实测 `check` 全过 + 全叙事 `demo` 完整通过；`lib/version.ts` 版本单一来源根治「发版后某入口徽标忘改」的结构性漂移（v0.4.14 治理批次）。
-10. **双模型车道：scripted / deepseek** —— scripted 剧本轨道（`$host.fixture.next(track)` 按轨道名 + 序号消费）使全部机制 CI 可复现零外联、轨道名即观测面；deepseek 车道走 `$host.llm` 网关（OpenAI 兼容：鉴权 + 模型路由 + 超时 + 思考量控制 + 429 有界退避 + 流式 + 轨道归因）。**实证**：185 个机制级测试全绿零外联；DeepSeek 官方 API（deepseek-flash）直连问答 3.4s、团队模式全链路 176s（v0.4.13 E2E）。
+10. **双模型车道：scripted / deepseek** —— scripted 剧本轨道（`$host.fixture.next(track)` 按轨道名 + 序号消费）使全部机制 CI 可复现零外联、轨道名即观测面；deepseek 车道走 `$host.llm` 网关（OpenAI 兼容：鉴权 + 模型路由 + 超时 + 思考量控制 + 429 有界退避 + 流式 + 轨道归因）。**实证**：205 个机制级测试全绿零外联；DeepSeek 官方 API（deepseek-flash）直连问答 3.4s、团队模式全链路 176s（v0.4.13 E2E）。
 
 ## 🆚 对标主流 Agent
 
-与 codex / opencode / zcode 等主流终端 Agent 的交互面对标（ORG v0.4.15）：
+与 codex / opencode / zcode 等主流终端 Agent 的交互面对标（ORG v0.4.16）：
 
 | 维度 | codex | opencode | zcode | **ORG** |
 |:---|:---|:---|:---|:---|
@@ -713,15 +713,16 @@ ORG 是 [HSL（Harness Specification Language）](https://github.com/myh2026/har
 | 会话管理 | ✅ | ✅ | ✅ | ✅ 磁盘账本 `runtime/sessions/<expert>/<sid>.jsonl` + `/sessions` `/resume` + `org sessions` |
 | 上下文压缩 | ✅ compact | ✅ | ✅ | ✅ `/compact`：LLM 摘要 → 账本重写为单轮（`compacted:true`）+ 备份可回滚 |
 | 模型热切换 | ✅ `/model` | ✅ | ✅ | ✅ `/model` + 网关环境变量（OpenAI 兼容服务商即插即用） |
+| 模型/API 持久配置 | ✅ `~/.codex/config.toml` | ✅ `opencode.json` | 未见公开口径 | ✅ `org config`：`~/.org/config.json` + 六服务商预设（deepseek/openai/openrouter/ollama/lmstudio/vllm）+ 来源归因 + `org config test` 连通验证 + `default_lane` 缺省车道 |
 | 审批治理 | 部分（权限模式） | 部分 | 部分 | ✅ capability 三态（auto/confirm/deny）+ 权限跟随委托链 + 审计事件 + 能力变更仅用户批准 |
 | 事件溯源 | 运行日志 | 运行日志 | 运行日志 | ✅ journal 期刊（四阶段归类）+ **确定性重放** `org replay` |
 | 多智能体 | subagent 派发 | agent 配置 | agent 配置 | ✅ 组织化四阶段监督回路 + 派单契约 + 四态裁决 + 有界返工 |
 | harness 即代码 | 配置文件/提示词 | 配置文件 | 配置文件 | ✅ HSL 严格文法（BNF v1.5）+ `dhv check` 编译期闸门 |
 | 生成即资产 | ❌ 会话结束即弃 | ❌ | ❌ | ✅ 工厂现场铸造 + keep/drop/import 用户治理 + git 注册表版本链 |
 | 单二进制分发 | ✅ | ✅（npm 安装） | 未见公开口径 | ✅ bun compile 五目标 + payload 资源内嵌（无运行时依赖） |
-| 测试可复现性 | 部分 | 部分 | 部分 | ✅ scripted 剧本车道：185 测试 CI 零外联全绿 |
+| 测试可复现性 | 部分 | 部分 | 部分 | ✅ scripted 剧本车道：205 测试 CI 零外联全绿 |
 
-> 口径说明：codex / opencode / zcode 列基于各工具公开文档与默认行为的概括性判断（2026-09），「部分」表示该能力存在但非本表所述形态；ORG 列全部可在本仓库复现。ORG 的差异化不在交互面 parity（v0.4.15 已补齐），而在**资产层**：子智能体可生成、可验收、可复用、可演进。
+> 口径说明：codex / opencode / zcode 列基于各工具公开文档与默认行为的概括性判断（2026-09），「部分」表示该能力存在但非本表所述形态；ORG 列全部可在本仓库复现。ORG 的差异化不在交互面 parity（v0.4.15 已补齐，v0.4.16 补模型持久配置），而在**资产层**：子智能体可生成、可验收、可复用、可演进。
 
 ## 📂 文件结构树
 
@@ -771,7 +772,7 @@ org/
 ├── web/
 │   ├── entry.ts                        # ✦ Web GUI（Bun.serve 零依赖 · 端口 4600 · SSE 流式）
 │   └── gate.ts                         #   AskGate 排队票据化（预取消 · 不误伤运行轮）
-├── tests/                              # ✦ 185 个机制级测试（10 文件，见测试章节）
+├── tests/                              # ✦ 205 个机制级测试（11 文件，见测试章节）
 ├── toolchain/
 │   └── dhv-ts/                         # ✦ vendored HSL 解释器 v0.2.61（克隆即跑，零环境依赖）
 ├── scripts/
@@ -823,7 +824,7 @@ bun cli/org.ts chat
 ```bash
 bun cli/org.ts tui                                   # 终端驾驶舱（三区布局 + 事件卡片流）
 bun cli/org.ts web                                   # Web GUI（http://127.0.0.1:4600）
-bun test tests/                                      # 机制级测试（185 个）
+bun test tests/                                      # 机制级测试（205 个）
 bun cli/org.ts run --task "抓取某站点近一周公告，输出结构化表格"   # 团队模式派单
 bun cli/org.ts chat --model deepseek                 # 真实 LLM 流式对话（先配网关环境变量）
 ```
@@ -833,7 +834,34 @@ bun cli/org.ts chat --model deepseek                 # 真实 LLM 流式对话�
 
 ## 🔌 DeepSeek 真实模型接入
 
-scripted 车道之外，`--model deepseek` 把全部判定调用（分解 / 澄清 / 生成 / 审查 / 直连）切到真实 LLM。网关直连 **OpenAI 兼容服务商**（DeepSeek / OpenRouter / vLLM / Ollama …），环境变量即插即用：
+scripted 车道之外，`--model deepseek` 把全部判定调用（分解 / 澄清 / 生成 / 审查 / 直连）切到真实 LLM。网关直连 **OpenAI 兼容服务商**（DeepSeek / OpenRouter / vLLM / Ollama …）。
+
+### 方式一：org config（推荐 —— 持久化，免每次 export）
+
+```bash
+org config preset deepseek                # 一键写入 DeepSeek 官方预设（gateway + model）
+org config set api_key sk-***             # 填你的 key（写入 ~/.org/config.json，跨版本持久）
+org config test                           # 真实连通性验证（发一次 1-token 请求，配了没生效立即暴露）
+org config set default_lane deepseek      # 可选：设缺省车道 —— 之后免每次 --model
+bun cli/org.ts chat                        # 自动走 deepseek 真实车道
+```
+
+配置文件 `~/.org/config.json`（`ORG_CONFIG` 可重定向）；优先级 **CLI 旗标 > 环境变量 > 配置文件 > 内建缺省**（Unix 惯例：显式环境优先）。`org config`（无参）查看当前生效配置与**来源归因**（每项标注 ← 环境变量 / 配置文件 / 缺省）；api_key 显示自动脱敏（首 3 尾 4）。
+
+可用预设（`org config presets` 列出全部）：
+
+| 预设 | 端点 | 缺省模型 | 备注 |
+|:---|:---|:---|:---|
+| `deepseek` | `https://api.deepseek.com/v1` | `deepseek-flash` | api_key 必填 |
+| `openai` | `https://api.openai.com/v1` | `gpt-4o-mini` | 任何 OpenAI 协议端点 |
+| `openrouter` | `https://openrouter.ai/api/v1` | `openai/gpt-4o-mini` | 数百模型统一路由 |
+| `ollama` | `http://127.0.0.1:11434/v1` | （待填本地模型名） | 无需 key |
+| `lmstudio` | `http://127.0.0.1:1234/v1` | （待填） | 无需 key |
+| `vllm` | `http://127.0.0.1:8000/v1` | （待填 `--served-model-name`） | 自托管 |
+
+可配置项：`gateway` / `api_key` / `model` / `thinking` / `timeout_ms` / `default_lane`（别名 `api-key`、`key`、`lane`、`base_url` 均接受）。
+
+### 方式二：环境变量（临时 / CI 友好）
 
 | 环境变量 | 作用 | 示例 | 缺省行为 |
 |:---|:---|:---|:---|
@@ -883,6 +911,7 @@ bun cli/org.ts web --model deepseek                   # Web GUI（SSE delta 逐 
 | `org check` | dhv check 全部 HSL 源码（hsl/ 源码 + dist/ 产物中的铸出专家） | `bun cli/org.ts check` |
 | `org tui` | 组织驾驶舱（OpenCode 级终端前端）：三区布局 · 事件卡片流 | `bun cli/org.ts tui [":demo"\|":replay out-…"]` |
 | `org web` | Web GUI（Bun.serve 零依赖，默认 4600）：专家卡 + 会话侧栏 + 对话视图 + SSE 流式 | `bun cli/org.ts web --port 4600 --model deepseek --gateway http://127.0.0.1:3030/v1` |
+| `org config` | 用户模型/API 配置（~/.org/config.json 持久化）：预设一键接入 · 来源归因 · 连通测试 · 缺省车道 | `org config preset deepseek`<br>`… config set api_key sk-***`<br>`… config test`<br>`… config set default_lane deepseek` |
 
 通用 flag：`--workspace DIR`（工作区，缺省源码模式 `demo-run/`、单二进制 `~/.org/workspace`）· `--model scripted\|deepseek` · `--fixture FILE`（剧本覆盖，缺省导入剧本自动发现）。
 
@@ -890,7 +919,9 @@ bun cli/org.ts web --model deepseek                   # Web GUI（SSE delta 逐 
 
 | 变量 | 作用 |
 |:---|:---|
-| `DHV_LLM_GATEWAY` / `DHV_LLM_API_KEY` / `DHV_LLM_MODEL` / `DHV_LLM_THINKING` / `DHV_LLM_TIMEOUT_MS` | 真实模型网关五件套（见上节） |
+| `DHV_LLM_GATEWAY` / `DHV_LLM_API_KEY` / `DHV_LLM_MODEL` / `DHV_LLM_THINKING` / `DHV_LLM_TIMEOUT_MS` | 真实模型网关五件套（见上节；推荐改用 `org config` 持久化） |
+| `ORG_CONFIG` | 指定配置文件路径（缺省 `~/.org/config.json`） |
+| `ORG_DEFAULT_MODEL` | 缺省模型车道（`org config set default_lane` 的环境变量形态；未显式 `--model` 时接管） |
 | `ORG_CAPABILITY_APPROVED=1` | 批准能力变更补丁（仅用户可批准） |
 | `ORG_REDUNDANCY>=2` | 启用 N 版本冗余（镜像派单对比） |
 | `ORG_WORKSPACE` | 覆盖默认工作区 |
@@ -935,7 +966,7 @@ bun cli/org.ts web --model deepseek                   # Web GUI（SSE delta 逐 
 
 ## ✅ 测试与验证状态
 
-**机制级测试：185 / 185 全绿**（`bun test tests/`，10 文件 · 689 expect 断言 · 本地约 50s · CI 零外联——scripted 剧本车道）：
+**机制级测试：205 / 205 全绿**（`bun test tests/`，11 文件 · 689 expect 断言 · 本地约 50s · CI 零外联——scripted 剧本车道）：
 
 | 测试文件 | 覆盖面 |
 |:---|:---|
@@ -972,7 +1003,7 @@ org chat       # 交互式 REPL（scripted 车道免环境）
 
 ## 🧪 CI/CD
 
-- **push / PR**（`ci.yml`）：`dhv check` 全模块 → `bun test`（185 例）→ 三连跑冒烟 → `status` 冒烟 → `tui:smoke` → 产物上传 workflow artifact → **dist/ 有变化则自动回写提交**（`chore(dist): … [skip ci]`）；
+- **push / PR**（`ci.yml`）：`dhv check` 全模块 → `bun test`（205 例）→ 三连跑冒烟 → `status` 冒烟 → `tui:smoke` → 产物上传 workflow artifact → **dist/ 有变化则自动回写提交**（`chore(dist): … [skip ci]`）；
 - **tag `v*`**（`release.yml`）：同套校验 → 打包源码 + dist 产物 → **5 平台二进制矩阵构建** → 创建 GitHub Release（tar.gz + dist zip + 二进制，发布说明取 CHANGELOG 对应版本段落）；
 - 克隆仓库后无需跑 demo 即可 `check` 与 `status`（读 `dist/demo` 快照）——编译产物与源码同库交付。
 
@@ -1025,7 +1056,7 @@ MVP（P0+P1+P2）已达成且超额：最小可演示闭环——一个任务在
 YAML/JSON 描述**数据**，不描述**行为**：没有类型系统、没有拓扑校验、没有守卫语义，错误只能在运行期甚至上线后暴露。HSL（BNF v1.5.0 严格文法）让专家的标准作业程序成为可编译校验的程序——`dhv check` 在编译期拦截结构缺陷（S 严格性 / G 拓扑 / P 投射 / S-20 字面量字段），`#[capability]` 注解让最小权限可执行。机器生成的 harness 与人写的业务代码走**同一道质量闸门**，这是「生成必须过闸门」创新点的语言层地基。
 
 **Q2：scripted 模式是什么？和 mock 有什么区别？**
-scripted 是**确定性剧本车道**：`$host.fixture.next(track)` 按轨道名 + 序号消费预录响应（轨道名约定：`decompose / clarify / mint_spec / mint_hsl / mint_fixture / review:<role> / direct:<expert> / <expert>:<node>`）。区别于散落的 mock：① 轨道名即观测面——transcript 里每个判定调用可追溯到一个轨道/一次真实调用；② 剧本由 `scripts/make-fixture.ts` 从真实运行录制工程化产出；③ 全部 185 个机制级测试在 CI 零外联复现；④ 确定性重放 = 日志 + 代码版本。切真实 LLM 只需 `--model deepseek`，HSL 侧逻辑零变化。
+scripted 是**确定性剧本车道**：`$host.fixture.next(track)` 按轨道名 + 序号消费预录响应（轨道名约定：`decompose / clarify / mint_spec / mint_hsl / mint_fixture / review:<role> / direct:<expert> / <expert>:<node>`）。区别于散落的 mock：① 轨道名即观测面——transcript 里每个判定调用可追溯到一个轨道/一次真实调用；② 剧本由 `scripts/make-fixture.ts` 从真实运行录制工程化产出；③ 全部 205 个机制级测试在 CI 零外联复现；④ 确定性重放 = 日志 + 代码版本。切真实 LLM 只需 `--model deepseek`，HSL 侧逻辑零变化。
 
 **Q3：如何给系统加一个新专家？**
 三条路：① **`org import my-tool.hsl`**——写一个信封契约的 harness（`fn main() -> Result<(), ExpertError>`，`$host.artifacts.write("acceptance.json", …)` 产出验收工件），check 绿即入库、即刻可复用（导入即保留 ◆）；② **让工厂现场铸造**——`org run` 派一个库中无匹配的子任务，C 路径自动走 mint 流水线（LLM 生成 → check → Exam → 注册候选 ○，`org keep` 转正 ★）；③ **手写放入 `hsl/registry/experts/`** 并在 manifest 登记（随 ORG 发行，进程内车道）。

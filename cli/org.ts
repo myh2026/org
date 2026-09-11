@@ -31,6 +31,9 @@ import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          loadRegistryIndex, setRetained, keepAllCandidates,
          importHarness, listContextUsage, renderContextMeter, expertFixtureOf } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
+import { configPath, loadConfig, setConfigValue, unsetConfigValue, applyPreset,
+         effectiveValue, applyConfigToEnv, CONFIG_KEYS, PRESETS, maskSecret,
+         normalizeKey } from "../lib/config.ts"; // 用户模型/API 配置（v0.4.16）
 
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
@@ -104,6 +107,7 @@ function parseArgs(argv: string[]): Args {
     description: "",
     capabilities: [],
     fixtureExplicit: false,
+    modelExplicit: false,
     rest: [],
   };
   let i = 1;
@@ -112,7 +116,7 @@ function parseArgs(argv: string[]): Args {
     if (v === "--task") a.task = argv[++i] ?? "";
     else if (v === "--workspace") a.workspace = path.resolve(argv[++i] ?? ".");
     else if (v === "--fixture") { a.fixture = path.resolve(argv[++i] ?? "."); a.fixtureExplicit = true; }
-    else if (v === "--model") a.model = argv[++i] ?? "scripted";
+    else if (v === "--model") { a.model = argv[++i] ?? "scripted"; a.modelExplicit = true; }
     else if (v === "--out") a.out = path.resolve(argv[++i] ?? ".");
     else if (v === "--run") a.runDir = path.resolve(argv[++i] ?? ".");
     else if (v === "--axis") a.axis = argv[++i] ?? "";
@@ -788,9 +792,129 @@ async function cmdSessions(a: Args): Promise<number> {
   return 0;
 }
 
+// ---- org config：用户模型/API 配置（v0.4.16） ----------------------------
+async function cmdConfig(a: Args): Promise<number> {
+  const [verb, ...rest] = a.rest;
+  const file = configPath();
+
+  if (verb === undefined || verb === "list" || verb === "get") {
+    // 查看当前生效配置（值 + 来源归因：env > file > default）
+    if (verb === "get") {
+      const key = normalizeKey(rest[0] ?? "");
+      if (!key) { console.error(`✗ 未知配置项：${rest[0] ?? ""}（可配置项：${CONFIG_KEYS.join(", ")}）`); return 2; }
+      const { value, source } = effectiveValue(key);
+      console.log(key === "api_key" ? maskSecret(value) : value);
+      if (process.stderr.isTTY) console.error(`  （来源：${source}）`);
+      return 0;
+    }
+    const cfg = loadConfig();
+    const exists = fs.existsSync(file);
+    console.log(`ORG 用户配置 —— ${file}${exists ? "" : "（不存在，全部走缺省）"}\n`);
+    const LABELS: Record<string, string> = {
+      gateway: "网关端点", api_key: "鉴权密钥", model: "模型名",
+      thinking: "思考档位", timeout_ms: "超时(ms)", default_lane: "缺省车道",
+    };
+    for (const k of CONFIG_KEYS) {
+      const { value, source } = effectiveValue(k, cfg);
+      const shown = k === "api_key" ? maskSecret(value) : value;
+      const srcLabel = source === "env" ? "环境变量" : source === "file" ? "配置文件" : "缺省";
+      console.log(`  ${String(k).padEnd(13)} ${LABELS[k]}：${shown.length > 0 ? shown : "（未配置）"}   ← ${srcLabel}`);
+    }
+    const preset = Object.entries(PRESETS).find(([, p]) => p.gateway === effectiveValue("gateway", cfg).value)?.[0];
+    if (preset) console.log(`\n  已匹配预设：${preset}（${PRESETS[preset]!.label}）`);
+    console.log(`\n  命令：org config set <key> <value> · org config preset <name> · org config test`);
+    console.log(`  预设：${Object.keys(PRESETS).join(" · ")}`);
+    return 0;
+  }
+
+  if (verb === "set" || verb === "unset") {
+    if (verb === "set") {
+      const key = setConfigValue(rest[0] ?? "", rest[1] ?? "");
+      if (!key) { console.error(`✗ 未知配置项：${rest[0] ?? ""}（可配置项：${CONFIG_KEYS.join(", ")}；别名 key/lane/base_url 也接受）`); return 2; }
+      const shown = key === "api_key" ? maskSecret(rest[1] ?? "") : rest[1] ?? "";
+      console.log(`✓ ${key} = ${shown}（已写入 ${path.basename(file)}）`);
+      return 0;
+    }
+    const key = unsetConfigValue(rest[0] ?? "");
+    if (!key) { console.error(`✗ 未知配置项：${rest[0] ?? ""}`); return 2; }
+    console.log(`✓ ${key} 已清空（${path.basename(file)}）`);
+    return 0;
+  }
+
+  if (verb === "preset" || verb === "presets") {
+    if (verb === "presets" || rest.length === 0) {
+      console.log("可用预设：\n");
+      for (const [name, p] of Object.entries(PRESETS)) {
+        console.log(`  ${name.padEnd(11)} ${p.label}`);
+        console.log(`              ${p.gateway}${p.model ? ` · ${p.model}` : ""}`);
+        console.log(`              ${p.note}`);
+      }
+      return 0;
+    }
+    const name = applyPreset(rest[0] ?? "");
+    if (!name) { console.error(`✗ 未知预设：${rest[0]}（org config presets 查看全部）`); return 2; }
+    const p = PRESETS[name]!;
+    console.log(`✓ 已应用预设 ${name} —— ${p.label}`);
+    console.log(`  gateway = ${p.gateway}`);
+    console.log(`  model   = ${p.model.length > 0 ? p.model : "（待填：org config set model <本地模型名>）"}`);
+    console.log(`  ${p.note}`);
+    if (p.note.includes("必填")) console.log(`  下一步：org config set api_key <你的密钥>`);
+    return 0;
+  }
+
+  if (verb === "path") {
+    console.log(file);
+    return 0;
+  }
+
+  if (verb === "test") {
+    // 真实连通性测试：当前生效配置发一次 1-token 请求（「配了没生效」立即暴露）
+    const { value: gateway } = effectiveValue("gateway");
+    const { value: apiKey } = effectiveValue("api_key");
+    const { value: model } = effectiveValue("model");
+    if (gateway.length === 0) { console.error("✗ 未配置网关（org config preset <name> 或 org config set gateway <url>）"); return 2; }
+    if (model.length === 0) { console.error("✗ 未配置模型名（org config set model <name>）"); return 2; }
+    console.log(`→ POST ${gateway}/chat/completions · model=${model} · 鉴权${apiKey ? "✓" : "（无 key，按匿名处理）"}`);
+    const t0 = Date.now();
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 30_000);
+      const res = await fetch(`${gateway.replace(/\/+$/, "")}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+        body: JSON.stringify({ model, stream: false, max_tokens: 8, messages: [{ role: "user", content: "回复一个字：好" }] }),
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      const ms = Date.now() - t0;
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        console.error(`✗ HTTP ${res.status}（${ms}ms）${body.slice(0, 200)}`);
+        return 1;
+      }
+      const data = await res.json() as { choices?: Array<{ message?: { content?: string } }>; usage?: { total_tokens?: number } };
+      const content = data.choices?.[0]?.message?.content ?? "";
+      console.log(`✓ 连通正常（${ms}ms · 回复「${content.trim().slice(0, 20)}」 · tokens=${data.usage?.total_tokens ?? "?"}）`);
+      return 0;
+    } catch (e) {
+      console.error(`✗ 请求失败（${Date.now() - t0}ms）：${(e as Error).message}`);
+      return 1;
+    }
+  }
+
+  console.error(`✗ 未知子命令：${verb}（可用：get/list/set/unset/preset/presets/path/test）`);
+  return 2;
+}
+
 async function main(): Promise<number> {
   const [cmd, ...rest] = process.argv.slice(2);
   const a = parseArgs([cmd ?? "help", ...rest]);
+  // 启动即注入用户配置（环境变量优先，配置文件填空）—— 全部子命令/子进程继承
+  if (a.cmd !== "config") applyConfigToEnv();
+  // 缺省车道（org config set default_lane deepseek）：未显式 --model 时接管缺省
+  if (!a.modelExplicit && (process.env.ORG_DEFAULT_MODEL ?? "").trim().length > 0) {
+    a.model = process.env.ORG_DEFAULT_MODEL!.trim();
+  }
   switch (a.cmd) {
     case "run": return cmdRun(a);
     case "demo": return cmdDemo(a);
@@ -807,6 +931,7 @@ async function main(): Promise<number> {
     case "web": return cmdWeb(a);
     case "chat": return cmdChat(a);
     case "sessions": return cmdSessions(a);
+    case "config": return cmdConfig(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -847,13 +972,19 @@ async function main(): Promise<number> {
   org web [--port N] [--workspace DIR]
       Web GUI 原型（Bun.serve 零依赖，默认 4600）：专家卡 + 会话侧栏 + 对话
       视图（观测元数据 tokens/耗时/ctx 窗口计量；scripted 占位剧本秒回）
+  org config [list|get|set|unset|preset|presets|path|test]
+      用户模型/API 配置（~/.org/config.json，跨版本持久）：服务商预设
+      （deepseek/openai/openrouter/ollama/lmstudio/vllm）· 环境变量优先级
+      env > 配置文件 · org config test 真实连通性验证 · default_lane 设
+      缺省模型车道（免每次 --model）
 
 仓库布局：hsl/ = HSL 源码；toolchain/dhv-ts = 内嵌解释器（vendored）；
           demo-run/ = 本地构建目录（git 忽略）；dist/ = 编译产物（入库）
 
 环境变量：ORG_CAPABILITY_APPROVED=1 批准能力变更补丁（仅用户）；
           ORG_REDUNDANCY>=2 启用 N 版本冗余；
-          DHV_TS 覆盖内嵌工具链。`);
+          DHV_TS 覆盖内嵌工具链；
+          模型配置优先用 org config（持久化）：ORG_CONFIG 指定配置文件路径。`);
       return 0;
   }
 }

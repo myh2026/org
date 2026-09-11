@@ -180,20 +180,29 @@ function clearLine(): void {
 
 /** 入口：org chat [expert] [--session id] [--model m] [--continue]。 */
 export async function chatMain(argv: string[]): Promise<number> {
+  // 用户配置注入（独立入口 bun cli/chat.ts 直跑也享受 org config；
+  // 经 org.ts 进入时 main() 已注入，此处幂等填空不重复覆盖）
+  const { applyConfigToEnv } = await import("../lib/config.ts");
+  applyConfigToEnv();
   let expert = "";
   let session = "";
   let model = "scripted";
+  let modelExplicit = false;
   let workspace = "";
   let cont = false;
   let i = 0;
   while (i < argv.length) {
     const v = argv[i]!;
     if (v === "--session") session = argv[++i] ?? "";
-    else if (v === "--model") model = argv[++i] ?? "scripted";
+    else if (v === "--model") { model = argv[++i] ?? "scripted"; modelExplicit = true; }
     else if (v === "--workspace") workspace = path.resolve(argv[++i] ?? ".");
     else if (v === "--continue" || v === "-c") cont = true;
     else if (v.length > 0 && !v.startsWith("--")) expert = v;
     i++;
+  }
+  // 缺省车道（org config set default_lane deepseek）：未显式 --model 时接管
+  if (!modelExplicit && (process.env.ORG_DEFAULT_MODEL ?? "").trim().length > 0) {
+    model = process.env.ORG_DEFAULT_MODEL!.trim();
   }
   if (!workspace) {
     const { DEFAULT_WORKSPACE } = await import("../lib/root.ts");
