@@ -1,0 +1,422 @@
+/// changelog-parser — Conventional Commits 解析与版本推断引擎
+/// 解析 git log 提交流（hash/author/message），按 Conventional Commits
+/// 分类（feat/fix/docs/style/refactor/perf/test/chore），检测 BREAKING
+/// CHANGE（独立段或 type 后 `!`），推断下一版本号（major/minor/patch），
+/// 产出 Markdown changelog 与结构化统计。
+#[capability(parse)]
+#[capability(classify)]
+#[capability(versioning)]
+
+#[derive(Debug, Clone)]
+struct Classified {
+    hash: String,
+    author: String,
+    kind: String,
+    scope: String,
+    subject: String,
+    breaking: bool,
+}
+
+#[derive(Debug, Clone)]
+struct Stats {
+    feat: u32,
+    fix: u32,
+    docs: u32,
+    style: u32,
+    refactor: u32,
+    perf: u32,
+    test: u32,
+    chore: u32,
+    other: u32,
+    breaking: u32,
+}
+
+fn empty_stats() -> Stats {
+    Stats {
+        feat: 0,
+        fix: 0,
+        docs: 0,
+        style: 0,
+        refactor: 0,
+        perf: 0,
+        test: 0,
+        chore: 0,
+        other: 0,
+        breaking: 0,
+    }
+}
+
+fn to_u32(text: String) -> u32 {
+    let out = native typescript {
+        const n = parseInt(text, 10);
+        return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+    };
+    out
+}
+
+/// type 必须是纯字母（防止 hash 碰撞误判）：逐字符 is_alphabetic
+fn all_alphabetic(word: String) -> bool {
+    if word.len() == 0 {
+        return false;
+    }
+    let cs: Vec<String> = word.chars();
+    for c in cs.iter() {
+        if c.is_alphabetic() == false {
+            return false;
+        }
+    }
+    true
+}
+
+/// 从 header 行解析 type/scope/breaking/subject：
+///   `feat(parser)!: subject` → type=feat scope=parser breaking=true
+fn parse_header(line: String) -> (String, String, bool, String) {
+    // 冒号分割：冒号前是 header，之后是 subject（split_once 一次到位）
+    let split = line.split_once(":");
+    let (header, subject) = match split {
+        Some((h, s)) => (h.clone(), s.clone().trim()),
+        None => {
+            // 非常规提交：整行作 subject，kind=other
+            return (String::from("other"), String::new(), false, line.clone());
+        }
+    };
+
+    // header 内解析 type(scope)! 或 type! 或 type
+    let mut breaking = false;
+    let mut core = header.clone();
+    if core.ends_with("!") {
+        breaking = true;
+        core = core.strip_suffix("!").unwrap_or(core.clone());
+    }
+    let mut scope = String::new();
+    let mut ctype = core.clone();
+    if core.ends_with(")") {
+        // 找配对 '(' —— 从尾向前逐字符
+        let cs: Vec<String> = core.chars();
+        let mut j: i64 = cs.len() as i64 - 2;
+        let mut found: i64 = -1;
+        while j >= 0 {
+            let c = cs[j];
+            if c == "(" {
+                found = j;
+                break;
+            }
+            j -= 1;
+        }
+        if found >= 0 {
+            let mut before: Vec<String> = Vec::new();
+            let mut t: u32 = 0;
+            while t < found as u32 {
+                before.push(cs[t].clone());
+                t += 1;
+            }
+            let mut after: Vec<String> = Vec::new();
+            let mut k: u32 = found as u32 + 1;
+            while k < cs.len() as u32 - 1 {
+                after.push(cs[k].clone());
+                k += 1;
+            }
+            ctype = before.join("");
+            scope = after.join("");
+        }
+    }
+    let final_type = ctype.trim();
+    let final_scope = scope.trim();
+    if all_alphabetic(final_type.clone()) == false {
+        return (String::from("other"), String::new(), false, subject.clone());
+    }
+    (final_type.to_lowercase(), final_scope, breaking, subject.clone())
+}
+
+/// 整条消息的 BREAKING 检测：独立脚注段 `BREAKING CHANGE: ...`
+fn message_has_breaking(message: String) -> bool {
+    message.contains("BREAKING CHANGE") || message.contains("BREAKING-CHANGE")
+}
+
+/// 提取首行（header 行）
+fn first_line(message: String) -> String {
+    let ls: Vec<String> = message.lines();
+    if ls.len() == 0 {
+        return String::new();
+    }
+    ls[0].clone()
+}
+
+/// 推断下一版本：SemVer 惯例（有 BREAKING → major；有 feat → minor；其余 → patch）
+fn next_version(baseline: String, stats: Stats) -> String {
+    let parts: Vec<String> = baseline.split(".");
+    let mut major: u32 = 0;
+    let mut minor: u32 = 0;
+    let mut patch: u32 = 0;
+    if parts.len() == 3 {
+        major = to_u32(parts[0].clone());
+        minor = to_u32(parts[1].clone());
+        patch = to_u32(parts[2].clone());
+    }
+    if stats.breaking > 0 {
+        major += 1;
+        return format!("{}.0.0", major);
+    }
+    if stats.feat > 0 {
+        minor += 1;
+        return format!("{}.{}.0", major, minor);
+    }
+    patch += 1;
+    format!("{}.{}.{}", major, minor, patch)
+}
+
+fn section_title(kind: String) -> String {
+    match kind.as_str() {
+        "feat" => String::from("✨ Features"),
+        "fix" => String::from("🐛 Bug Fixes"),
+        "perf" => String::from("⚡ Performance"),
+        "refactor" => String::from("♻️ Refactoring"),
+        "docs" => String::from("📚 Documentation"),
+        "style" => String::from("💎 Style"),
+        "test" => String::from("🧪 Tests"),
+        "chore" => String::from("🔧 Chores"),
+        _ => String::from("📦 Other"),
+    }
+}
+
+export fn main() -> Result<(), String> {
+    // ---- 工单读取（org 信封契约：factory/current-spec.json）----
+    let spec_json: String = native typescript {
+        try {
+            return $host.fs.read("factory/current-spec.json");
+        } catch (e) {
+            return "";
+        }
+    };
+    if spec_json.len() == 0 {
+        return Err(String::from("factory/current-spec.json 缺失（工单未落盘）"));
+    }
+    let fields: HashMap<String, String> = native typescript {
+        try {
+            const m = new Map();
+            const obj = JSON.parse(spec_json);
+            for (const [k, v] of Object.entries(obj)) {
+                m.set(k, v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
+            }
+            return m;
+        } catch (e) {
+            const m = new Map();
+            m.set("error", String(e && e.message || e));
+            return m;
+        }
+    };
+    if fields.contains_key(String::from("error")) {
+        return Err(format!("工单不是合法 JSON：{}", fields.get(String::from("error")).unwrap_or(String::from("?"))));
+    }
+    let payload_raw = fields.get(String::from("payload")).unwrap_or(String::from("[]"));
+
+    // payload 既可是 commit 对象数组，也可是 { baseline, commits } 包装
+    let baseline: String = native typescript {
+        try {
+            const obj = JSON.parse(payload_raw);
+            if (obj && typeof obj === "object" && !Array.isArray(obj) && obj.baseline) {
+                return String(obj.baseline);
+            }
+            return "0.0.0";
+        } catch (e) {
+            return "0.0.0";
+        }
+    };
+    let mut commits_raw = payload_raw.clone();
+    let wrapped = native typescript {
+        try {
+            const obj = JSON.parse(payload_raw);
+            return obj && typeof obj === "object" && !Array.isArray(obj) && Array.isArray(obj.commits) ? true : false;
+        } catch (e) {
+            return false;
+        }
+    };
+    if wrapped {
+        commits_raw = native typescript {
+            const obj = JSON.parse(payload_raw);
+            return JSON.stringify(obj.commits);
+        };
+    }
+
+    let commits: Vec<HashMap<String, String>> = native typescript {
+        try {
+            const arr = JSON.parse(commits_raw);
+            if (Array.isArray(arr) === false) return [];
+            return arr.map((c) => {
+                const m = new Map();
+                m.set("hash", String(c.hash || ""));
+                m.set("author", String(c.author || ""));
+                m.set("message", String(c.message || ""));
+                return m;
+            });
+        } catch (e) {
+            return [];
+        }
+    };
+
+    // ---- 分类流水线（纯 HSL 状态机，零模型调用）----
+    let mut classified: Vec<Classified> = Vec::new();
+    for c in commits.iter() {
+        let message = c.get(String::from("message")).unwrap_or(String::new());
+        let header = first_line(message.clone());
+        let (ctype, scope, bang_breaking, subject) = parse_header(header);
+        let breaking = bang_breaking || message_has_breaking(message.clone());
+        classified.push(Classified {
+            hash: c.get(String::from("hash")).unwrap_or(String::new()),
+            author: c.get(String::from("author")).unwrap_or(String::new()),
+            kind: ctype,
+            scope: scope,
+            subject: subject,
+            breaking: breaking,
+        });
+    }
+
+    // ---- 统计 ----
+    let mut stats = empty_stats();
+    for cl in classified.iter() {
+        match cl.kind.as_str() {
+            "feat" => stats.feat += 1,
+            "fix" => stats.fix += 1,
+            "perf" => stats.perf += 1,
+            "refactor" => stats.refactor += 1,
+            "docs" => stats.docs += 1,
+            "style" => stats.style += 1,
+            "test" => stats.test += 1,
+            "chore" => stats.chore += 1,
+            _ => stats.other += 1,
+        }
+        if cl.breaking {
+            stats.breaking += 1;
+        }
+    }
+
+    // ---- 贡献者（去重）----
+    let mut authors: Vec<String> = Vec::new();
+    for cl in classified.iter() {
+        if cl.author.len() > 0 && authors.contains(cl.author.clone()) == false {
+            authors.push(cl.author.clone());
+        }
+    }
+
+    // ---- 版本推断 ----
+    let version = next_version(baseline.clone(), stats.clone());
+
+    // ---- Markdown changelog 生成（按 kind 重要性排序输出）----
+    let order: Vec<String> = vec![
+        String::from("feat"),
+        String::from("fix"),
+        String::from("perf"),
+        String::from("refactor"),
+        String::from("docs"),
+        String::from("style"),
+        String::from("test"),
+        String::from("chore"),
+        String::from("other"),
+    ];
+    let mut md = format!("# Changelog\n\n## {}\n\n", version);
+    md.push_str(format!("- 提交总数：{}（贡献者 {} 人：{}）\n", classified.len(), authors.len(), authors.join(", ")).as_str());
+    if stats.breaking > 0 {
+        md.push_str(format!("- ⚠️ **BREAKING CHANGE × {}** —— 大版本变更\n", stats.breaking).as_str());
+    }
+    md.push('\n');
+    for kind in order.iter() {
+        let mut bucket: Vec<Classified> = Vec::new();
+        for cl in classified.iter() {
+            if cl.kind == kind.clone() {
+                bucket.push(cl.clone());
+            }
+        }
+        if bucket.len() == 0 {
+            continue;
+        }
+        md.push_str(format!("### {}\n\n", section_title(kind.clone())).as_str());
+        for cl in bucket.iter() {
+            let scope_note = if cl.scope.len() > 0 {
+                format!("**{}** ", cl.scope)
+            } else {
+                String::new()
+            };
+            let break_note = if cl.breaking {
+                String::from(" **[BREAKING]**")
+            } else {
+                String::new()
+            };
+            md.push_str(format!("- {}{}{}（`{}` @{}）\n", scope_note, cl.subject, break_note, cl.hash, cl.author).as_str());
+        }
+        md.push('\n');
+    }
+
+    // ---- 输出工件 ----
+    let stats_json = format!(
+        "{{\"commits\":{},\"version\":\"{}\",\"baseline\":\"{}\",\"feat\":{},\"fix\":{},\"perf\":{},\"refactor\":{},\"docs\":{},\"style\":{},\"test\":{},\"chore\":{},\"other\":{},\"breaking\":{},\"authors\":{}}}",
+        classified.len(), version, baseline,
+        stats.feat, stats.fix, stats.perf, stats.refactor, stats.docs,
+        stats.style, stats.test, stats.chore, stats.other, stats.breaking,
+        authors.len()
+    );
+    let _ = native typescript {
+        $host.artifacts.write("changelog.md", md);
+        return true;
+    };
+    let _ = native typescript {
+        $host.artifacts.write("changelog-stats.json", stats_json);
+        return true;
+    };
+    println!("[changelog-parser] {} commits → v{}（feat {} · fix {} · breaking {} · authors {}）",
+        classified.len(), version, stats.feat, stats.fix, stats.breaking, authors.len());
+    Ok(())
+}
+
+// ============================================================================
+// project 投射块：核心数据结构（Classified / Stats）× 38 后端全量散布
+// （综合项目演示：一次定义，38 语言投射 —— dhv-ts emit 驱动）
+// ============================================================================
+project {
+    // ---- Tier 1 · Harness 核心（10）----
+    Classified       -> "gen/python/classified.py"       : python,
+    Classified       -> "gen/typescript/classified.ts"   : typescript,
+    Classified       -> "gen/javascript/classified.js"   : javascript,
+    Classified       -> "gen/rust/classified.rs"         : rust,
+    Classified       -> "gen/go/classified.go"           : go,
+    Classified       -> "gen/cpp/classified.cpp"         : cpp,
+    Classified       -> "gen/java/Classified.java"       : java,
+    Classified       -> "gen/csharp/Classified.cs"       : csharp,
+    Classified       -> "gen/kotlin/Classified.kt"       : kotlin,
+    Classified       -> "gen/swift/Classified.swift"     : swift,
+    // ---- Tier 2 · 脚本与动态（8）----
+    Classified       -> "gen/ruby/classified.rb"         : ruby,
+    Classified       -> "gen/php/Classified.php"         : php,
+    Classified       -> "gen/lua/classified.lua"         : lua,
+    Classified       -> "gen/perl/Classified.pl"         : perl,
+    Classified       -> "gen/bash/classified.sh"         : bash,
+    Classified       -> "gen/powershell/Classified.ps1"  : powershell,
+    Classified       -> "gen/r/classified.R"             : r,
+    Classified       -> "gen/julia/classified.jl"        : julia,
+    // ---- Tier 3 · 函数式（6）----
+    Classified       -> "gen/scala/Classified.scala"     : scala,
+    Classified       -> "gen/elixir/classified.ex"       : elixir,
+    Classified       -> "gen/erlang/classified.erl"      : erlang,
+    Classified       -> "gen/haskell/Classified.hs"      : haskell,
+    Classified       -> "gen/ocaml/classified.ml"        : ocaml,
+    Classified       -> "gen/fsharp/Classified.fs"       : fsharp,
+    // ---- Tier 4 · 系统与现代（8）----
+    Classified       -> "gen/zig/classified.zig"         : zig,
+    Classified       -> "gen/nim/classified.nim"         : nim,
+    Classified       -> "gen/crystal/classified.cr"      : crystal,
+    Classified       -> "gen/dart/classified.dart"       : dart,
+    Classified       -> "gen/groovy/Classified.groovy"   : groovy,
+    Classified       -> "gen/objectivec/Classified.m"    : objectivec,
+    Classified       -> "gen/d/classified.d"             : d,
+    Classified       -> "gen/vb/Classified.vb"           : vb,
+    // ---- Stats × 主力八语言（统计口径结构跨语言对齐）----
+    Stats            -> "gen/python/stats.py"            : python,
+    Stats            -> "gen/typescript/stats.ts"        : typescript,
+    Stats            -> "gen/javascript/stats.js"        : javascript,
+    Stats            -> "gen/rust/stats.rs"              : rust,
+    Stats            -> "gen/go/stats.go"                : go,
+    Stats            -> "gen/cpp/stats.cpp"              : cpp,
+    Stats            -> "gen/java/Stats.java"            : java,
+    Stats            -> "gen/csharp/Stats.cs"            : csharp,
+    Stats            -> "gen/kotlin/Stats.kt"            : kotlin,
+    Stats            -> "gen/swift/Stats.swift"          : swift,
+}
