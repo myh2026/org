@@ -1,5 +1,5 @@
-{"seq":0,"ts":"2026-09-11T13:33:20.007Z","name":"run_start","data":{"entry":"/home/runner/work/org/org/hsl/pool/handoff.hsl","model":"scripted","task":"(handoff) small request","scale":"microkernel"}}
-{"seq":1,"ts":"2026-09-11T13:33:20.015Z","name":"capability_granted","data":{"capability":"llm_call","mode":"orchestrated"}}
-{"seq":2,"ts":"2026-09-11T13:33:20.015Z","name":"journal","data":{"name":"handoff_open","detail":"notice-parser"}}
-{"seq":3,"ts":"2026-09-11T13:33:20.019Z","name":"journal","data":{"name":"handoff_close","detail":"notice-parser"}}
-{"seq":4,"ts":"2026-09-11T13:33:20.029Z","name":"run_end","data":{"elapsed_ms":22,"ok":true}}
+{"seq":0,"ts":"2026-09-11T13:56:30.863Z","name":"run_start","data":{"entry":"/home/runner/work/org/org/hsl/pool/handoff.hsl","model":"scripted","task":"(handoff) small request","scale":"microkernel"}}
+{"seq":1,"ts":"2026-09-11T13:56:30.871Z","name":"capability_granted","data":{"capability":"llm_call","mode":"orchestrated"}}
+{"seq":2,"ts":"2026-09-11T13:56:30.871Z","name":"journal","data":{"name":"handoff_open","detail":"notice-parser"}}
+{"seq":3,"ts":"2026-09-11T13:56:30.875Z","name":"journal","data":{"name":"handoff_close","detail":"notice-parser"}}
+{"seq":4,"ts":"2026-09-11T13:56:30.884Z","name":"run_end","data":{"elapsed_ms":21,"ok":true}}
