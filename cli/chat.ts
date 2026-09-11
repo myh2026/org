@@ -634,3 +634,12 @@ async function runCompact(state: ChatOpts): Promise<void> {
     }
   }
 }
+
+// ----------------------------------------------------------------------------
+// 独立入口：bun cli/chat.ts 直接运行时也走 chatMain（与 org chat 等价）。
+// 此前直接运行该文件会静默退出（只定义函数、无调用）——实测发现并修复。
+// 被 org.ts 动态 import 时 import.meta.main 为 false，不会重复执行。
+// ----------------------------------------------------------------------------
+if (import.meta.main) {
+  process.exitCode = await chatMain(process.argv.slice(2));
+}
