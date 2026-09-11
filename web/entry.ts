@@ -37,6 +37,7 @@ import {
   ensureWorkspace, loadRegistryIndex, listContextUsage,
   expertFixtureOf, dhvRun, resolveDhv, resolveBun, setRetained,
 } from "../lib/engine.ts";
+import { tailLines } from "../lib/events.ts";
 import { AskGate, QueueCancelledError } from "./gate.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14 漂移治理：此前本文件落后两版）
 
@@ -315,11 +316,14 @@ export const ASK_STAGES = [
  *  spawn 车道用 ReadableStream.getReader() 增量读 stdout/stderr，
  *  每凑齐一行即回调 onLog（banner/配置行到达即推，deepseek 长回答
  *  期间 GUI 不再黑盒等待）；进程内车道（ORG_FORCE_INPROC）无增量
- *  输出，仅返回最终结果（SSE 端点用 stage 事件填充等待期）。 */
+ *  输出，仅返回最终结果（SSE 端点用 stage 事件填充等待期）。
+ *  v0.4.15：onDelta —— llm-stream.jsonl 尾随（宿主流式车道逐 token 增量），
+ *  reasoning/content/reset 三通道；GUI 逐 token 渲染正文 + 思考指示器。 */
 async function askStreamOnce(
   ws: string,
   req: { expert: string; question: string; session: string; model: string },
   onLog: (line: string) => void,
+  onDelta?: (channel: "reasoning" | "content" | "reset", delta: string) => void,
 ): Promise<AskOutcome> {
   ensureWorkspace(ws);
   const env: Record<string, string> = {
@@ -352,6 +356,9 @@ async function askStreamOnce(
     const proc = Bun.spawn([bun, dhv, ...args], { env: full, stdout: "pipe", stderr: "pipe" });
     runningProc = proc;
     const chunks: string[] = [];
+    // v0.4.15：llm-stream.jsonl 尾随泵（120ms）—— 宿主流式车道的逐 token
+    // 增量（deepseek 网关车道）；scripted/无网关时文件不出现，泵空转零成本。
+    const streamTailer = startLlmStreamTailer(path.join(ws, "out-ask"), onDelta);
     // 行缓冲泵：chunk → 完整行（含跨 chunk 的半行拼接），逐行回调 + 原文留档
     const pump = async (stream: ReadableStream<Uint8Array>): Promise<void> => {
       const reader = stream.getReader();
@@ -383,6 +390,8 @@ async function askStreamOnce(
         pump(proc.stderr as unknown as ReadableStream<Uint8Array>),
       ]);
     } finally {
+      streamTailer.stop();
+      streamTailer.flush(); // 收尾冲刷：退出与最后一帧增量之间的竞态窗口补齐
       runningProc = null;
     }
     return parseAskOut(chunks.join(""));
@@ -390,6 +399,34 @@ async function askStreamOnce(
   // 进程内车道：无增量输出，走 dhvRun 拿最终结果
   const r = await dhvRun(args, env);
   return parseAskOut(r.out);
+}
+
+/** llm-stream.jsonl 尾随泵（v0.4.15）：宿主流式车道的逐 token 增量 →
+ *  onDelta 回调（reasoning/content/reset）。120ms 轮询 tailLines 语义
+ *  （只取完整行，半行留待下次）；scripted/无网关时文件不出现，空转零成本。 */
+function startLlmStreamTailer(
+  outDir: string,
+  onDelta?: (channel: "reasoning" | "content" | "reset", delta: string) => void,
+): { stop(): void; flush(): void } {
+  if (!onDelta) return { stop(): void {}, flush(): void {} };
+  const file = path.join(outDir, "llm-stream.jsonl");
+  let offset = 0;
+  const drain = (): void => {
+    const t = tailLines(file, offset);
+    offset = t.next;
+    for (const line of t.lines) {
+      try {
+        const o = JSON.parse(line) as { kind?: string; delta?: string };
+        const kind = o.kind === "reasoning" || o.kind === "reset" ? o.kind : "content";
+        onDelta(kind, String(o.delta ?? ""));
+      } catch { /* 坏行容忍 */ }
+    }
+  };
+  const timer = setInterval(drain, 120);
+  return {
+    stop(): void { clearInterval(timer); },
+    flush(): void { drain(); },
+  };
 }
 
 // ---- HTTP 服务 ----
@@ -407,6 +444,8 @@ function json(res: Record<string, unknown>, status = 200): Response {
 //   start   串行队列轮到本轮（流水线真正开跑；同时复位 abort 标记）
 //   stage   等待期流水线阶段轮换（2.6s 一帧，direct.hsl 真实阶段）
 //   log     子进程 stdout 逐行实时（banner/配置行/回答正文/收尾行）
+//   delta   v0.4.15 流式增量（llm-stream.jsonl 尾随；channel=reasoning|
+//           content|reset，GUI 逐 token 渲染正文 + 思考指示器）
 //   done    AskOutcome 整体（answer/tokens/ctxLine/durationMs/turn/logs）
 //   error   引擎失败（人话 message；aborted=true 表示用户停止，本轮未落账本）
 // 客户端意外断开不中止运行：账本是事实源，轮次照常落盘（enqueue 静默失败）；
@@ -444,7 +483,9 @@ function sseAsk(
             stageIdx++;
           }, SSE_STAGE_MS);
           try {
-            return await askStreamOnce(ws, req, (line) => send("log", { line }));
+            return await askStreamOnce(ws, req, (line) => send("log", { line }), (channel, delta) => {
+              send("delta", { channel, delta });
+            });
           } finally {
             clearInterval(ticker);
           }
@@ -1686,6 +1727,9 @@ function ask(text, isRetry) {
   scrollDown(true);
   var inAnswer = false, answerLines = [];
   var settled = false;
+  // v0.4.15 流式增量状态：streamText = content 通道拼接；thinkChars = reasoning
+  // 通道累计（思考指示器）；reset 清空重绘（网关重试重发）
+  var streamText = "", thinkChars = 0;
 
   function el(id) { return document.getElementById(id); }
   function setStage(text) { var n = el("pstage"); if (n) n.textContent = text; }
@@ -1701,7 +1745,9 @@ function ask(text, isRetry) {
     if (!a) return;
     a.style.display = "";
     a.className = "answering md";
-    a.innerHTML = renderMd(answerLines.join("\\n")) + '<span class="caret">▌</span>';
+    // 流式优先：逐 token 增量拼接的正文（回退 stdout 行流 —— scripted 车道）
+    var body = streamText.length > 0 ? streamText : answerLines.join("\\n");
+    a.innerHTML = renderMd(body) + '<span class="caret">▌</span>';
   }
 
   function onEvent(ev, d) {
@@ -1709,6 +1755,21 @@ function ask(text, isRetry) {
     if (ev === "open") {
       state.ticketId = (d && d.ticketId) || 0;
       if (d && d.queued) setStage("排队中（前一轮直连仍在运行）· esc 取消本轮");
+    } else if (ev === "delta") {
+      // v0.4.15：流式增量（llm-stream 尾随）—— reasoning 思考指示器 /
+      // content 逐 token 正文 / reset 网关重试清屏重绘
+      if (d && d.channel === "reasoning") {
+        thinkChars += String(d.delta || "").length;
+        setStage("◈ thinking · " + thinkChars + " chars");
+      } else if (d && d.channel === "reset") {
+        streamText = ""; thinkChars = 0;
+        setStage("网关重试，重新流式 …");
+        renderAnswer();
+      } else if (d && d.channel === "content") {
+        streamText += String(d.delta || "");
+        renderAnswer();
+        scrollDown(false);
+      }
     } else if (ev === "start") {
       state.myRunStarted = true;
       setStage("direct 流水线启动（" + ((d && d.model) || "scripted") + "）");

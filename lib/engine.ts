@@ -16,8 +16,10 @@ import type { EngineEvent, RunMetrics } from "./events.ts";
 import {
   normalizeEventLine,
   normalizeJournalLine,
+  normalizeLlmStreamLine,
   parseEventsLine,
   parseJournalLine,
+  parseLlmStreamLine,
   readEventStream,
   readLines,
   tailLines,
@@ -715,12 +717,14 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 interface PumpOffsets {
   events: number;
   journal: number;
+  llmStream: number;   // v0.4.15：流式增量尾随（llm-stream.jsonl）
   seen: Set<string>;   // 已推送的期刊签名（跨文件去重）
 }
 
 function pumpTick(outDir: string, off: PumpOffsets, q: EventQueue): void {
   const evFile = path.join(outDir, "events.jsonl");
   const jrFile = path.join(outDir, "journal.jsonl");
+  const lsFile = path.join(outDir, "llm-stream.jsonl");
   // journal 权威（含 phase/actor），先收
   const jr = tailLines(jrFile, off.journal);
   off.journal = jr.next;
@@ -730,6 +734,13 @@ function pumpTick(outDir: string, off: PumpOffsets, q: EventQueue): void {
     const ev = normalizeJournalLine(raw);
     if (ev.kind === "journal") off.seen.add(`${ev.action}|${ev.detail}`);
     q.push(ev);
+  }
+  // v0.4.15：流式增量（逐 token 渲染面）—— 行序即序，不参与去重
+  const ls = tailLines(lsFile, off.llmStream);
+  off.llmStream = ls.next;
+  for (let i = 0; i < ls.lines.length; i++) {
+    const raw = parseLlmStreamLine(ls.lines[i]!);
+    if (raw) q.push(normalizeLlmStreamLine(raw, i));
   }
   const evs = tailLines(evFile, off.events);
   off.events = evs.next;
@@ -886,7 +897,7 @@ export function startRun(opts: RunOptions): RunHandle {
   const outDir = makeOutDir(opts.workspace, opts.outDir);
   const runId = `${path.basename(outDir)}-${Math.random().toString(36).slice(2, 6)}`;
   const q = new EventQueue();
-  const off: PumpOffsets = { events: 0, journal: 0, seen: new Set() };
+  const off: PumpOffsets = { events: 0, journal: 0, llmStream: 0, seen: new Set() };
   let proc: SpawnProc | null = null;
   let canceled = false;
   let result: RunResult | null = null;
@@ -1017,7 +1028,7 @@ export interface ReplayData {
 
 /** :replay —— 读历史 run 产物，秒开不重跑。 */
 export function replayRun(outDir: string): ReplayData {
-  const events = readEventStream(path.join(outDir, "events.jsonl"), path.join(outDir, "journal.jsonl"));
+  const events = readEventStream(path.join(outDir, "events.jsonl"), path.join(outDir, "journal.jsonl"), path.join(outDir, "llm-stream.jsonl"));
   return {
     events,
     runJson: readRunJson(outDir),

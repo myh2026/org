@@ -1,6 +1,60 @@
 # CHANGELOG
 
-# CHANGELOG
+## v0.4.15（2026-09-11）—— 交互式聊天 REPL + Token 流式输出（对标主流 Agent）
+
+把 ORG 从「批处理流水线」补齐为「真正的交互式 Agent」—— 对标 codex /
+opencode / zcode 的核心交互面，同时**零旁路**直连池的全部治理（事件上总线 ·
+花销记账 · 会话账本 · 纪要回写）：
+
+### org chat —— 交互式聊天 REPL（cli/chat.ts）
+
+- **多轮交互对话**：`org chat [expert]`，会话史跨轮织入提示词（磁盘会话账本
+  `runtime/sessions/<expert>/<session>.jsonl`）；专家缺省取首个保留专家（★）；
+- **Token 流式输出**：宿主流式车道（vendored dhv-ts v0.2.61）增量落盘
+  `llm-stream.jsonl` → 引擎泵尾随 → REPL 逐 token 渲染；**思考指示器**
+  （`◈ thinking · N chars` 单行刷新，DeepSeek reasoning 通道分离实测）；
+- **斜杠命令**：/help /model /expert /new /sessions /resume /status /ctx
+  /history /retry /compact /clear /exit —— 模型热切换、专家热切换、会话管理
+  一应俱全；
+- **上下文压缩 /compact**：LLM 摘要会话史 → 账本重写为单轮摘要条目
+  （`compacted:true, compacted_from:N`），原文件备份可手工回滚 —— 主流
+  Agent 的 context compaction；
+- **shell 逃逸**：`!cmd` 用户发起 · 结果直接可见（不经 harness 能力面）；
+- **Ctrl+C 语义**：运行轮 = 取消当前轮（SIGTERM 子进程，本轮不落账本）；
+  队列中 = 跳过待处理行；空闲 = 双击退出；
+- **↑↓ 历史导航**：readline 原生 + 跨会话持久 `runtime/chat-history.txt`
+  （500 条上限）；反斜杠续行多行输入；
+- **readline 异步陷阱修复**：line 事件不等待 async 处理器 —— 管道/粘贴多行
+  输入时轮次会被跳过。输入队列 + 串行泵保证逐行完全落地；
+- **`org sessions [expert]`**：跨专家会话账本清单（轮次 · tokens · ctx 窗口
+  计量 · 最近问题）。
+
+### 流式基础设施（观测面三端贯通）
+
+- **宿主**（vendored dhv-ts v0.2.61 同步）：`$host.llm.complete` 补
+  `stream/track` 参数；SSE 逐块解析；reasoning/content/reset 三通道增量
+  append-only 落盘；llm_stream_done 事件；空正文可诊断（reasoning_chars）；
+- **模型网关**（hsl/providers/model.hsl）：deepseek 车道一律带
+  `stream:true + track`（轨道归因贯通到每条增量）；
+- **引擎泵**（lib/engine.ts + lib/events.ts）：150ms 尾随 llm-stream.jsonl →
+  `llm_delta` 事件（三通道）并入归一化事件流；
+- **Web GUI**：askStreamOnce 加 llm-stream 尾随泵（120ms）→ SSE `delta`
+  事件；GUI 思考指示器 + 逐 token 正文渲染 + reset 清屏重绘（scripted 车道
+  回退 stdout 行流，行为不变）；
+- **TUI**：llm_delta 走 default 分支优雅忽略（事件卡面向 run 叙事，不炸）。
+
+### 实测验证（DeepSeek 官方 API · deepseek-flash）
+
+- chat REPL E2E：思考 889 chars 流式指示 → 正文逐 token 渲染 →
+  `turn 1 · 47 tokens · 1.7s · 思考 889 chars` 计量收尾 → 账本落盘；
+- Web GUI E2E：SSE 160 个 delta 事件 + done 完整答案 + ctx 计量条；
+- 增量产物：848 行（1 reset + 357 reasoning + 490 content）保序落盘。
+
+### 测试
+
+- 新增 tests/chat.test.ts 17 例（parseInput 四态 / 会话账本单元 / compact
+  重写回滚 / mock SSE 流式四例 / events 解析合流 / scripted 负例）；
+- 全量 168 → **185 全绿**；HSL 侧 172 → **176 全绿**（网关测试补位）。
 
 ## v0.4.14（2026-09-11）
 

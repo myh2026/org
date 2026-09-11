@@ -1,10 +1,12 @@
 // ============================================================================
 // org/lib/events.ts — 引擎事件流：原始解析 → 归一化 → 合并去重（v0.4.0）
 // ----------------------------------------------------------------------------
-// 引擎产物两路：
+// 引擎产物三路：
 //   events.jsonl  每行 {seq, ts, name, data}（结构化事件，含 name="journal" 的期刊镜像）
 //   journal.jsonl 每行 `seq|ts|phase|actor|action|detail` 管道分隔（人读期刊）
-// 卡片模型 = 两路合并（按 ts 排序，journal 权威、events 内的 journal 镜像去重）。
+//   llm-stream.jsonl 每行 {ts, track, kind: "reasoning"|"content", delta}（v0.4.15
+//                  流式增量 —— 宿主流式车道 append-only 落盘，观测面逐 token 渲染）
+// 卡片模型 = 三路合并（按 ts 排序，journal 权威、events 内的 journal 镜像去重）。
 // 仅用 node:fs / node:path —— Windows 兼容，零原生依赖。
 // ============================================================================
 
@@ -26,6 +28,33 @@ export interface RawJournalLine {
   actor: string;
   action: string;
   detail: string;
+}
+
+/** llm-stream.jsonl 原始行（v0.4.15）：流式增量 —— track 归因，reasoning/content/reset 三通道（reset = 新一次流式调用开始，重试场景观测面清屏重绘）。 */
+export interface RawLlmStreamLine {
+  ts: string;
+  track: string;
+  kind: "reasoning" | "content" | "reset";
+  delta: string;
+}
+
+/** llm-stream.jsonl 单行 → RawLlmStreamLine（不认识的行弃；观测面降级不炸）。 */
+export function parseLlmStreamLine(line: string): RawLlmStreamLine | null {
+  const s = line.trim();
+  if (s.length === 0) return null;
+  try {
+    const o = JSON.parse(s) as Record<string, unknown>;
+    if (typeof o.delta !== "string") return null;
+    const kind = o.kind === "reasoning" ? "reasoning" : o.kind === "reset" ? "reset" : "content";
+    return {
+      ts: typeof o.ts === "string" ? o.ts : "",
+      track: typeof o.track === "string" ? o.track : "",
+      kind,
+      delta: o.delta,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function parseEventsLine(line: string): RawEventLine | null {
@@ -68,6 +97,7 @@ export function parseJournalLine(line: string): RawJournalLine | null {
 export type EngineEvent =
   | { kind: "run_start"; seq: number; ts: string; entry: string; model: string; task: string; mission?: string }
   | { kind: "journal"; seq: number; ts: string; phase: string; actor: string; action: string; detail: string }
+  | { kind: "llm_delta"; seq: number; ts: string; track: string; channel: "reasoning" | "content" | "reset"; delta: string }
   | { kind: "node"; seq: number; ts: string; graph: string; node: string }
   | { kind: "capability_granted"; seq: number; ts: string; capability: string; mode: string }
   | { kind: "score_evidence"; seq: number; ts: string; model: string; axis: string; kind2: string; value: number }
@@ -158,6 +188,11 @@ export function normalizeJournalLine(raw: RawJournalLine): EngineEvent {
   };
 }
 
+/** llm-stream 行 → EngineEvent（seq 用文件内行号近似 —— 仅流式渲染，不参与去重）。 */
+export function normalizeLlmStreamLine(raw: RawLlmStreamLine, lineNo: number): EngineEvent {
+  return { kind: "llm_delta", seq: lineNo, ts: raw.ts, track: raw.track, channel: raw.kind, delta: raw.delta };
+}
+
 // ---------- 合并去重与排序 ----------
 
 const journalSig = (ev: EngineEvent): string =>
@@ -213,7 +248,7 @@ export function readLines(file: string): string[] {
   }
 }
 
-export function readEventStream(eventsFile: string, journalFile: string): EngineEvent[] {
+export function readEventStream(eventsFile: string, journalFile: string, llmStreamFile?: string): EngineEvent[] {
   const fromEvents = readLines(eventsFile)
     .map(parseEventsLine)
     .filter((r): r is RawEventLine => r !== null)
@@ -222,7 +257,17 @@ export function readEventStream(eventsFile: string, journalFile: string): Engine
     .map(parseJournalLine)
     .filter((r): r is RawJournalLine => r !== null)
     .map(normalizeJournalLine);
-  return mergeStreams(fromEvents, fromJournal);
+  const out = mergeStreams(fromEvents, fromJournal);
+  // llm-stream 增量按行序追加在尾（时间上晚于同期期刊行；不参与去重）
+  if (llmStreamFile) {
+    let i = 0;
+    for (const line of readLines(llmStreamFile)) {
+      const raw = parseLlmStreamLine(line);
+      if (raw) out.push(normalizeLlmStreamLine(raw, i));
+      i++;
+    }
+  }
+  return out;
 }
 
 /** 增量 tail：从 byteOffset 起读新整行（半行留待下次）。 */

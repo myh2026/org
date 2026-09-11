@@ -78,6 +78,7 @@ interface Args {
   session: string;
   turns: string[];
   approveCapability: boolean;
+  continue: boolean;
   name: string;
   description: string;
   capabilities: string[];
@@ -98,6 +99,7 @@ function parseArgs(argv: string[]): Args {
     session: "default",
     turns: [],
     approveCapability: false,
+    continue: false,
     name: "",
     description: "",
     capabilities: [],
@@ -117,6 +119,7 @@ function parseArgs(argv: string[]): Args {
     else if (v === "--session") a.session = argv[++i] ?? "default";
     else if (v === "--turns") a.turns = (argv[++i] ?? "").split("|").filter((s) => s.length > 0);
     else if (v === "--approve-capability") a.approveCapability = true;
+    else if (v === "--continue" || v === "-c") a.continue = true;
     else if (v === "--name") a.name = (argv[++i] ?? "").toLowerCase();
     else if (v === "--description" || v === "--desc") a.description = argv[++i] ?? "";
     else if (v === "--capability" || v === "--capabilities") a.capabilities = (argv[++i] ?? "").split(",").map((s) => s.trim()).filter((s) => s.length > 0);
@@ -745,6 +748,46 @@ async function cmdWeb(a: Args): Promise<number> {
   return webMain(args);
 }
 
+// ---- 交互式聊天 REPL（v0.4.15 · codex/opencode 级交互面） ----
+// 进程内加载（与 cmdTui 同模式）；实现见 cli/chat.ts
+// 注意：chat 是写命令（会话账本/纪要落盘）—— 不走 defaultWorkspace 读回退
+// （dist/demo 入库快照只读），与 cmdAsk 同用 ensureWorkspace 初始化活工作区。
+async function cmdChat(a: Args): Promise<number> {
+  const { chatMain } = await import("./chat.ts");
+  ensureWorkspace(a.workspace);
+  const args: string[] = [];
+  if (a.rest[0]) args.push(a.rest[0]); // 专家名（可缺省 → 首个保留专家）
+  if (a.session && a.session !== "default") args.push("--session", a.session);
+  if (a.model && a.model !== "scripted") args.push("--model", a.model);
+  if (a.continue) args.push("--continue");
+  args.push("--workspace", a.workspace);
+  return chatMain(args);
+}
+
+// ---- 会话清单（org sessions：跨专家列会话账本；/sessions 单专家版在 chat REPL 内） ----
+async function cmdSessions(a: Args): Promise<number> {
+  const { listSessions } = await import("./chat.ts");
+  const expert = a.rest[0] ?? "";
+  ensureWorkspace(a.workspace);
+  const experts = expert
+    ? [expert]
+    : loadRegistryIndex(a.workspace).map((m) => m.name);
+  if (experts.length === 0) { console.log("（注册表为空）"); return 0; }
+  let any = false;
+  for (const name of experts) {
+    const list = listSessions(a.workspace, name);
+    if (list.length === 0) continue;
+    any = true;
+    console.log(`◆ ${name}`);
+    for (const s of list) {
+      console.log(`    ${s.session.padEnd(24)} ${String(s.turns).padStart(3)} 轮 · ${String(s.tokens).padStart(7)} tok · ctx ${renderContextMeter({ context: s.ctx_tokens, window: 131072 })}`);
+      console.log(`      ↳ ${s.lastQuestion}`);
+    }
+  }
+  if (!any) console.log("（无会话账本 · org chat <expert> 开始对话）");
+  return 0;
+}
+
 async function main(): Promise<number> {
   const [cmd, ...rest] = process.argv.slice(2);
   const a = parseArgs([cmd ?? "help", ...rest]);
@@ -762,6 +805,8 @@ async function main(): Promise<number> {
     case "check": return cmdCheck();
     case "tui": return cmdTui(a);
     case "web": return cmdWeb(a);
+    case "chat": return cmdChat(a);
+    case "sessions": return cmdSessions(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -771,6 +816,12 @@ async function main(): Promise<number> {
   org demo [--workspace DIR]
       全叙事演示：A 现场铸专家 / K 用户选取保留 / B 复用+补丁+金丝雀
       / C 蓝绿验证 / D 多轮直连 / E 暖移交
+  org chat [expert] [--session id] [--model m] [--continue]
+      交互式聊天 REPL（codex/opencode 级）：流式输出 · 思考指示器 ·
+      斜杠命令（/model /expert /sessions /compact …）· ↑↓ 历史 ·
+      Ctrl+C 取消当前轮 · ！cmd shell 逃逸；直连池全治理零旁路
+  org sessions [expert]
+      会话账本清单（跨专家：轮次 · tokens · ctx 窗口 · 最近问题）
   org ask <expert> "<question>" [--session id] [--turns "q1|q2"]
       直连指定专家（事件上总线 · 花销记账 · 会话账本 · 纪要回写）
   org handoff <expert> --task "<request>"

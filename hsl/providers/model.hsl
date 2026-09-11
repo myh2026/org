@@ -48,6 +48,11 @@ export async fn ask(track: String, system: String, user: String) -> Result<Strin
                 ],
                 temperature: 0.1,
                 maxTokens: 8192,
+                // v0.4.15：流式 + 轨道归因（仅网关车道生效）—— 增量落盘
+                // llm-stream.jsonl，观测面（chat REPL / Web SSE / TUI）逐
+                // token 渲染；返回值仍为完整正文，HSL 语义零变化。
+                stream: true,
+                track: String(track),
                 ...((thinkOff || escalated) ? { thinking: "off" } : {}),
             });
             let lastErr = null;
