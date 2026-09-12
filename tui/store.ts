@@ -8,12 +8,20 @@
 
 import type { WorkspaceInfo, SessionInfo, ExpertInfo, Scorecard } from "../lib/engine.ts";
 import type { EngineEvent } from "../lib/events.ts";
+import {
+  RE_ROUTE, RE_DISPATCH, RE_REVIEW, RE_REDISPATCH, RE_MINT, RE_CTX, RE_DRIFT,
+  parseVerdict, routeLabel,
+  type RoutePath, type Verdict,
+} from "../lib/runCards.ts";
 import type { ThemeName } from "./theme.ts";
 
-// ---------- 卡片模型（八类 + 评分卡） ----------
+// 路由/裁决的类型与 detail 解析契约统一由 lib/runCards.ts 提供（Web GUI 同源
+// —— 两端渲染层各自实现，但正则与字段口径必须一份，否则同一次运行在两个前端
+// 会显示成两件事）。此处保持对外再导出，既有 import 路径不变。
+export type { RoutePath, Verdict };
+export { routeLabel };
 
-export type RoutePath = "A" | "B" | "C" | "D";
-export type Verdict = "Accept" | "Revise" | "Reject" | "Escalate";
+// ---------- 卡片模型（八类 + 评分卡） ----------
 
 export interface Subtask {
   id: number;
@@ -260,31 +268,9 @@ function appendCard(state: TuiState, card: Omit<Card, "id">): TuiState {
 }
 
 // ---------- 引擎事件 → 卡片管线（纯函数，冒烟测试共用） ----------
-
-const ROUTE_LABEL: Record<RoutePath, string> = { A: "内联", B: "复用", C: "生成", D: "移交" };
-export const routeLabel = (r: RoutePath): string => ROUTE_LABEL[r];
-
-const VERDICTS: Verdict[] = ["Accept", "Revise", "Reject", "Escalate"];
-function parseVerdict(s: string): Verdict {
-  const v = s.trim().toLowerCase();
-  return VERDICTS.find((x) => x.toLowerCase() === v) ?? "Accept";
-}
-
-/** `task#3 validate -> C:generate` */
-const RE_ROUTE = /^task#(\d+)\s+(\S+)\s*->\s*([ABCD]):(\S+)/;
-/** `task#2 channel=reuse notice-parser` / `task#1 channel=inline (kernel context)` / `task#3 channel=factory mint` */
-const RE_DISPATCH = /^task#(\d+)\s+channel=(\S+)(?:\s+(.*))?$/;
-/** `task#3 validate verdict=Revise coverage=0.80` */
-const RE_REVIEW = /^task#(\d+)\s+(\S+)\s+verdict=(\S+)(?:\s+coverage=([\d.]+))?(?:\s+(.*))?$/;
-/** `task#3 revise #1: remedy: count date_status=unparsed as valid ...` */
-const RE_REDISPATCH = /^task#(\d+)\s+revise\s+#(\d+):\s*(.*)$/;
-/** `record-validator@1.0.0 eval=1` */
-const RE_MINT = /^(\S+)@([\d.]+)\s+eval=(\S+)/;
-/** `静默更新检测：alerts=0 baseline=...` */
-const RE_DRIFT = /alerts=(\d+)/;
-
-/** `direct_ctx` 事件：`notice-parser/demo turn=2 ctx=141 window=131072`（Codex 风格窗口计量） */
-const RE_CTX = /^(\S+)\/(\S+) turn=(\d+) ctx=(\d+) window=(\d+)$/;
+// 正则、parseVerdict、routeLabel、RoutePath/Verdict 类型均来自
+// lib/runCards.ts（见文件头 import）—— 本文件只保留**状态机**（如何把一条
+// 事实并入卡片流），不重复声明解析契约。
 
 export function pushEngineEvent(state: TuiState, ev: EngineEvent): TuiState {
   switch (ev.kind) {
