@@ -17,7 +17,7 @@ import { renderFrame } from "./frame.ts";
 import {
   startRun, scanWorkspace, replayRun, latestScorecardDir,
   ensureWorkspace, resetWorkspace, gitShortLog, setRetained, keepAllCandidates,
-  importHarness,
+  importHarness, latestHarnessRunDir, reviewCandidates, applyReview,
   type RunHandle, type Scorecard,
 } from "../lib/engine.ts";
 import type { EngineEvent } from "../lib/events.ts";
@@ -379,6 +379,39 @@ export class App {
         } catch (err) {
           this.dispatch({ type: "notice", text: `保留操作失败：${(err as Error).message}`, tone: "err" });
         }
+        return;
+      }
+      case "review": {
+        // 运行范围复核（org review 的 TUI 面）：范围 = 最近一次有 harness
+        // 产出的运行，待决策集 = 本次铸出/合入且尚未保留的候选。
+        // TUI 的 notice 是 3.5s 单行提示（不适合列清单与逐项勾选），所以这里
+        // 只做「看汇总 + 一键全选」；逐项选取请用 org review（CLI）或 Web GUI
+        // 的复核面板 —— 三端同一套 reviewCandidates/applyReview，范围与语义一致。
+        const dir = latestHarnessRunDir(this.state.workspace);
+        if (!dir) {
+          this.dispatch({ type: "notice", text: "尚无运行产物（先派单或 :demo）", tone: "warn" });
+          return;
+        }
+        const plan = reviewCandidates(this.state.workspace, dir);
+        if (!plan.scope) {
+          this.dispatch({ type: "notice", text: "运行产物读取失败", tone: "err" });
+          return;
+        }
+        if (plan.pending.length === 0) {
+          this.dispatch({ type: "notice", text: `${plan.scope.label} 无待决策候选（已全部处理）` });
+          return;
+        }
+        const names = plan.pending.map((c) => c.name).join(", ");
+        if (arg === "all") {
+          const { kept } = applyReview(this.state.workspace, plan.pending.map((c) => c.name));
+          this.dispatch({ type: "notice", text: `★ 已沉淀 ${kept.join(", ")}（git 留痕 · B 路径自动复用开始命中）` });
+          this.refreshWorkspace();
+          return;
+        }
+        this.dispatch({
+          type: "notice",
+          text: `${plan.scope.label} 待决策 ${plan.pending.length} 个：${names} · :review all 一键沉淀，或 org review 逐项选取`,
+        });
         return;
       }
       case "clear": this.dispatch({ type: "clearScreen" }); return;

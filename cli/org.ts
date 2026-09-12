@@ -26,10 +26,13 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as readline from "node:readline";
 import { ROOT, DEFAULT_WORKSPACE } from "../lib/root.ts";
 import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          loadRegistryIndex, setRetained, keepAllCandidates,
-         importHarness, listContextUsage, renderContextMeter, expertFixtureOf } from "../lib/engine.ts";
+         importHarness, listContextUsage, renderContextMeter, expertFixtureOf,
+         latestHarnessRunDir, reviewCandidates, applyReview } from "../lib/engine.ts";
+import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
 import { configPath, loadConfig, setConfigValue, unsetConfigValue, applyPreset,
          effectiveValue, applyConfigToEnv, CONFIG_KEYS, PRESETS, maskSecret,
@@ -85,7 +88,13 @@ interface Args {
   name: string;
   description: string;
   capabilities: string[];
+  keepList: string[];      // org review --keep a,b（非交互显式选取）
+  dropList: string[];      // org review --drop c（把已保留资产降回候选）
+  reviewAll: boolean;      // org review --all / --yes（全选待决策候选）
+  reviewNone: boolean;     // org review --none（全不选，只出报告）
+  dryRun: boolean;         // org review --dry-run（只看不写）
   fixtureExplicit: boolean;
+  modelExplicit: boolean;  // --model 是否显式给出（缺省车道以此判据接管）
   rest: string[];
 }
 
@@ -106,6 +115,11 @@ function parseArgs(argv: string[]): Args {
     name: "",
     description: "",
     capabilities: [],
+    keepList: [],
+    dropList: [],
+    reviewAll: false,
+    reviewNone: false,
+    dryRun: false,
     fixtureExplicit: false,
     modelExplicit: false,
     rest: [],
@@ -127,6 +141,11 @@ function parseArgs(argv: string[]): Args {
     else if (v === "--name") a.name = (argv[++i] ?? "").toLowerCase();
     else if (v === "--description" || v === "--desc") a.description = argv[++i] ?? "";
     else if (v === "--capability" || v === "--capabilities") a.capabilities = (argv[++i] ?? "").split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+    else if (v === "--keep") a.keepList = (argv[++i] ?? "").split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+    else if (v === "--drop") a.dropList = (argv[++i] ?? "").split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+    else if (v === "--all" || v === "--yes") a.reviewAll = true;
+    else if (v === "--none") a.reviewNone = true;
+    else if (v === "--dry-run") a.dryRun = true;
     else a.rest.push(v);
     i++;
   }
@@ -171,7 +190,26 @@ async function cmdRun(a: Args): Promise<number> {
     fixture: a.fixture, out, env,
   });
   process.stdout.write(r.out);
+  // 运行收尾：把「本次产出的候选怎么处置」交回用户（工厂产物默认候选，
+  // 不选取就不会进 B 路径自动复用 —— 这一步不提示就等于资产白铸）。
+  printReviewHint(a.workspace, out);
   return r.ok ? 0 : 1;
+}
+
+/**
+ * 运行收尾提示：本次运行若有待决策候选，打印一行可执行的下一步。
+ * 静默条件：非 TTY（脚本/管道场景不插话）或本次没有待决策候选。
+ */
+function printReviewHint(ws: string, runDir: string): void {
+  if (!process.stdin.isTTY) return;
+  if (!fs.existsSync(path.join(ws, "registry/index.json"))) return;
+  try {
+    const { pending } = reviewCandidates(ws, runDir);
+    if (pending.length === 0) return;
+    const names = pending.map((c) => c.name).join(", ");
+    console.log(`\n[review] 本次铸出/合入 ${pending.length} 个未保留候选：${names}`);
+    console.log(`[review] 选取沉淀进工具库：org review --workspace ${ws}（或 --keep ${pending[0]!.name} / --all）`);
+  } catch { /* 提示失败不影响运行结果 */ }
 }
 
 async function cmdDemo(a: Args): Promise<number> {
@@ -204,13 +242,48 @@ async function cmdDemo(a: Args): Promise<number> {
     },
     {
       // 用户选取（工具库治理）：工厂产出是候选（retained=false），B 路径只
-      // 复用用户保留的资产。scripted 演示自动全选（真实用户用 org keep 挑选）。
-      id: "K", label: "用户选取 · harness 候选转正保留（org keep；scripted 自动全选）",
+      // 复用用户保留的资产。人在场（TTY）就真的问用户选哪几个 —— 这正是
+      // 「在此次过程中选取哪些 harness 沉淀进工具库」的落点；非交互
+      // （CI / 管道 / 测试）保持 scripted 全选，叙事确定性不变。
+      id: "K", label: "用户选取 · harness 候选转正保留（org keep / org review）",
       out: "",
       fn: async () => {
-        const picked = keepAllCandidates(ws);
-        const line = picked.length > 0 ? picked.join(", ") : "（无候选 —— 存量资产均已保留）";
-        console.log(`    ★ 保留 ${line}（未保留候选不参与 B 路径自动复用）`);
+        const aOut = path.join(ws, "out-a");
+        const plan = reviewCandidates(ws, aOut);
+        if (plan.pending.length === 0) {
+          console.log("    ★ 本次无未保留候选（存量资产均已保留）");
+          return { ok: true, out: "" };
+        }
+        if (!process.stdin.isTTY) {
+          const picked = keepAllCandidates(ws);
+          const line = picked.length > 0 ? picked.join(", ") : "（无候选 —— 存量资产均已保留）";
+          console.log(`    ★ 保留 ${line}（非交互：scripted 全选；真实用户用 org review 逐项挑选）`);
+          return { ok: true, out: "" };
+        }
+        // 人在场：把选取权交回用户（与 org review 同一份表格与解析器）
+        console.log(`    本次铸出 ${plan.pending.length} 个候选，等待你选取：\n`);
+        printReviewTable(plan.pending, plan.settled);
+        const answer = await askLine("    选取保留（编号逗号分隔 / a 全选 / n 全不选 / 回车全选 / q 中止演示）: ");
+        if (answer === null) return { ok: false, out: "" };
+        const parsed = parseSelection(answer, plan.pending.length);
+        if (parsed.kind === "cancel") {
+          console.log("    已中止：工具库未做任何变更。重新运行 org demo 可再来一次。");
+          return { ok: false, out: "" };
+        }
+        if (parsed.kind === "invalid") {
+          console.error(`    ✗ 无法识别的输入「${parsed.token}」—— 请输入 1..${plan.pending.length} 的编号、a、n 或 q`);
+          return { ok: false, out: "" };
+        }
+        const chosen = parsed.picked.map((n) => plan.pending[n - 1]!.name);
+        if (chosen.length === 0) {
+          console.log("    ○ 未选取任何候选 —— 全部保持候选态（资产留在库，仅退出 B 路径自动复用）");
+          console.log("    （注意：后续 run B/C 将不再展示复用命中的叙事段落）");
+          return { ok: true, out: "" };
+        }
+        const { kept } = applyReview(ws, chosen);
+        const rest = plan.pending.filter((c) => !chosen.includes(c.name)).map((c) => c.name);
+        console.log(`    ★ 保留 ${kept.join(", ")}（git 留痕，B 路径自动复用从下一轮派单命中）`);
+        if (rest.length > 0) console.log(`    ○ 保持候选：${rest.join(", ")}`);
         return { ok: true, out: "" };
       },
     },
@@ -571,6 +644,165 @@ async function cmdRetain(a: Args, retained: boolean): Promise<number> {
   return 0;
 }
 
+// ---- 运行范围复核：本次运行产出的 harness 要不要沉淀进工具库 ----
+// 与 org keep/drop 的分工：那两个是「按名字治理库里已有的资产」，review 是
+// 「按运行范围复核这一次产出了什么、哪些值得沉淀」。范围由运行产物界定
+// （mint-register / patch / channel=reuse 事件），不靠时间戳猜。
+// 交互选取之外提供非交互通道（--keep/--all/--none/--dry-run），供脚本与
+// 三前端（CLI · TUI · Web）共用同一套语义。
+
+export type SelectionParse =
+  | { kind: "ok"; picked: number[] }
+  | { kind: "cancel" }
+  | { kind: "invalid"; token: string };
+
+/** 解析选取输入：编号列表（"1,3"）/ a（全选）/ n（全不选）/ q（取消）。空输入=全选。 */
+export function parseSelection(input: string, count: number): SelectionParse {
+  const s = input.trim().toLowerCase();
+  if (s === "q" || s === "quit") return { kind: "cancel" };
+  if (s === "" || s === "a" || s === "all") return { kind: "ok", picked: Array.from({ length: count }, (_, i) => i + 1) };
+  if (s === "n" || s === "none") return { kind: "ok", picked: [] };
+  const picked = new Set<number>();
+  for (const raw of s.split(/[,，、\s]+/)) {
+    if (raw.length === 0) continue;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 1 || n > count) return { kind: "invalid", token: raw };
+    picked.add(n);
+  }
+  return { kind: "ok", picked: [...picked].sort((x, y) => x - y) };
+}
+
+/** 候选一行摘要（CLI 表格与 TUI/Web 同源字段）。 */
+function candidateLine(c: ReviewCandidate): string {
+  const parts: string[] = [];
+  if (c.evalInRun) parts.push(`本次验收 ${c.evalInRun}`);
+  parts.push(`库内评测 ${c.eval_score.toFixed(2)}`, `通过率 ${c.pass_rate.toFixed(2)}`);
+  if (c.uses > 0) parts.push(`复用 ${c.uses} 次`);
+  if (c.capabilities.length > 0) parts.push(`能力 ${c.capabilities.join("/")}`);
+  const why = c.origin.includes("minted") ? "铸出" : c.origin.includes("patched") ? "补丁合入" : "复用命中";
+  parts.push(`本次：${why}`);
+  return parts.join(" · ");
+}
+
+/** 复核表打印（cmdReview 与 org demo 的 K 相位共用同一份呈现）。 */
+function printReviewTable(pending: ReviewCandidate[], settled: ReviewCandidate[]): void {
+  console.log("待决策候选（本次铸出/合入且尚未保留 —— 选取后转正，B 路径自动复用才命中）：");
+  pending.forEach((c, i) => {
+    console.log(`  ${i + 1}. ${c.name}@${c.version}  [${c.source}]`);
+    if (c.description) console.log(`     ${c.description}`);
+    console.log(`     ${candidateLine(c)}`);
+    if (c.patchNote) console.log(`     补丁：${c.patchNote}`);
+  });
+  if (settled.length > 0) {
+    console.log("\n已在库保留（仅上下文，不参与本次选取）：");
+    for (const c of settled) console.log(`  ${c.retained ? "★" : "○"} ${c.name}@${c.version}  [${c.source}]`);
+  }
+  console.log("");
+}
+
+async function cmdReview(a: Args): Promise<number> {
+  const ws = a.workspace;
+  if (!fs.existsSync(path.join(ws, "registry/index.json"))) {
+    console.error(`✗ 工作区 ${ws} 无注册表（先 org demo / org run）`);
+    return 2;
+  }
+  const runDir = a.runDir || latestHarnessRunDir(ws);
+  if (!runDir) {
+    console.error(`✗ 工作区 ${ws} 没有 run 产物目录（out-*）—— 先 org run / org demo`);
+    return 2;
+  }
+  if (!fs.existsSync(runDir)) {
+    console.error(`✗ 找不到运行产物目录：${runDir}`);
+    return 2;
+  }
+  const { scope, pending, settled } = reviewCandidates(ws, runDir);
+  if (!scope) {
+    console.error(`✗ 找不到运行产物：${runDir}`);
+    return 2;
+  }
+
+  console.log(`复核范围：${scope.label}（${path.relative(process.cwd(), scope.dir) || scope.dir}）`);
+  console.log(`  任务 ${scope.task || "(未记录)"} · 模型 ${scope.model || "?"} · 结果 ${scope.ok ? "Ok" : "Err"}`);
+  console.log(`  本次接触 harness ${pending.length + settled.length} 个：铸出 ${scope.minted.length} · 补丁 ${scope.patched.length} · 复用 ${scope.reused.length}\n`);
+
+  if (pending.length === 0) {
+    console.log("✓ 本次运行没有待决策候选（无新铸出/合入的未保留资产）。");
+    if (settled.length > 0) {
+      console.log(`  本次复用到的存量资产：${settled.map((c) => `${c.retained ? "★" : "○"} ${c.name}`).join(" · ")}`);
+    }
+    return 0;
+  }
+
+  printReviewTable(pending, settled);
+
+  // ---- 显式非交互通道：--keep / --none / --all / --dry-run ----
+  let chosen: string[] | null = null;
+  if (a.keepList.length > 0) {
+    const valid = new Set(pending.map((c) => c.name));
+    const bad = a.keepList.filter((n) => !valid.has(n));
+    if (bad.length > 0) {
+      console.error(`✗ 不在本次待决策候选内：${bad.join(", ")}（可选：${pending.map((c) => c.name).join(", ")}）`);
+      return 1;
+    }
+    chosen = a.keepList;
+  } else if (a.reviewNone) {
+    chosen = [];
+  } else if (a.reviewAll) {
+    chosen = pending.map((c) => c.name);
+  } else if (a.dryRun) {
+    console.log(`（--dry-run：未写入。选取保留请用 org review --keep ${pending.map((c) => c.name).join(",")} 或 --all）`);
+    return 0;
+  } else if (!process.stdin.isTTY) {
+    console.error("✗ 非交互环境（stdin 非 TTY）：请显式给出选取 ——");
+    console.error(`  org review --keep ${pending.map((c) => c.name).join(",")}   # 选取其中若干`);
+    console.error("  org review --all    # 全选   ·   org review --none   # 全不选");
+    return 2;
+  } else {
+    const answer = await askLine(`选取保留（编号逗号分隔 / a 全选 / n 全不选 / 回车全选 / q 取消）: `);
+    if (answer === null) return 2;
+    const parsed = parseSelection(answer, pending.length);
+    if (parsed.kind === "cancel") {
+      console.log("已取消，未写入任何变更。");
+      return 0;
+    }
+    if (parsed.kind === "invalid") {
+      console.error(`✗ 无法识别的输入「${parsed.token}」—— 请输入 1..${pending.length} 的编号、a、n 或 q`);
+      return 2;
+    }
+    chosen = parsed.picked.map((n) => pending[n - 1]!.name);
+  }
+
+  if (chosen.length === 0) {
+    console.log("○ 本次未选取任何候选 —— 全部保持候选态（资产保留在库，仅退出 B 路径自动复用）。");
+  } else {
+    const { kept, missing } = applyReview(ws, chosen);
+    console.log(`★ 已选取保留：${kept.join(", ")}（git 留痕，B 路径自动复用从下一轮派单命中）`);
+    if (missing.length > 0) console.error(`✗ 未在注册表找到：${missing.join(", ")}`);
+    const rest = pending.filter((c) => !chosen.includes(c.name)).map((c) => c.name);
+    if (rest.length > 0) console.log(`○ 保持候选（未选取）：${rest.join(", ")} —— 需要时 org keep <name> 或重跑 org review`);
+  }
+
+  // 复核中显式降权（--drop）：把已保留资产退回候选态
+  if (a.dropList.length > 0) {
+    const { kept: dropped, missing } = setRetained(ws, a.dropList, false);
+    if (dropped.length > 0) console.log(`○ 已取消保留：${dropped.join(", ")}（退出 B 路径自动复用，git 留痕）`);
+    if (missing.length > 0) console.error(`✗ 未在注册表找到：${missing.join(", ")}`);
+  }
+  return 0;
+}
+
+/** 单行提问（交互选取用）。stdin 非 TTY 返回 null（调用方转非交互通道）。 */
+function askLine(prompt: string): Promise<string | null> {
+  if (!process.stdin.isTTY) return Promise.resolve(null);
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise<string>((resolve) => {
+    rl.question(prompt, (answer) => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
+
 async function cmdStatus(a: Args): Promise<number> {
   const ws = defaultWorkspace(a);
   console.log(`ORG status · 工作区 ${ws}\n`);
@@ -906,7 +1138,11 @@ async function cmdConfig(a: Args): Promise<number> {
   return 2;
 }
 
-async function main(): Promise<number> {
+/**
+ * 命令行入口（可编程）：等价于 `org <argv...>`，返回退出码。
+ * 与 cli/chat.ts 的 chatMain 同约定 —— 逻辑函数化，执行留在 import.meta.main 之后。
+ */
+export async function orgMain(): Promise<number> {
   const [cmd, ...rest] = process.argv.slice(2);
   const a = parseArgs([cmd ?? "help", ...rest]);
   // 启动即注入用户配置（环境变量优先，配置文件填空）—— 全部子命令/子进程继承
@@ -923,6 +1159,7 @@ async function main(): Promise<number> {
     case "keep": return cmdKeep(a);
     case "drop": return cmdDrop(a);
     case "import": return cmdImport(a);
+    case "review": return cmdReview(a);
     case "status": return cmdStatus(a);
     case "score": return cmdScore(a);
     case "replay": return cmdReplay(a);
@@ -958,6 +1195,10 @@ async function main(): Promise<number> {
   org import <file.hsl> [--name N] [--description "…"] [--capability a,b]
       工具库治理：导入你自己的 harness（check 闸门 → 入库 → 即刻可复用；
       描述缺省取 /// 文档注释 · 能力缺省扫描 #[capability] 注解）
+  org review [--run <dir>] [--workspace DIR] [--keep a,b | --all | --none | --dry-run]
+      工具库治理：复核本次运行产出的 harness，交互选取哪些沉淀进工具库。
+      范围由运行产物界定（本次铸出 / 补丁合入 / 复用命中），缺省取最新 run；
+      非交互环境请显式给 --keep/--all/--none（stdin 非 TTY 时不猜）
   org status [--workspace DIR]
       库 / 池 / memo / 基准题 / 基线 / 复发计数 / 会话账本（含上下文窗口占用）
       / git 注册表历史（★ = 用户保留 · ○ = 工厂候选 · import = 用户导入）
@@ -989,4 +1230,13 @@ async function main(): Promise<number> {
   }
 }
 
-process.exit(await main());
+// ----------------------------------------------------------------------------
+// 独立入口守卫（与 cli/chat.ts 的既有约定对齐）。
+// 此前这里是裸的 `process.exit(await main())`：任何 `import "../cli/org.ts"`
+// （例如测试引入纯函数 parseSelection）都会立即执行整个 CLI —— 打印帮助并
+// process.exit(0)，把导入方连同测试进程一起终结。chat.ts 早已补上
+// import.meta.main 守卫（见其文件尾注），org.ts 漏了，这里补齐。
+// ----------------------------------------------------------------------------
+if (import.meta.main) {
+  process.exit(await orgMain());
+}

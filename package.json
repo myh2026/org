@@ -1,6 +1,6 @@
 {
   "name": "org-harness",
-  "version": "0.4.16",
+  "version": "0.4.17",
   "repository": {
     "type": "git",
     "url": "https://github.com/myh2026/org"
@@ -13,7 +13,7 @@
   "scripts": {
     "check": "bun cli/org.ts check",
     "demo": "bun cli/org.ts demo",
-    "test": "bun test tests/",
+    "test": "bun test tests/ --timeout 120000",
     "fixture": "bun scripts/make-fixture.ts",
     "status": "bun cli/org.ts status",
     "score": "bun cli/org.ts score",

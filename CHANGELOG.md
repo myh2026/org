@@ -1,5 +1,68 @@
 # CHANGELOG
 
+## v0.4.17（2026-09-12）—— 运行范围复核（org review）+ 四个实测缺陷修复
+
+工具库治理第四动作 **`org review`**：回答「**这一次运行产出的东西里，哪些值得
+沉淀进工具库**」—— 与 keep/drop（按名字治理库里已有资产）互补，范围由运行产物
+本身界定，不靠目录时间戳猜测：
+
+- **范围判据全部来自事件流**（事件溯源，不猜目录）：`journal:mint-register`
+  （本次现场铸出）/ `journal:asset` 的 `patch <name> :: note`（本次补丁合入）/
+  `journal:dispatch` 的 `channel=reuse <name>`（本次复用命中）。缺省范围取
+  **最近一次有 harness 产出的运行**（`latestHarnessRunDir`）——一次 demo 会连跑
+  out-a…out-c 再跑 out-direct/out-handoff，按字面最新选会永远命中最不相关那次；
+- **交互选取**：编号逗号分隔 / `a` 全选 / `n` 全不选 / 回车全选 / `q` 取消；
+  支持全角逗号与空格分隔；非法输入明确报错而不是静默当作空选；
+- **非交互通道**（脚本与三前端共用同一语义）：`--keep a,b` / `--all` / `--none` /
+  `--dry-run`；**stdin 非 TTY 且未给选取时不猜**（退出码 2 + 指路显式通道）；
+- **选取只翻转 retained，不删任何文件**：未勾选候选保持 `retained=false`
+  （B 路径自动复用不命中），源码 / fixture / 评分卡全部留在库里 —— 「不保留」是
+  可逆的降权而不是删除；
+- **三端同权**：CLI `org review` · TUI `:review [all]` · Web GUI 复核面板
+  （顶栏「待复核 N」徽标 → 勾选面板 → 确认沉淀）；Web 端 `GET /api/review` /
+  `POST /api/review`，越界名 **409 明确拒绝**而不是静默生效一部分；
+- **org demo 的 K 相位改为真交互**：人在场（TTY）就真的问用户选哪几个候选；
+  非交互（CI / 管道 / 测试）保持 scripted 全选，叙事确定性不变；
+- **`org run` 收尾提示**：本次有待决策候选时打印一行可执行的下一步
+  （不提示就等于工厂白铸 —— 工厂产物默认候选，不选取不进 B 路径）；
+- 测试 15 例锁定（tests/review.test.ts：范围判据 / 待决策集与上下文分离 /
+  缺省范围跳过无产出运行 / dry-run 不写 / 非交互不猜 / 越界拒绝 / git 留痕 /
+  幂等重跑 / parseSelection 四态）。
+
+同步修复**四个实测缺陷**（详见 BUGFIXES.md B-13…B-16）：
+
+- **B-13 工厂闸门依赖 `DHV_TS`，按 HSL 指南直接跑解释器时静默降级**：`dhv_path()`
+  在 `DHV_TS` 缺省时返回哨兵串 `"UNSET_DHV_TS"`，而闸门只看 `has_bun()` → 走
+  shell 车道拼出 `bun UNSET_DHV_TS check …`（必然失败），进程内兜底车道永不可达。
+  工厂每轮「check 未过」三次后降级 `(factory failed)` / `coverage 0.00` / 资产少
+  一项，而整轮仍报 `accepted 3/3`、退出码 0。修复：`dhv_path()` 增加自解析级
+  （`DHV_TS` → `process.argv[1]`），判据改为 `has_bun() && dhv_path().len() > 0`
+  （路径不可解析退回进程内车道）。测试全程掩盖此缺陷的原因是 `helpers.ts` 与
+  `dhvRun` 都注入了 `DHV_TS` —— 只有「用户按指南直接跑」这条路径没有注入者；
+- **B-14 资产沉淀证据从 journal 丢失**：`sink_assets` 按值收到 `journal.clone()`，
+  `asset`/`drift` 两条留痕写进临时副本随函数返回丢弃 → `journal.jsonl` 永久缺失
+  资产沉淀证据（实测 run A：journal 22 条 vs events 镜像 26 条，差值恰为那 4 条）。
+  总线侧看似有救（`events.jsonl` 有镜像），但 `mergeStreams` 在 journal.jsonl 非空时
+  整体丢弃该镜像 —— 两端叠加导致 Web/TUI/chat/`org replay` 都看不到资产沉淀。
+  `metrics.json` 走另一条路所以表层指标完好，故障只藏在事件流里。修复：留痕移到
+  main 的 sink 段写在真实 `mut journal` 上，`sink_assets` 不再接收 Journal；
+  基线路径抽 `baseline_path_of()` 共用；
+- **B-15 测试套件没有配置默认超时**：干净检出按 README 跑 `bun test tests/`，
+  **26 例必然假红**——端到端用例单轮 3–14s，而 bun 默认每用例超时 5000ms，超时会
+  kill 子进程从而把断言读成「真断言失败」。排查否掉两条看似可行的全局路径（实测）：
+  bunfig 的 `[test]` 段**无 timeout 键**（写上仍按 5000ms 生效）；`[test] preload`
+  与 `setDefaultTimeout` **只在单文件调用时生效**，`bun test tests/` 这种多文件
+  （并行 worker）形态下到不了 worker —— 写进所有文件都 import 的 `tests/helpers.ts`
+  也一样，环境变量 `BUN_TEST_TIMEOUT` 同样无效。故改回**逐例显式超时**（5 个纯
+  端到端文件共 56 例 + `tests/web.test.ts` 的 beforeAll 与 8 个真实 spawn 用例统一
+  `}, 120_000);`，与 demo.test.ts 既有写法一致；120s 是放宽等待上限、断言一字未改），
+  `package.json` 的 `test` 脚本同步带上 `--timeout 120000`。修后 `bun test tests/`
+  无旗标即 **221/221 全绿**；
+- **B-16 `cli/org.ts` 缺 `import.meta.main` 守卫**：任何 `import` 都会执行整条 CLI
+  并 `process.exit`（表现为导入方被静默终结）。`cli/chat.ts` 早有守卫且
+  `tests/chat.test.ts` 正靠它导入纯函数 —— 同一约定在 org.ts 漏了。修复：
+  导出 `orgMain` + 入口守卫，与 chat.ts 对齐（副作用：CLI 纯函数从此可单测）。
+
 ## v0.4.16（2026-09-11）—— 用户模型/API 持久配置（org config）
 
 对标 codex（`~/.codex/config.toml`）/ opencode（`opencode.json`）的模型

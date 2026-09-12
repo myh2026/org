@@ -474,19 +474,29 @@ export struct ShellFlat {
 // 步骤实现（管线内部函数）
 // ----------------------------------------------------------------------------
 
-/// dhv-ts 解释器路径（CLI 注入 DHV_TS；缺省时给出可诊断的错误）。
+/// dhv-ts 解释器路径（嵌套闸门用）。
+/// 解析顺序：DHV_TS（CLI 注入）→ 解释器自身入口脚本（process.argv[1]）。
+/// 为什么必须有第二级：按 HSL 指南直接跑 `bun dhv-ts/src/main.ts run <entry>`
+/// 时没有任何东西注入 DHV_TS，而历史上这里会退回哨兵串 "UNSET_DHV_TS"，
+/// 于是 has_bun() 为真、shell 车道被选中，实际执行 `bun UNSET_DHV_TS check …`
+/// —— 必然失败。工厂因此每轮都 "check 未过" 三次后降级为 (factory failed)，
+/// 而整轮仍报 accepted 3/3 / 退出码 0，故障只藏在 [factory] 日志里。
+/// 本 native 块与解释器同进程，argv[1] 即其入口，自我定位不依赖外部变量。
 /// 跨平台注记：统一转成正斜杠 —— shell_exec 经 bash -c 执行，反斜杠路径
 /// 在 bash 串里会被吃掉；Windows API 接受正斜杠，bun 同样接受。
+/// 返回空串 = 自身路径也拿不到，调用方改走进程内车道（语义等价）。
 fn dhv_path() -> String {
     let path: String = native typescript {
-        const v = $host.env.get("DHV_TS");
-        return String(v || "").replace(/\\/g, "/");
+        const norm = (s) => String(s || "").replace(/\\/g, "/");
+        const injected = $host.env.get("DHV_TS");
+        if (injected && String(injected).trim().length > 0) return norm(injected);
+        try {
+            const self = (typeof process !== "undefined" && process.argv && process.argv[1]) ? process.argv[1] : "";
+            if (self && /\.(ts|js|mjs|cjs)$/i.test(self)) return norm(self);
+        } catch (e) { /* 拿不到自身路径 → 空串，走进程内车道 */ }
+        return "";
     };
-    if path.len() == 0 {
-        String::from("UNSET_DHV_TS")
-    } else {
-        path
-    }
+    path
 }
 
 /// 壳执行（首词白名单：bun）。
@@ -527,10 +537,12 @@ fn has_bun() -> bool {
     return r.len() > 0;
 }
 
-/// 结构闸门（dhv check）：bun 在场走嵌套子进程（蓝绿语义）；缺席时
-/// 进程内兜底（$host.dhv.check，fresh loadProgram 状态隔离）。语义等价。
+/// 结构闸门（dhv check）：bun 在场且解释器路径可解析时走嵌套子进程
+/// （蓝绿语义）；否则进程内兜底（$host.dhv.check，fresh loadProgram 状态隔离）。
+/// 判据必须同时看 has_bun() 与 dhv_path()：只看 bun 会把「有 bun 但路径不可解析」
+/// 送进 shell 车道，拼出一条注定失败的 `bun <空> check …` 命令。
 fn dhv_check_gate(file: String) -> ShellFlat {
-    if has_bun() {
+    if has_bun() && dhv_path().len() > 0 {
         return shell_exec(format!("bun {} check {}", dhv_path(), file));
     }
     let r = native typescript {
@@ -540,9 +552,10 @@ fn dhv_check_gate(file: String) -> ShellFlat {
     return flat_from(r.ok, r.code, r.stdout, r.stderr);
 }
 
-/// 嵌套专家执行（fixture 验收 / 磁盘车道）：同 dhv_check_gate 的双车道策略。
+/// 嵌套专家执行（fixture 验收 / 磁盘车道）：同 dhv_check_gate 的双车道策略
+/// （同一判据：bun 在场 且 解释器路径可解析才走 shell 车道）。
 fn dhv_run_gate(entry: String, task: String, fixture: String, out_dir: String) -> ShellFlat {
-    if has_bun() {
+    if has_bun() && dhv_path().len() > 0 {
         let cmd = format!(
             "bun {} run {} --workspace . --task \"{}\" --model scripted --fixture {} --out {} --quiet",
             dhv_path(), entry, task, fixture, out_dir

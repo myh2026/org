@@ -11,6 +11,10 @@
 //   GET    /api/status              专家清单 + 会话上下文占用 + 服务级 model
 //   POST   /api/keep                工具库治理：选取保留（候选转正，git 留痕）
 //   POST   /api/drop                工具库治理：取消保留（退出 B 路径自动复用）
+//   GET    /api/review?run=         运行范围复核：本次运行碰过哪些 harness
+//                                   （铸出 / 补丁 / 复用）+ 待决策候选
+//   POST   /api/review              按运行范围选取沉淀：body {run?, keep:[名]}
+//                                   （只翻转 retained；越界名 409 拒绝）
 //   GET    /api/sessions?expert=X   会话列表（runtime/sessions/<expert>/*.jsonl）
 //   GET    /api/session/<E>/<S>     逐轮 question/answer/tokens/ctx_tokens
 //   DELETE /api/session/<E>/<S>     删除会话（删账本文件 = 删会话）
@@ -36,6 +40,7 @@ import { ROOT, DEFAULT_WORKSPACE } from "../lib/root.ts";
 import {
   ensureWorkspace, loadRegistryIndex, listContextUsage,
   expertFixtureOf, dhvRun, resolveDhv, resolveBun, setRetained,
+  reviewCandidates, applyReview,
 } from "../lib/engine.ts";
 import { tailLines } from "../lib/events.ts";
 import { AskGate, QueueCancelledError } from "./gate.ts";
@@ -622,6 +627,43 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
             return json({ ok: false, error: `专家不存在：${expert}` }, 404);
           }
           return json({ ok: true, expert, retained, kept: out.kept });
+        }
+        // ---- 运行范围复核（org review 的 GUI 面）----
+        // 与 CLI org review 同一代码路径（reviewCandidates + applyReview）：
+        // 范围由运行产物界定（本次铸出 / 补丁合入 / 复用命中），选取只翻转
+        // retained，不删文件。GUI 在这里承担「本次运行产出的东西，哪些值得
+        // 沉淀进工具库」的勾选面 —— CLI 交互选取的可视化等价物。
+        if (route === "GET /api/review") {
+          const rws = readWorkspaceOf(ws);
+          const runParam = url.searchParams.get("run") ?? "";
+          const plan = reviewCandidates(rws, runParam || undefined);
+          if (!plan.scope) {
+            return json({ ok: false, error: "工作区没有 run 产物目录（先 org run / org demo）" }, 404);
+          }
+          return json({ ok: true, ...plan });
+        }
+        if (route === "POST /api/review") {
+          const body = await req.json().catch(() => ({})) as { run?: unknown; keep?: unknown };
+          const rws = readWorkspaceOf(ws);
+          if (path.resolve(rws) === path.join(ROOT, "dist", "demo")) {
+            return json({ error: "dist/demo 是入库快照（只读）。请以可写工作区启动 org web。" }, 400);
+          }
+          const keep = Array.isArray(body.keep) ? body.keep.map((x) => String(x)) : [];
+          if (keep.some((n) => !SAFE_NAME.test(n))) return json({ error: "harness 名不合法" }, 400);
+          // 只接受本次复核范围内的候选：越界选取说明客户端状态已过期，
+          // 明确 409 拒绝而不是「静默生效一部分」。
+          const plan = reviewCandidates(rws, String(body.run ?? "") || undefined);
+          const allowed = new Set(plan.pending.map((c) => c.name));
+          const outOfScope = keep.filter((n) => !allowed.has(n));
+          if (outOfScope.length > 0) {
+            return json({
+              ok: false,
+              error: `不在本次待决策候选内：${outOfScope.join(", ")}`,
+              allowed: [...allowed],
+            }, 409);
+          }
+          const out = applyReview(rws, keep);
+          return json({ ok: true, kept: out.kept, keptCount: out.kept.length, run: plan.scope?.label ?? "" });
         }
         if (route === "GET /api/sessions") {
           const expert = url.searchParams.get("expert") ?? "";
@@ -1231,6 +1273,50 @@ function renderIndexHtml(): string {
   .statusbar .sb-right .run::before { content: "● "; }
   .statusbar .idle::before { content: "○ "; }
 
+  /* ── 运行范围复核（org review 的 GUI 面）──────────────────
+     「本次运行产出的 harness，哪些沉淀进工具库」的勾选面板。与 keep/drop
+     的区别是范围：那两个按名字治理库里已有资产，这里按运行范围复核本次产出。 */
+  .rchip { flex: none; margin-left: 8px; background: transparent;
+        border: 1px solid var(--border2); color: var(--amber);
+        font: 600 10px var(--mono); padding: 4px 7px; border-radius: 3px;
+        cursor: pointer; white-space: nowrap; }
+  .rchip:hover { border-color: var(--amber); background: var(--raise); }
+  .rchip[hidden] { display: none; }
+  #reviewScrim { display: none; position: fixed; inset: 0;
+        background: rgba(0,0,0,.58); z-index: 40; }
+  #reviewScrim.on { display: block; }
+  #reviewPane { display: none; position: fixed; z-index: 41;
+        left: 50%; top: 50%; transform: translate(-50%,-50%);
+        width: min(700px, calc(100vw - 28px)); max-height: min(78vh, 660px);
+        overflow: auto; background: var(--panel); border: 1px solid var(--border2);
+        border-radius: 4px; box-shadow: 0 24px 60px rgba(0,0,0,.6); }
+  #reviewPane.on { display: block; }
+  .rvhead { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .rvhead .t { font: 600 12px var(--mono); color: var(--text); }
+  .rvhead .s { margin-top: 3px; font: 11px/1.6 var(--mono); color: var(--muted); }
+  .rvitem { display: flex; gap: 10px; padding: 10px 14px;
+        border-bottom: 1px solid var(--border); cursor: pointer; }
+  .rvitem:hover { background: var(--panel2); }
+  .rvitem input { flex: none; margin-top: 3px; accent-color: var(--green); }
+  .rvitem .nm { font: 600 12px/1.5 var(--mono); color: var(--text); }
+  .rvitem .vr { color: var(--dim); font-size: 10px; }
+  .rvitem .meta { margin-top: 2px; font: 11px/1.6 var(--mono); color: var(--dim); }
+  .rvitem .desc { margin-top: 2px; font: 11px/1.6 var(--sans); color: var(--muted); }
+  .rvempty { padding: 16px 14px; font: 11px var(--mono); color: var(--dim); }
+  .rvfoot { display: flex; align-items: center; gap: 8px; padding: 12px 14px;
+        position: sticky; bottom: 0; background: var(--panel);
+        border-top: 1px solid var(--border); }
+  .rvfoot .sp { flex: 1; }
+  .rvfoot .cnt { font: 11px var(--mono); color: var(--dim); }
+  .rvfoot button { background: transparent; border: 1px solid var(--border2);
+        color: var(--text); font: 600 11px var(--mono); padding: 7px 11px;
+        border-radius: 3px; cursor: pointer; }
+  .rvfoot button:hover { background: var(--raise); }
+  .rvfoot button.pri { border-color: rgba(16,185,129,.45); color: var(--greenb); }
+  .rvfoot button.pri:disabled { opacity: .45; cursor: default; }
+  .rvsettled { padding: 10px 14px; font: 11px/1.7 var(--mono); color: var(--dim);
+        border-bottom: 1px solid var(--border); }
+
   /* 移动端：侧栏改抽屉（≤720px，issue #13 —— 不再 display:none 直接消失） */
   #backdrop { display: none; position: fixed; inset: 34px 0 0 0;
            background: rgba(0,0,0,.5); z-index: 25; }
@@ -1242,6 +1328,7 @@ function renderIndexHtml(): string {
     aside.open { transform: translateX(0); }
     .khint { display: none; }
     .chat { padding: 16px 12px 24px; }
+    .rchip .rc-label { display: none; }
   }
 </style>
 </head>
@@ -1251,9 +1338,15 @@ function renderIndexHtml(): string {
   <span class="brand">org</span>
   <span class="ver">v${VERSION}</span>
   <span class="path" id="wsPath"></span>
+  <button id="reviewBtn" class="rchip" type="button" hidden
+          title="本次运行铸出/合入的 harness 尚未保留 —— 点击选取哪些沉淀进工具库">
+    <span class="rc-label">待复核</span> <b id="reviewCount">0</b>
+  </button>
   <span class="tstats" id="topStats"></span>
 </header>
 <div id="backdrop" aria-hidden="true"></div>
+<div id="reviewScrim" aria-hidden="true"></div>
+<div id="reviewPane" role="dialog" aria-modal="true" aria-labelledby="rvTitle"></div>
 <div class="app">
   <aside>
     <button class="newbtn" id="newSession" type="button">+ 新会话</button>
@@ -1413,6 +1506,128 @@ function retainToggle(name, retained) {
       flashHint((r && r.error) || "操作失败");
     })
     .catch(function (e) { flashHint(String(e && e.message || e)); });
+}
+
+// ---- 运行范围复核（org review 的 GUI 面）--------------------------------
+// 与 CLI org review 同一语义：范围由运行产物界定（本次铸出 / 补丁合入 /
+// 复用命中），勾选后只翻转 retained（不删文件）。侧栏的 ★/○ 是「按名字治理
+// 库里已有资产」，这里是「按本次运行复核产出」——范围不同，故并列而非替代。
+var reviewPlan = null;   // GET /api/review 的最近结果（勾选面板数据源）
+
+function reviewItemHtml(c, idx) {
+  var why = c.origin.indexOf("minted") >= 0 ? "本次铸出"
+    : (c.origin.indexOf("patched") >= 0 ? "本次补丁合入" : "本次复用命中");
+  var bits = [why];
+  if (c.evalInRun) bits.push("本次验收 " + c.evalInRun);
+  bits.push("库内评测 " + Number(c.eval_score).toFixed(2));
+  if (c.capabilities && c.capabilities.length) bits.push("能力 " + c.capabilities.join("/"));
+  return '<label class="rvitem">' +
+    '<input type="checkbox" data-rv="' + esc(c.name) + '" checked>' +
+    '<span><span class="nm">' + esc(c.name) + '</span>' +
+    '<span class="vr"> @' + esc(c.version) + '</span>' +
+    (c.description ? '<div class="desc">' + esc(c.description) + '</div>' : '') +
+    '<div class="meta">' + esc(bits.join(" · ")) + '</div>' +
+    (c.patchNote ? '<div class="meta">补丁：' + esc(c.patchNote) + '</div>' : '') +
+    '</span></label>';
+}
+
+function renderReviewPane() {
+  var pane = document.getElementById("reviewPane");
+  if (!reviewPlan || !reviewPlan.scope) { pane.innerHTML = ""; return; }
+  var scope = reviewPlan.scope;
+  var pending = reviewPlan.pending || [];
+  var settled = reviewPlan.settled || [];
+  var head = '<div class="rvhead"><div class="t" id="rvTitle">运行范围复核 · 选取沉淀进工具库</div>' +
+    '<div class="s">' + esc(scope.label) + ' · 任务 ' + esc(scope.task || "(未记录)") +
+    ' · 模型 ' + esc(scope.model || "?") + ' · 结果 ' + (scope.ok ? "Ok" : "Err") + '</div>' +
+    '<div class="s">本次接触 铸出 ' + scope.minted.length + ' · 补丁 ' + scope.patched.length +
+    ' · 复用 ' + scope.reused.length + '</div></div>';
+  var body = pending.length
+    ? pending.map(reviewItemHtml).join("")
+    : '<div class="rvempty">本次运行没有待决策候选（无新铸出/合入的未保留资产）。</div>';
+  var settledHtml = settled.length
+    ? '<div class="rvsettled">已在库保留（仅上下文，不参与本次选取）：' +
+      settled.map(function (c) { return esc((c.retained ? "★ " : "○ ") + c.name); }).join(" · ") + '</div>'
+    : "";
+  var foot = '<div class="rvfoot">' +
+    '<button type="button" id="rvAll">全选</button>' +
+    '<button type="button" id="rvNone">全不选</button>' +
+    '<span class="sp"></span><span class="cnt" id="rvCount"></span>' +
+    '<button type="button" id="rvCancel">取消</button>' +
+    '<button type="button" class="pri" id="rvApply"' + (pending.length ? "" : " disabled") + '>确认沉淀</button>' +
+    '</div>';
+  pane.innerHTML = head + body + settledHtml + foot;
+  var boxes = function () { return Array.prototype.slice.call(pane.querySelectorAll("input[data-rv]")); };
+  function syncCount() {
+    var n = boxes().filter(function (b) { return b.checked; }).length;
+    var el = document.getElementById("rvCount");
+    if (el) el.textContent = "已选 " + n + " / " + pending.length;
+  }
+  boxes().forEach(function (b) { b.onchange = syncCount; });
+  syncCount();
+  document.getElementById("rvAll").onclick = function () { boxes().forEach(function (b) { b.checked = true; }); syncCount(); };
+  document.getElementById("rvNone").onclick = function () { boxes().forEach(function (b) { b.checked = false; }); syncCount(); };
+  document.getElementById("rvCancel").onclick = closeReview;
+  document.getElementById("rvApply").onclick = submitReview;
+}
+
+function openReview() {
+  var pane = document.getElementById("reviewPane");
+  var scrim = document.getElementById("reviewScrim");
+  pane.classList.add("on"); scrim.classList.add("on");
+  api("/api/review").then(function (r) {
+    if (!r || !r.ok) {
+      closeReview();
+      flashHint((r && r.error) || "读取复核范围失败");
+      return;
+    }
+    reviewPlan = r;
+    renderReviewPane();
+  }).catch(function (e) { closeReview(); flashHint(String(e && e.message || e)); });
+}
+
+function closeReview() {
+  document.getElementById("reviewPane").classList.remove("on");
+  document.getElementById("reviewScrim").classList.remove("on");
+}
+
+function submitReview() {
+  if (!reviewPlan) return;
+  var pane = document.getElementById("reviewPane");
+  var keep = Array.prototype.slice.call(pane.querySelectorAll("input[data-rv]"))
+    .filter(function (b) { return b.checked; })
+    .map(function (b) { return b.dataset.rv; });
+  var btn = document.getElementById("rvApply");
+  btn.disabled = true;
+  api("/api/review", {
+    method: "POST",
+    body: JSON.stringify({ run: reviewPlan.scope.dir, keep: keep }),
+  }).then(function (r) {
+    if (!r || !r.ok) { btn.disabled = false; flashHint((r && r.error) || "写入失败"); return; }
+    closeReview();
+    flashHint(keep.length
+      ? "★ 已沉淀 " + r.keptCount + " 个（git 留痕，B 路径自动复用从下轮派单命中）"
+      : "○ 本次未沉淀任何候选（资产留在库，仅退出 B 路径自动复用）");
+    refreshStatus();
+    refreshReviewChip();
+  }).catch(function (e) { btn.disabled = false; flashHint(String(e && e.message || e)); });
+}
+
+// 顶栏计数徽标：本次运行有未保留候选时才出现（界面上给「该复核了」一个信号）
+function refreshReviewChip() {
+  api("/api/review").then(function (r) {
+    var btn = document.getElementById("reviewBtn");
+    if (!btn) return;
+    if (r && r.ok && r.pending && r.pending.length > 0) {
+      reviewPlan = r;
+      document.getElementById("reviewCount").textContent = String(r.pending.length);
+      btn.hidden = false;
+      btn.title = "本次运行（" + r.scope.label + "）有 " + r.pending.length +
+        " 个未保留候选 —— 点击选取哪些沉淀进工具库";
+    } else {
+      btn.hidden = true;
+    }
+  }).catch(function () { /* 无工作区/无产物：徽标保持隐藏 */ });
 }
 
 // 轻量提示（状态栏闪现，2.6s 自清；无侵入）
@@ -1982,6 +2197,8 @@ question.addEventListener("keydown", function (e) {
   }
 });
 document.addEventListener("keydown", function (e) {
+  var rvPane = document.getElementById("reviewPane");
+  if (e.key === "Escape" && rvPane.classList.contains("on")) { closeReview(); return; }
   if (e.key === "Escape" && state.running) stopRun();
   if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
     e.preventDefault();
@@ -2030,6 +2247,10 @@ document.getElementById("menuBtn").onclick = function () {
   backdropEl.style.display = on ? "block" : "none";
 };
 backdropEl.onclick = closeDrawer;
+
+// 运行范围复核面板：顶栏徽标打开，遮罩/Esc 关闭（与抽屉同交互形态）
+document.getElementById("reviewBtn").onclick = openReview;
+document.getElementById("reviewScrim").onclick = closeReview;
 
 // 模型切换（scripted / deepseek）
 document.getElementById("modelSeg").addEventListener("click", function (e) {
@@ -2095,6 +2316,7 @@ api("/api/status").then(function (r) {
   if (r.model === "scripted" || r.model === "deepseek") state.model = r.model;
   document.getElementById("wsPath").textContent = r.workspace || "";
   renderTop(); renderExperts(); renderSeg(); renderStatusbar();
+  refreshReviewChip();
   if (state.experts.length > 0) {
     var retained = state.experts.filter(function (e) { return e.retained; });
     var first = (retained.length > 0 ? retained : state.experts)[0];
