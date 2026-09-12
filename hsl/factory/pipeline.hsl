@@ -19,6 +19,7 @@ import { ExpertManifest, PatchRecord } from "../registry/manifest.hsl";
 import { Registry, json_escape } from "../registry/manifest.hsl";
 import { ask } from "../providers/model.hsl";
 import { MINT_SPEC_PROMPT, MINT_SOURCE_PROMPT, MINT_SAMPLE_PROMPT } from "../config/resources.hsl";
+import { request_approval, ApprovalOutcome, approval_enabled } from "../policy/approval.hsl";
 
 /// 管线阶段（状态机形态的 AgentLoop 素材）。
 enum MintStage {
@@ -249,15 +250,39 @@ export fn merge_patch(registry: Registry, proposal: PatchProposal) -> Result<Exp
     let change_kind = classify_patch(proposal.old_text.clone(), proposal.new_text.clone());
     let mut gate = String::from("check+smoke");
     if change_kind == String::from("capability") {
-        let approved: bool = native typescript {
+        // 预授权（运行前一次性设定：--approve-capability / ORG_CAPABILITY_APPROVED=1）
+        let pre_approved: bool = native typescript {
             return $host.env.get("ORG_CAPABILITY_APPROVED") === "1";
         };
+        // v0.5.0 交互式审批：预授权缺失时，若审批队列开启则**问用户**
+        // （天花板调升仍然只能由用户点头 —— 变的只是「怎么问」）。
+        // 队列关闭（CI / 脚本 / 缺省）时行为与旧版一字不差：直接拒绝。
+        let mut approved = pre_approved;
+        if approved == false && approval_enabled() {
+            let summary = format!("{} :: {}", proposal.expert, truncate_for_review(proposal.new_text.clone()));
+            let outcome = request_approval(
+                String::from("capability_change"),
+                format!("专家 {} 的能力变更补丁请求放行", proposal.expert),
+                summary,
+            );
+            match outcome {
+                ApprovalOutcome::Allowed => { approved = true; },
+                ApprovalOutcome::Denied => { approved = false; },
+                ApprovalOutcome::NotQueued => { approved = false; },
+            }
+        }
         if approved == false {
             let _ = native typescript {
-                $host.events.emit("audit", { event: "capability_change_rejected", expert: proposal.expert, reason: "仅用户可批准（ORG_CAPABILITY_APPROVED=1 缺失）" });
+                $host.events.emit("audit", { event: "capability_change_rejected", expert: proposal.expert, reason: "仅用户可批准（预授权缺失且审批未放行）" });
                 return true;
             };
             return Err(OrgError::factory(String::from("能力变更补丁被拒：天花板调升只属于用户（审计事件已留痕）")));
+        }
+        if pre_approved == false {
+            let _ = native typescript {
+                $host.events.emit("audit", { event: "capability_change_approved_interactive", expert: proposal.expert, gate: "user-approval" });
+                return true;
+            };
         }
         let _ = native typescript {
             $host.events.emit("audit", { event: "capability_change_approved", expert: proposal.expert });
@@ -766,6 +791,16 @@ fn sh_quote(raw: String) -> String {
         return "'" + String(s).replace(/'/g, "'\\''") + "'";
     };
     quoted
+}
+
+/// 补丁摘要（交互式审批展示用）：空白折叠 + 截断 —— 审批面板里要看的是一句
+/// 「这补丁改了什么」，不是整段源码。
+fn truncate_for_review(text: String) -> String {
+    let body: String = native typescript {
+        const s = String(text).replace(/\s+/g, " ").trim();
+        return s.length > 160 ? s.slice(0, 160) + "…" : s;
+    };
+    body
 }
 
 /// git 注册表提交（best-effort：git 不可用则跳过并记事件）。

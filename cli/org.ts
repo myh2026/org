@@ -33,6 +33,7 @@ import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          importHarness, listContextUsage, renderContextMeter, expertFixtureOf,
          latestHarnessRunDir, reviewCandidates, applyReview,
          forkSession, revertExpert, archivedVersions, renameSession, deleteSession } from "../lib/engine.ts";
+import { listApprovals, decideApproval, clearGranted } from "../lib/approvals.ts";
 import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
 import { parseJournalLine } from "../lib/events.ts"; // v0.4.17：replay 解析与事件泵同源
@@ -99,6 +100,7 @@ interface Args {
   modelExplicit: boolean;  // --model 是否显式给出（缺省车道以此判据接管）
   exportDist: boolean;
   toVersion: string;      // org revert --to <x.y.z>
+  approval: boolean;      // org run --approval（开交互式审批队列）
   rest: string[];
 }
 
@@ -128,6 +130,7 @@ function parseArgs(argv: string[]): Args {
     modelExplicit: false,
     exportDist: false,
     toVersion: "",
+    approval: false,
     rest: [],
   };
   let i = 1;
@@ -145,6 +148,7 @@ function parseArgs(argv: string[]): Args {
     else if (v === "--approve-capability") a.approveCapability = true;
     else if (v === "--export-dist") a.exportDist = true;
     else if (v === "--to") a.toVersion = argv[++i] ?? "";
+    else if (v === "--approval") a.approval = true;
     else if (v === "--continue" || v === "-c") a.continue = true;
     else if (v === "--name") a.name = (argv[++i] ?? "").toLowerCase();
     else if (v === "--description" || v === "--desc") a.description = argv[++i] ?? "";
@@ -192,7 +196,11 @@ async function cmdRun(a: Args): Promise<number> {
   if (!a.task) { console.error("✗ --task 必填"); return 2; }
   ensureWorkspace(a.workspace);
   const out = a.out || path.join(a.workspace, "out-latest");
-  const env = a.approveCapability ? { ORG_CAPABILITY_APPROVED: "1" } : {};
+  const env: Record<string, string> = {};
+  // 预授权：运行前一次性放行全部能力变更（旧语义，保留）
+  if (a.approveCapability) env.ORG_CAPABILITY_APPROVED = "1";
+  // 交互式审批：能力类决策写请求 + 有界等待（另一终端跑 org approvals --watch）
+  if (a.approval) env.ORG_APPROVAL = "1";
   const r = await runHsl(HSL_ENTRY, {
     workspace: a.workspace, task: a.task, model: a.model,
     fixture: a.fixture, out, env,
@@ -825,6 +833,56 @@ function askLine(prompt: string): Promise<string | null> {
 // 「反悔」通道：把归档源还原为在岗源（金丝雀回滚用的是同一批归档源），
 // 当前源先归档 → 回退本身可逆，注册表版本号随之回退并 git 留痕。
 // 对应 opencode 的 /undo 与 codex 的 diff/revert。
+// ---- 交互式审批队列（org approvals）----
+// 审批是「文件协议」而非进程内通道（图执行当前没有挂起点）：HSL 侧
+// hsl/policy/approval.hsl 落 <id>.json 并有界轮询 <id>.reply.json。
+// 因此本命令在**另一个终端**里跑就能给运行中的 run 放行 —— 也可以由
+// Web 面板或任何写这个文件的东西代劳（三端同权）。
+async function cmdApprovals(a: Args): Promise<number> {
+  const verb = a.rest[0] ?? "";
+  if (verb === "allow" || verb === "always" || verb === "deny") {
+    const id = a.rest[1] ?? "";
+    const allow = verb !== "deny";
+    const r = decideApproval(a.workspace, id, allow, verb === "always", "cli");
+    if (!r.ok) { console.error(`✗ ${r.error}`); return r.status === 400 ? 2 : 1; }
+    console.log(`${allow ? "✓ 已放行" : "✗ 已拒绝"} ${id}${verb === "always" ? "（并写入长期放行集）" : ""}`);
+    return 0;
+  }
+  if (verb === "clear") {
+    clearGranted(a.workspace);
+    console.log("✓ 已清空长期放行集（之后同类能力会重新询问）");
+    return 0;
+  }
+
+  // 缺省：列出待批准 + 长期放行集
+  const { pending, granted, resolved } = listApprovals(a.workspace);
+  if (pending.length === 0) {
+    console.log("✓ 没有待批准的项。");
+  } else {
+    console.log(`待批准 ${pending.length} 项：`);
+    for (const p of pending) {
+      console.log(`  ${p.id}  [${p.capability}]`);
+      console.log(`     ${p.action}`);
+      if (p.detail) console.log(`     ${p.detail.slice(0, 120)}`);
+    }
+    console.log("");
+    console.log("放行：org approvals allow <id>   · 长期放行：org approvals always <id>   · 拒绝：org approvals deny <id>");
+  }
+  if (granted.length > 0) {
+    console.log(`长期放行集：${granted.join(", ")}（org approvals clear 可清空）`);
+  }
+  if (resolved.length > 0) {
+    const last = resolved[0]!;
+    console.log(`已判定 ${resolved.length} 条（最近：${last.id} ${last.resolved.allow ? "放行" : "拒绝"} by ${last.resolved.by}）`);
+  }
+  if (pending.length > 0) {
+    console.log("");
+    console.log("提示：请求来自运行中的 run（org run --approval / TUI / Web）。");
+    console.log("     超时未回复会被降级为拒绝，run 不会被挂住。");
+  }
+  return 0;
+}
+
 async function cmdRevert(a: Args): Promise<number> {
   const name = (a.rest[0] ?? "").toLowerCase();
   if (!name) {
@@ -1259,6 +1317,7 @@ export async function orgMain(): Promise<number> {
     case "import": return cmdImport(a);
     case "review": return cmdReview(a);
     case "revert": return cmdRevert(a);
+    case "approvals": return cmdApprovals(a);
     case "session": return cmdSession(a);
     case "status": return cmdStatus(a);
     case "score": return cmdScore(a);
@@ -1274,6 +1333,7 @@ export async function orgMain(): Promise<number> {
 
 用法：
   org run --task "..." [--workspace DIR] [--model scripted|deepseek] [--fixture FILE]
+       [--approval] [--approve-capability]
       团队模式派单：分解 → 路由 → 派单 → 审查 → 汇总 → 资产沉淀
   org demo [--workspace DIR]
       全叙事演示：A 现场铸专家 / K 用户选取保留 / B 复用+补丁+金丝雀
@@ -1292,6 +1352,8 @@ export async function orgMain(): Promise<number> {
       工具库治理：选取保留 harness（工厂候选 → 转正，git 留痕）
   org drop <expert> [expert2 ...] [--workspace DIR]
       工具库治理：取消保留（B 路径不再自动复用；显式寻址仍可用）
+  org approvals [allow|always|deny <id>] [--workspace DIR]
+      交互式审批队列：列出待批准项 / 放行 / 长期放行 / 拒绝（另一个终端也能放行）
   org revert <expert> [--to x.y.z] [--workspace DIR]
       反悔通道：把归档源还原为在岗源（当前源先归档，回退可逆）+ git 留痕
   org session fork <expert> <from> <to> | rename | rm

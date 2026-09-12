@@ -132,6 +132,17 @@ export type EngineEvent =
       usage: Record<string, unknown> | null;
     }
   | { kind: "fault"; seq: number; ts: string; action: string; target: string; kind2: string; message: string }
+  // ---- v0.5.0：交互式审批队列的四态（请求 / 结论 / 超时 / 长期放行命中）----
+  | {
+      kind: "approval_requested"; seq: number; ts: string;
+      id: string; capability: string; action: string; detail: string; timeoutMs: number;
+    }
+  | {
+      kind: "approval_resolved"; seq: number; ts: string;
+      id: string; capability: string; allow: boolean; always: boolean; by: string; waitedMs: number;
+    }
+  | { kind: "approval_timeout"; seq: number; ts: string; id: string; capability: string; action: string; timeoutMs: number }
+  | { kind: "approval_cached"; seq: number; ts: string; capability: string; action: string }
   | { kind: "unknown"; seq: number; ts: string; name: string; data: Record<string, unknown> }
   // 引擎桥合成事件（不在磁盘产物中，wait() 完成前注入流尾）
   | {
@@ -248,6 +259,26 @@ export function normalizeEventLine(raw: RawEventLine): EngineEvent {
         elapsedMs: num(d.elapsed_ms),
         usage: (d.usage ?? null) as Record<string, unknown> | null,
       };
+    case "approval_requested":
+      return {
+        kind: "approval_requested", seq, ts,
+        id: str(d.id), capability: str(d.capability), action: str(d.action),
+        detail: str(d.detail), timeoutMs: num(d.timeout_ms),
+      };
+    case "approval_resolved":
+      return {
+        kind: "approval_resolved", seq, ts,
+        id: str(d.id), capability: str(d.capability),
+        allow: d.allow === true, always: d.always === true,
+        by: str(d.by), waitedMs: num(d.waited_ms),
+      };
+    case "approval_timeout":
+      return {
+        kind: "approval_timeout", seq, ts,
+        id: str(d.id), capability: str(d.capability), action: str(d.action), timeoutMs: num(d.timeout_ms),
+      };
+    case "approval_cached":
+      return { kind: "approval_cached", seq, ts, capability: str(d.capability), action: str(d.action) };
     case "fault_injected":
     case "fault_rejected":
       return {

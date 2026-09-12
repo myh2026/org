@@ -42,6 +42,11 @@ export interface RunOptions {
   outDir?: string;                // 默认 <workspace>/out-<ts>
   expert?: string;                // direct 模式必填
   session?: string;               // direct 会话账本 id（默认 "default"）
+  /** 交互式审批（v0.5.0）：true 时给子进程注入 ORG_APPROVAL=1，
+   *  能力类决策（目前是能力变更补丁）会写审批请求并**有界等待**用户回复。
+   *  缺省 false —— 无人在场的场景（CI / 脚本 / org demo）行为零变化，
+   *  且绝不会因为等不到人而挂住 run（超时降级为拒绝）。 */
+  approval?: boolean;
 }
 
 export interface DirectTurn {
@@ -1185,6 +1190,8 @@ export function startRun(opts: RunOptions): RunHandle {
       }
       env.DHV_TS = shPath(resolveDhv());
       const envExtra: Record<string, string> = { DHV_TS: shPath(resolveDhv()) };
+      // 交互式审批开关（缺省不开：见 RunOptions.approval 的说明）
+      if (opts.approval === true) envExtra.ORG_APPROVAL = "1";
       if (opts.entry === "direct") {
         if (!opts.expert) throw new Error("direct 模式必填 expert（?专家名 问题?）");
         envExtra.ORG_ASK_EXPERT = opts.expert;

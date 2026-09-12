@@ -17,6 +17,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { startRun, loadRegistryIndex, expertFixtureOf, renderContextMeter } from "../lib/engine.ts";
+import { listApprovals, decideApproval } from "../lib/approvals.ts";
 import { ORG_VERSION } from "../lib/version.ts";
 
 const CONTEXT_WINDOW = 131072; // 与 direct.hsl / engine.ts 同源的窗口口径
@@ -389,6 +390,7 @@ async function handleSlash(state: ChatOpts, rl: readline.Interface, command: str
   /history             当前会话轮次回放（问题 → 回答首行）
   /retry               重问上一问题
   /compact             上下文压缩（LLM 摘要会话史 → 重写账本，备份可回滚）
+  /approvals           交互式审批队列（/approve <id> · /always <id> · /deny <id>）
   /clear               清屏
   /exit /quit /q       退出（Ctrl+D 同）
   !<cmd>               shell 逃逸（用户发起 · 结果直接可见）`);
@@ -499,6 +501,38 @@ async function handleSlash(state: ChatOpts, rl: readline.Interface, command: str
     }
     case "compact": {
       await runCompact(state);
+      return true;
+    }
+    case "approvals": {
+      // 交互式审批队列（文件协议）：与 CLI / TUI / Web 同一实现（lib/approvals.ts）
+      const view = listApprovals(state.workspace);
+      if (view.pending.length === 0) {
+        const g = view.granted.length > 0 ? " · 长期放行集：" + view.granted.join(", ") : "";
+        console.log(green("✓ 没有待批准的项") + dim(g));
+        return true;
+      }
+      console.log(bold("待批准 " + view.pending.length + " 项"));
+      for (const p of view.pending) {
+        console.log("  " + p.id + "  [" + p.capability + "]");
+        console.log("     " + p.action);
+      }
+      console.log(dim("放行 /approve <id> · 长期 /always <id> · 拒绝 /deny <id>"));
+      return true;
+    }
+    case "approve":
+    case "always":
+    case "deny": {
+      const parts = raw.trim().split(" ").filter(function (x) { return x.length > 0; });
+      const id = parts[1] ?? "";
+      if (!id) {
+        console.log(amber("用法：/approve <审批 id>（/approvals 查看待批准）"));
+        return true;
+      }
+      const allow = command !== "deny";
+      const r = decideApproval(state.workspace, id, allow, command === "always", "chat");
+      console.log(r.ok
+        ? (allow ? green("✓ 已放行 " + id + (command === "always" ? "（长期放行）" : "")) : red("✗ 已拒绝 " + id))
+        : amber("✗ " + r.error));
       return true;
     }
     case "clear": {

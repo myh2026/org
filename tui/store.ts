@@ -377,6 +377,28 @@ export function pushEngineEvent(state: TuiState, ev: EngineEvent): TuiState {
       }
       return next;
     }
+    // v0.5.0 交互式审批四态：TUI 的面就是一条醒目提示 + 可执行的下一步
+    // （逐项勾选在 Web 面板 / CLI org approvals；:approve <id> 这里也能拍板）
+    case "approval_requested":
+      return {
+        ...state,
+        notice: {
+          text: `待批准 ${ev.capability}：${ev.action} · :approve ${ev.id} / :always ${ev.id} / :deny ${ev.id}`,
+          tone: "warn",
+        },
+      };
+    case "approval_resolved":
+      return {
+        ...state,
+        notice: {
+          text: `审批${ev.allow ? "放行" : "拒绝"} ${ev.capability}${ev.always ? "（已写入长期放行集）" : ""} · ${ev.by}`,
+          tone: ev.allow ? "info" : "warn",
+        },
+      };
+    case "approval_timeout":
+      return { ...state, notice: { text: `审批超时降级为拒绝 ${ev.capability}（run 未被挂住）`, tone: "warn" } };
+    case "approval_cached":
+      return { ...state, notice: { text: `长期放行命中 ${ev.capability}`, tone: "info" } };
     default:
       return state;
   }

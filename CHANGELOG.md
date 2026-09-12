@@ -55,18 +55,51 @@
   事实覆盖 / task 必填 400 / runs 列表 / 回放与坏名不存在 / 评分卡 / GUI 要素
   与内联脚本可解析）。
 - 新增 `tests/sessions.test.ts` 19 例（fork 隔离与防呆 / revert 往返与防呆 /
-  11 类事件归一化 / 分类器 tone）。
+  11 类事件归一化 / 分类器 tone）+ `tests/approval.test.ts` 11 例（审批队列四态）。
 - **修复 v0.4.17 批次三条新回归用例缺超时**：它们起初只在带 `--timeout` 的
   npm 脚本下全绿，裸 `bun test tests/` 会假红（第 3 例要跑完整 `org demo`，
   实测 10.8s）。已补齐 `, 120_000`（该文件头部本就写着这条约定）。
-- 全量 **250/250 全绿**（13 文件 · 981 expect），裸 `bun test tests/` 即可复现。
+- 全量 **263/263 全绿**（14 文件 · 1055 expect），裸 `bun test tests/` 即可复现。
+
+### 5. 交互式审批：审批队列文件协议（mid-run 暂停等人点头）
+
+此前「审批」只有一个运行前开关（`--approve-capability` / `ORG_CAPABILITY_APPROVED=1`），
+而且三态表基本是摆设：`decide()` 只被 `llm_call` 调用，`elevate()` 零调用点。
+
+**为什么是文件协议**：图执行当前没有挂起点（`interp.ts` 的 graph 求值一次 await 到底），
+要做真正的 `$host.askUser(await …)` 得改 vendored 解释器 —— 跨仓库、回归面最大。
+文件协议的取舍是**最多一个轮询周期的延迟**，换来「不改解释器 + 四端天然同权」。
+
+- **`hsl/policy/approval.hsl`**（新增）：`request_approval()` 落
+  `runtime/approvals/<id>.json` 并有界轮询 `<id>.reply.json`。
+  **超时/拿不到回复一律降级为拒绝 —— run 永远不会被挂住**；
+  回复带 `always` 时写入长期放行集 `granted.json`，之后同类请求直接命中缓存
+  （对应 codex 的 "always allow"）。
+  四态各发一条事件：`approval_requested` / `approval_resolved` / `approval_timeout` /
+  `approval_cached` —— 审批不是静默行为。
+- **接入点**：能力变更补丁闸门（`pipeline.hsl`）—— 预授权缺失时，若审批队列开启则
+  **问用户**；天花板调升仍然只能由用户点头，变的只是「怎么问」。队列关闭时行为与旧版
+  一字不差（CI / 脚本 / `org demo` 零变化）。
+- **开启方式**：`ORG_APPROVAL=1` / `org run --approval` / TUI 团队派单 / Web 团队派单
+  （交互式前端默认开 —— 人在场才问）。超时可用 `ORG_APPROVAL_TIMEOUT_MS` 调。
+- **四端同权**（共用 `lib/approvals.ts` 唯一实现，避免四份目录遍历各自漂移）：
+  CLI `org approvals [allow|always|deny|clear <id>]` · TUI `:approvals` / `:approve <id>` ·
+  chat `/approvals` / `/approve <id>` · Web 顶栏「待批准 N」徽标 + 面板（放行 / 总是放行 /
+  拒绝）+ run 卡片内联按钮。端点 `GET/POST /api/approvals`（已判定重复决策 → 409，
+  坏 id → 400，不存在 → 404）。
+- **判定后不删只标记**：请求文件写回 `resolved{allow,always,by,ts,waited_ms}`，
+  既是自洽的审计记录，也避免「已放行却永远挂在待批准列表里」。
+
+测试：`tests/approval.test.ts` 11 例（队列关闭零变化 / 有界超时降级 / 并发放行 /
+长期放行集命中 / 拒绝 / CLI 五条路径 / Web 端点与状态码 / 四态事件归一化与分类）。
+探针 `hsl/probe/probe11-approval.hsl` 可重放三态。
 
 ### 诚实的边界（本版未做）
 
 按约定范围，以下需要改 vendored 解释器或新增宿主通道，留作后续：
 逐步文件 diff（`fs.write/edit` 记录 old/new）、`$host.net.fetch` 与 `net_connect`
 接线、LLM 工具循环（function calling）、附件 / `@path` 提及、自定义 skills 目录、
-桌面通知、**交互式审批（审批队列文件协议）**。三端能力对齐（Web 的
+桌面通知。三端能力对齐（Web 的
 import/handoff/demo/config；TUI 的 `:model` / `j,k` / 会话管理；chat 的
 `/review` 等）同样在后续批次 —— 本版先把「旗舰面可见」与「反悔通道」落地。
 

@@ -12,6 +12,7 @@ import {
   type TuiState, type Action, type Focus,
 } from "./store.ts";
 import { THEMES, THEME_ORDER, parseThemeName } from "./theme.ts";
+import { listApprovals, decideApproval } from "../lib/approvals.ts";
 import { Screen } from "./renderer.ts";
 import { renderFrame } from "./frame.ts";
 import {
@@ -414,6 +415,38 @@ export class App {
         });
         return;
       }
+      case "approvals": {
+        // 交互式审批队列（文件协议）—— TUI 面：列待批准 + 长期放行集
+        const view = listApprovals(this.state.workspace);
+        if (view.pending.length === 0) {
+          const g = view.granted.length > 0 ? ` · 长期放行集：${view.granted.join(", ")}` : "";
+          this.dispatch({ type: "notice", text: `✓ 没有待批准的项${g}` });
+          return;
+        }
+        const first = view.pending[0]!;
+        this.dispatch({
+          type: "notice",
+          text: `待批准 ${view.pending.length} 项 · ${first.capability}：${first.action} · :approve ${first.id} / :deny ${first.id}（:approvals 列出全部）`,
+        });
+        for (const p of view.pending.slice(1)) {
+          this.dispatch({ type: "notice", text: `${p.id} [${p.capability}] ${p.action}` });
+        }
+        return;
+      }
+      case "approve": case "always": case "deny": {
+        if (!arg) {
+          this.dispatch({ type: "notice", text: `用法：:${name} <审批 id>（:approvals 查看待批准）`, tone: "warn" });
+          return;
+        }
+        const allow = name !== "deny";
+        const r = decideApproval(this.state.workspace, arg, allow, name === "always", "tui");
+        this.dispatch({
+          type: "notice",
+          text: r.ok ? `${allow ? "✓ 已放行" : "✗ 已拒绝"} ${arg}${name === "always" ? "（长期放行）" : ""}` : r.error!,
+          tone: r.ok ? "info" : "err",
+        });
+        return;
+      }
       case "clear": this.dispatch({ type: "clearScreen" }); return;
       case "help": this.dispatch({ type: "toggleHelp", open: true }); return;
       case "quit": case "q": case "exit":
@@ -456,6 +489,8 @@ export class App {
       entry: "org", task,
       workspace: this.state.workspace,
       model: this.state.model === "deepseek" ? "deepseek" : "scripted",
+      // 人在终端前 → 开交互式审批（能力类决策会停下来问；超时降级为拒绝）
+      approval: true,
     }), { demo: null });
   }
 

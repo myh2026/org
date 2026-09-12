@@ -12,6 +12,8 @@
 //   GET    /api/runs                运行产物列表（out-*，TUI 会话栏同源）
 //   GET    /api/run?dir=out-a       单次运行回放（journal/events/metrics/scorecard）
 //   GET    /api/score?dir=out-a     评分卡（缺省取最新）
+//   GET    /api/approvals           待批准项 + 长期放行集（审批队列文件协议）
+//   POST   /api/approvals           决策：body {id, allow, always?} → 写回复文件
 //   POST   /api/run-stream          团队模式派单（SSE：open → queued? → start →
 //                                   run → card* → done/error）。与 CLI org run /
 //                                   TUI 团队输入同一代码路径（startRun entry:"org"）；
@@ -55,6 +57,7 @@ import {
 import { tailLines } from "../lib/events.ts";
 import type { EngineEvent } from "../lib/events.ts";
 import { classifyRunEvent } from "../lib/runCards.ts";
+import { listApprovals, decideApproval } from "../lib/approvals.ts";
 import { AskGate, QueueCancelledError } from "./gate.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14 漂移治理：此前本文件落后两版）
 
@@ -503,7 +506,7 @@ function sseRun(ws: string, req: { task: string; model: string }): Response {
           send("start", { model: req.model, ticketId: ticket.id });
           abortRequested = false;
           ensureWorkspace(ws);
-          const handle = startRun({ entry: "org", task: req.task, workspace: ws, model: req.model });
+          const handle = startRun({ entry: "org", task: req.task, workspace: ws, model: req.model, approval: true });
           runningRun = handle;
           try {
             send("run", { runId: handle.runId, outDir: handle.outDir });
@@ -687,6 +690,27 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
             ok: false, aborted: false,
             message: "当前没有运行中的直连（进程内车道或空闲）",
           });
+        }
+        // ---- 交互式审批队列（v0.5.0）：文件协议（runtime/approvals/）的 Web 面 ----
+        // 请求由 HSL 侧 hsl/policy/approval.hsl 落盘；这里只读列表 + 写回复。
+        // 契约与 CLI org approvals 完全一致（三端同权，无旁路）。
+        if (route === "GET /api/approvals") {
+          // 用 ws 而非 readWorkspaceOf：审批请求由**本工作区**里运行中的 run 落盘；
+          // 读侧回退到 dist/demo 快照只会永远列空（实测踩到）。
+          if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+            return json({ ok: true, workspace: ws, pending: [], granted: [], resolved: [] });
+          }
+          const view = listApprovals(ws);
+          return json({ ok: true, workspace: ws, ...view });
+        }
+        if (route === "POST /api/approvals") {
+          const body = await req.json().catch(() => ({})) as { id?: unknown; allow?: unknown; always?: unknown };
+          if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+            return json({ error: "dist/demo 是入库快照（只读）。请以可写工作区启动 org web。" }, 400);
+          }
+          const r = decideApproval(ws, String(body.id ?? ""), body.allow === true, body.always === true, "web");
+          if (!r.ok) return json({ ok: false, error: r.error }, r.status);
+          return json({ ok: true, id: String(body.id ?? ""), allow: body.allow === true, always: body.always === true });
         }
         // ---- 团队模式派单（v0.5.0：Web 不再只有直连）----
         // 与 CLI org run / TUI 团队输入同一代码路径（lib/engine.ts startRun
@@ -1544,6 +1568,19 @@ function renderIndexHtml(): string {
   .rvfoot button:hover { background: var(--raise); }
   .rvfoot button.pri { border-color: rgba(16,185,129,.45); color: var(--greenb); }
   .rvfoot button.pri:disabled { opacity: .45; cursor: default; }
+  .apitem { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  .apitem .ap1 { display: flex; gap: 8px; align-items: baseline; font: 11px var(--mono); }
+  .apitem .ap1 .nm { color: #fbbf24; font-weight: 600; }
+  .apitem .ap2 { margin-top: 3px; font: 12px/1.6 var(--sans); color: var(--text); }
+  .apitem .ap3 { margin-top: 2px; font: 11px/1.6 var(--mono); color: var(--dim); word-break: break-all; }
+  .apacts { display: flex; gap: 8px; margin-top: 8px; }
+  .apacts button { background: transparent; border: 1px solid var(--border2); color: var(--text);
+        font: 600 11px var(--mono); padding: 5px 10px; border-radius: 3px; cursor: pointer; }
+  .apacts button:hover { background: var(--raise); }
+  .apacts button.pri { border-color: rgba(16,185,129,.45); color: var(--greenb); }
+  .apacts button.danger { border-color: rgba(239,68,68,.45); color: var(--redb); }
+  .revt.nv-approval { color: #fbbf24; }
+  .rchip-ap { color: #fbbf24; margin-left: 6px; }
   .rvsettled { padding: 10px 14px; font: 11px/1.7 var(--mono); color: var(--dim);
         border-bottom: 1px solid var(--border); }
 
@@ -1572,11 +1609,17 @@ function renderIndexHtml(): string {
           title="本次运行铸出/合入的 harness 尚未保留 —— 点击选取哪些沉淀进工具库">
     <span class="rc-label">待复核</span> <b id="reviewCount">0</b>
   </button>
+  <button id="approvalBtn" class="rchip rchip-ap" type="button" hidden
+          title="有等待放行的能力决策 —— 点击处理">
+    <span class="rc-label">待批准</span> <b id="approvalCount">0</b>
+  </button>
   <span class="tstats" id="topStats"></span>
 </header>
 <div id="backdrop" aria-hidden="true"></div>
 <div id="reviewScrim" aria-hidden="true"></div>
 <div id="reviewPane" role="dialog" aria-modal="true" aria-labelledby="rvTitle"></div>
+<div id="approvalScrim" aria-hidden="true"></div>
+<div id="approvalPane" role="dialog" aria-modal="true" aria-labelledby="apTitle"></div>
 <div class="app">
   <aside>
     <button class="newbtn" id="newSession" type="button">+ 新会话</button>
@@ -1891,7 +1934,8 @@ function newRunModel(task, model) {
     id: ++runSeq, task: task, model: model, startedAt: Date.now(),
     mission: "", qa: [], subs: {}, order: [],
     revisions: [], mints: [], patches: [], canaries: [], assets: [],
-    crystals: [], scores: [], caps: [], others: [], shadows: [], notices: [], noise: 0,
+    crystals: [], scores: [], caps: [], others: [], shadows: [], notices: [],
+    approvals: [], noise: 0,
     drift: 0, mined: 0, ctx: null, factoryNodes: [],
     runOk: null, elapsed: 0
   };
@@ -1959,6 +2003,7 @@ function applyFact(m, fact) {
     case "runStart": if (!m.mission && fact.mission) m.mission = fact.mission; break;
     case "shadow": m.shadows.push(fact); break;
     case "notice": m.notices.push(fact); break;
+    case "approval": m.approvals.push(fact); break;
     // run_result 是引擎桥的合成终态（与 done 帧同源信息），不再当作「未分类」
     case "result": break;
     default:
@@ -2053,6 +2098,10 @@ function renderRun(m) {
     h += '<div class="revt"><span class="dim">能力授予 </span>' +
          esc(Object.keys(byCap).map(function (k) { return k + "×" + byCap[k]; }).join(" · ")) + '</div>';
   }
+  m.approvals.forEach(function (ap) {
+    h += '<div class="revt nv-approval">' + esc(ap.text || ("待批准 · " + ap.action)) + '</div>';
+    h += approvalItemHtml({ id: ap.id, capability: ap.capability, action: ap.action, detail: ap.detail });
+  });
   m.notices.forEach(function (n) {
     var cls = n.tone === "err" ? "nv-err" : (n.tone === "warn" ? "nv-warn" : "nv-info");
     h += '<div class="revt ' + cls + '">' + esc(n.text) + '</div>';
@@ -2200,6 +2249,116 @@ function sseConnect(url, body, onEvent, onError, onEof) {
     }
     return pump();
   }).catch(function (e) { onError(e); }).then(function () { onEof(); });
+}
+
+// ---- 交互式审批队列（v0.5.0）：Web 面 --------------------------------------
+// 与 CLI org approvals 同一文件协议（runtime/approvals/），无旁路。
+// 两种入口：顶栏「待批准 N」徽标（轮询发现）+ run 卡片里的内联按钮
+// （运行中当场放行，不必换终端）。
+
+var approvalState = { pending: [], granted: [] };
+
+function approvalChipRefresh() {
+  api("/api/approvals").then(function (r) {
+    var btn = document.getElementById("approvalBtn");
+    if (!btn || !r || !r.ok) return;
+    approvalState.pending = r.pending || [];
+    approvalState.granted = r.granted || [];
+    if (approvalState.pending.length > 0) {
+      document.getElementById("approvalCount").textContent = String(approvalState.pending.length);
+      btn.hidden = false;
+      btn.title = "有 " + approvalState.pending.length + " 项能力决策等待你放行（超时未回复将被拒绝）";
+    } else {
+      btn.hidden = true;
+    }
+    if (runModel && runModel.approvals.length > 0) refreshRunCard(runModel);
+  }).catch(function () { /* 无工作区/无审批目录：保持隐藏 */ });
+}
+
+function approvalItemHtml(p) {
+  var mine = approvalState.pending.some(function (x) { return x.id === p.id; });
+  var h = '<div class="apitem" data-ap="' + esc(p.id) + '">' +
+    '<div class="ap1"><span class="nm">' + esc(p.capability) + '</span>' +
+    '<span class="dim">' + esc(p.id) + '</span></div>' +
+    '<div class="ap2">' + esc(p.action || "") + '</div>';
+  if (p.detail) h += '<div class="ap3">' + esc(p.detail) + '</div>';
+  if (mine) {
+    h += '<div class="apacts">' +
+      '<button type="button" class="pri" data-ap-allow="' + esc(p.id) + '">放行</button>' +
+      '<button type="button" data-ap-always="' + esc(p.id) + '">总是放行</button>' +
+      '<button type="button" class="danger" data-ap-deny="' + esc(p.id) + '">拒绝</button>' +
+      '</div>';
+  } else {
+    h += '<div class="ap3">已处理（或已超时）</div>';
+  }
+  return h + '</div>';
+}
+
+function renderApprovalPane() {
+  var pane = document.getElementById("approvalPane");
+  var pending = approvalState.pending || [];
+  var granted = approvalState.granted || [];
+  var head = '<div class="rvhead"><div class="t" id="apTitle">交互式审批 · 能力决策</div>' +
+    '<div class="s">请求来自运行中的 run（org run --approval / TUI / Web 团队派单）。' +
+    '「放行」只对本次生效，「总是放行」会写入长期放行集。</div>' +
+    '<div class="s">超时未回复将由 HSL 侧降级为拒绝 —— run 不会被挂住。</div></div>';
+  var body = pending.length
+    ? pending.map(approvalItemHtml).join("")
+    : '<div class="rvempty">当前没有待批准的项。</div>';
+  var g = granted.length
+    ? '<div class="rvsettled">长期放行集：' + esc(granted.join(" · ")) + '</div>'
+    : "";
+  var foot = '<div class="rvfoot"><span class="cnt">' +
+    (pending.length ? "待批准 " + pending.length + " 项" : "空闲") + '</span>' +
+    '<span class="sp"></span><button type="button" id="apCancel">关闭</button></div>';
+  pane.innerHTML = head + body + g + foot;
+  document.getElementById("apCancel").onclick = closeApprovals;
+  Array.prototype.forEach.call(
+    pane.querySelectorAll("button[data-ap-allow],button[data-ap-always],button[data-ap-deny]"),
+    function (b) {
+      b.onclick = function () {
+        var id = b.dataset.apAllow || b.dataset.apAlways || b.dataset.apDeny;
+        decideApproval(id, !b.dataset.apDeny, !!b.dataset.apAlways);
+      };
+    });
+}
+
+function openApprovals() {
+  document.getElementById("approvalPane").classList.add("on");
+  document.getElementById("approvalScrim").classList.add("on");
+  approvalChipRefresh();
+  renderApprovalPane();
+}
+
+function closeApprovals() {
+  document.getElementById("approvalPane").classList.remove("on");
+  document.getElementById("approvalScrim").classList.remove("on");
+}
+
+function decideApproval(id, allow, always) {
+  api("/api/approvals", {
+    method: "POST",
+    body: JSON.stringify({ id: id, allow: allow, always: always }),
+  }).then(function (r) {
+    if (!r || !r.ok) { flashHint((r && r.error) || "审批写入失败"); return; }
+    flashHint(allow ? (always ? "✓ 已放行（并写入长期放行集）" : "✓ 已放行本次请求")
+                    : "✗ 已拒绝本次请求");
+    approvalState.pending = approvalState.pending.filter(function (x) { return x.id !== id; });
+    document.getElementById("approvalCount").textContent = String(approvalState.pending.length);
+    document.getElementById("approvalBtn").hidden = approvalState.pending.length === 0;
+    renderApprovalPane();
+    if (runModel) refreshRunCard(runModel);
+  }).catch(function (e) { flashHint("审批写入失败：" + e); });
+}
+
+/** 轮询待批准项：审批请求由子进程落盘，SSE 事件也会到达；这里兜的是
+ *  「面板没开」以及「多标签页」两种场景。 */
+function startApprovalPoll() {
+  approvalChipRefresh();
+  setInterval(function () {
+    approvalChipRefresh();
+    if (document.getElementById("approvalPane").classList.contains("on")) renderApprovalPane();
+  }, 4000);
 }
 
 // ---- 运行产物：列表 / 回放 / 评分卡（TUI :replay 与 org score 的 Web 面） ----
@@ -2837,6 +2996,8 @@ question.addEventListener("keydown", function (e) {
 document.addEventListener("keydown", function (e) {
   var rvPane = document.getElementById("reviewPane");
   if (e.key === "Escape" && rvPane.classList.contains("on")) { closeReview(); return; }
+  var apPane = document.getElementById("approvalPane");
+  if (e.key === "Escape" && apPane.classList.contains("on")) { closeApprovals(); return; }
   if (e.key === "Escape" && state.running) stopRun();
   if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
     e.preventDefault();
@@ -2894,6 +3055,10 @@ backdropEl.onclick = closeDrawer;
 document.getElementById("reviewBtn").onclick = openReview;
 document.getElementById("reviewScrim").onclick = closeReview;
 
+// 交互式审批面板（与复核面板同交互形态）
+document.getElementById("approvalBtn").onclick = openApprovals;
+document.getElementById("approvalScrim").onclick = closeApprovals;
+
 // 模型切换（scripted / deepseek）
 document.getElementById("modelSeg").addEventListener("click", function (e) {
   var b = e.target.closest("button");
@@ -2936,8 +3101,9 @@ function renderMode() {
 // 评分卡（org score 的 Web 面）
 document.getElementById("scoreBtn").onclick = function () { showScorecard(); closeDrawer(); };
 
-// 启动即加载运行产物列表
+// 启动即加载运行产物列表 + 开始审批轮询
 loadRuns();
+startApprovalPoll();
 
 // ---- 导出 Markdown ----
 

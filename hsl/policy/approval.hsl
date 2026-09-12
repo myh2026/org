@@ -1,0 +1,186 @@
+// ============================================================================
+// hsl/policy/approval.hsl — 交互式审批：审批队列文件协议（v0.5.0）
+// ----------------------------------------------------------------------------
+// 为什么是文件协议而不是宿主内建通道：图执行当前没有挂起点（interp.ts 的
+// graph 求值是一次 await 到底），要真正做到 `$host.askUser(await …)` 得改
+// vendored 解释器 —— 那是跨仓库改动，回归面最大。文件协议的取舍是**最多一个
+// 轮询周期的延迟**，换来「不改解释器、三端（CLI / TUI / Web）天然同权」。
+//
+// 协议（目录：<workspace>/runtime/approvals/）：
+//   <id>.json         请求：{id, capability, action, detail, ts, timeout_ms}
+//   <id>.reply.json   回复：{allow: bool, always?: bool, by?: string}
+//   granted.json      长期放行集：{capabilities: ["file_write", ...]}
+//                     回复带 always=true 时写入 —— 之后同类请求直接放行，
+//                     不再打扰用户（对应 codex 的 "always allow"）。
+//
+// 硬约束：
+//   1. **有界**：超时或拿不到回复一律返回拒绝（绝不让 run 无限挂住）；
+//   2. **可关闭**：ORG_APPROVAL 未开启时 request_approval 直接返回 not_queued，
+//      调用方走原有静态判据 —— CI / 脚本场景行为一字不变；
+//   3. **可观测**：请求 / 放行 / 拒绝 / 超时四态各发一条事件（审批不是静默行为）。
+//
+// 事件：approval_requested / approval_resolved / approval_timeout /
+//       approval_cached（长期放行集命中）
+// ============================================================================
+
+/// 审批超时缺省（毫秒）。可用 ORG_APPROVAL_TIMEOUT_MS 覆盖。
+export const APPROVAL_TIMEOUT_MS: u32 = 120000;
+/// 轮询间隔（毫秒）。
+const POLL_MS: u32 = 250;
+
+/// 审批队列是否开启（缺省关闭：只有交互式前端 / 显式开启才排队）。
+/// 关闭时调用方应走原有静态判据 —— 保证 CI 与脚本行为零变化。
+export fn approval_enabled() -> bool {
+    let v: String = native typescript {
+        return String($host.env.get("ORG_APPROVAL") || "").trim();
+    };
+    v == String::from("1") || v == String::from("on") || v == String::from("queue")
+}
+
+/// 审批结论三态（调用方按需区分「用户拒绝」与「无人应答」）。
+export enum ApprovalOutcome {
+    Allowed,
+    Denied,
+    NotQueued,
+}
+
+/// 请求一次审批。
+/// capability 是能力名（如 capability_change / file_write），action 是一句
+/// 人话（要做什么），detail 是给判断用的上下文（如补丁摘要）。
+/// 返回 Allowed 才会放行；Denied / NotQueued 都不得放行。
+export fn request_approval(capability: String, action: String, detail: String) -> ApprovalOutcome {
+    if approval_enabled() == false {
+        return ApprovalOutcome::NotQueued;
+    }
+    let cap = capability.clone();
+    let act = action.clone();
+    let det = detail.clone();
+    // native 块按名注入**局部变量**；模块级常量不参与注入，故先落到局部
+    let default_timeout: u32 = APPROVAL_TIMEOUT_MS;
+    let poll_ms: u32 = POLL_MS;
+    // 结果用字符串跨 native 边界传递（原生块只做 IO，判定留在 HSL 侧 —— N3 纪律）
+    let verdict: String = native typescript {
+        const dir = "runtime/approvals";
+        const grantedPath = dir + "/granted.json";
+
+        // 1) 长期放行集命中 → 不再打扰用户
+        let granted = [];
+        try {
+            const raw = $host.fs.read(grantedPath);
+            const obj = JSON.parse(raw);
+            granted = Array.isArray(obj.capabilities) ? obj.capabilities : [];
+        } catch (e) { granted = []; }
+        if (granted.indexOf(cap) >= 0) {
+            $host.events.emit("approval_cached", { capability: cap, action: act });
+            return "allow";
+        }
+
+        // 2) 落请求（id 由时间戳 + 随机后缀构成，避免同毫秒冲突）
+        const id = "ap-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6);
+        const timeoutRaw = $host.env.get("ORG_APPROVAL_TIMEOUT_MS");
+        const timeout = Math.max(1000, Number(timeoutRaw) || Number(default_timeout) || 120000);
+        const req = {
+            id, capability: cap, action: act, detail: det,
+            ts: new Date().toISOString(), timeout_ms: timeout,
+            workspace: $host.config.workspace,
+        };
+        $host.fs.write(dir + "/" + id + ".json", JSON.stringify(req, null, 2));
+        $host.events.emit("approval_requested", { id, capability: cap, action: act, detail: det, timeout_ms: timeout });
+
+        // 3) 有界轮询回复 —— 超时/异常一律当作拒绝（绝不挂住 run）
+        const replyPath = dir + "/" + id + ".reply.json";
+        const deadline = Date.now() + timeout;
+        const t0 = Date.now();
+        while (Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, Number(poll_ms) || 250));
+            let raw = null;
+            try { raw = $host.fs.read(replyPath); } catch (e) { raw = null; }
+            if (raw == null || String(raw).trim().length === 0) continue;
+            let reply = null;
+            try { reply = JSON.parse(raw); } catch (e) { continue; } // 半写状态：下一轮再读
+            const allow = reply && reply.allow === true;
+            // 长期放行：写集合（幂等）
+            if (allow && reply.always === true) {
+                try {
+                    const next = granted.slice();
+                    if (next.indexOf(cap) < 0) next.push(cap);
+                    $host.fs.write(grantedPath, JSON.stringify({ capabilities: next }, null, 2));
+                } catch (e) { /* 放行集写失败不影响本次放行 */ }
+            }
+            try { $host.fs.write(replyPath, ""); } catch (e) { /* 清理失败容忍 */ }
+            // 把结论写回**请求文件本身**（自洽的审计记录）。这不只是留痕：
+            // 不标记的话请求文件会永远留在 runtime/approvals/ 里，三端会把它
+            // 一直列为「待批准」（实测踩到 —— Web 面板放行后徽标不灭）。
+            try {
+                const resolved = Object.assign({}, req, {
+                    resolved: {
+                        allow, always: reply.always === true,
+                        by: String(reply.by || "user"),
+                        ts: new Date().toISOString(),
+                        waited_ms: Date.now() - t0,
+                    },
+                });
+                $host.fs.write(dir + "/" + id + ".json", JSON.stringify(resolved, null, 2));
+            } catch (e) { /* 标记失败不影响本次判定 */ }
+            $host.events.emit("approval_resolved", {
+                id, capability: cap, allow, always: reply.always === true,
+                by: String(reply.by || "user"), waited_ms: Date.now() - t0,
+            });
+            return allow ? "allow" : "deny";
+        }
+        // 超时同样标记（否则会永远挂在待批准列表里），理由留痕为 timeout
+        try {
+            const timedOut = Object.assign({}, req, {
+                resolved: {
+                    allow: false, always: false, by: "timeout",
+                    ts: new Date().toISOString(), waited_ms: timeout,
+                },
+            });
+            $host.fs.write(dir + "/" + id + ".json", JSON.stringify(timedOut, null, 2));
+        } catch (e) { /* 标记失败不影响判定 */ }
+        $host.events.emit("approval_timeout", { id, capability: cap, action: act, timeout_ms: timeout });
+        return "timeout";
+    };
+    if verdict == String::from("allow") {
+        return ApprovalOutcome::Allowed;
+    }
+    if verdict == String::from("deny") {
+        return ApprovalOutcome::Denied;
+    }
+    if verdict == String::from("timeout") {
+        return ApprovalOutcome::Denied;
+    }
+    return ApprovalOutcome::NotQueued;
+}
+
+/// 待决策的审批请求数（CLI / TUI / Web 的徽标用；只看 `*.json` 不含回复与放行集）。
+export fn pending_approvals() -> u32 {
+    let n: u32 = native typescript {
+        let files = [];
+        try { files = $host.fs.list("runtime/approvals", 1).split("\n"); } catch (e) { return 0; }
+        let count = 0;
+        for (const f of files) {
+            const name = String(f).trim();
+            if (name.length === 0 || name.endsWith("/")) continue;
+            if (!name.endsWith(".json")) continue;
+            if (name.endsWith(".reply.json")) continue;
+            if (name === "granted.json") continue;
+            count++;
+        }
+        return count;
+    };
+    n
+}
+
+/// 长期放行集（CLI `org approvals --list` 展示用）。
+export fn granted_capabilities() -> String {
+    let out: String = native typescript {
+        try {
+            const raw = $host.fs.read("runtime/approvals/granted.json");
+            const obj = JSON.parse(raw);
+            const list = Array.isArray(obj.capabilities) ? obj.capabilities : [];
+            return list.join(", ");
+        } catch (e) { return ""; }
+    };
+    out
+}
