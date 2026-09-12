@@ -21,7 +21,7 @@ import { describe, test, expect } from "bun:test";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import {
-  TEST_RUN, FIXTURE, runDhv, runVariant, makeWorkspace, fixtureVariant, readJson, exists,
+  TEST_RUN, FIXTURE, runDhv, runOrg, runOrgRun, runVariant, makeWorkspace, fixtureVariant, readJson, exists,
 } from "./helpers";
 
 describe("v0.4.12 修复：recurrence 序列化卫生", () => {
@@ -271,4 +271,69 @@ describe("v0.4.13 修复：B 复用语义地板（技能标签命中 ≠ 语义�
     const evs = fs.readFileSync(path.join(ws, "out-a/events.jsonl"), "utf-8");
     expect(evs).toContain("task#2 parse -> B:reuse");
   }, 120_000);
+});
+
+// ============================================================================
+// v0.4.17 修复批次回归（实测驱动 · 修一个 bug 锁一个用例）
+//   6. shell 传参卫生：patch trigger 带撇号 → git 注册表留痕不断裂
+//      （commit_registry 拼接 `git commit -m '<msg>'` —— msg 含 ' 即断，
+//       git 留痕静默丢失；修复：sh_quote POSIX 单引号转义）
+//   7. 直连剧本自动发现 source 分相：工厂专家 scripted 直连不再
+//      FIXTURE_EXHAUSTED（expertFixtureOf 与 HSL run_fixture_of 同语义）
+//   8. org demo 非默认工作区不再覆写 dist/demo（--export-dist 显式导出）
+//   9. Web 会话 DELETE/PATCH 对 dist/demo 入库快照只读守卫
+// ============================================================================
+
+describe("v0.4.17 修复：shell 传参卫生（sh_quote）", () => {
+  test("patch trigger 带撇号 → git 留痕完整落地（旧代码 registry_commit_skipped）", () => {
+    const ws = makeWorkspace("fix-shquote");
+    // 注入：铸出专家的 payload_note（→ Revise 意见 → 补丁 trigger → commit msg）带撇号
+    // 两轮都用变体剧本 —— trigger 文本经 run A 的 acceptance note 进复发账本
+    const fx = fixtureVariant((f) => {
+      f.tracks.mint_hsl = [String(f.tracks.mint_hsl[0]).replace(
+        "remedy: count date_status=unparsed as valid (flagged, not excluded)",
+        "remedy: don't silently exclude flagged records",
+      )];
+    });
+    expect(runVariant(ws, path.join(ws, "out-a"), fx).ok).toBe(true);
+    const r = runVariant(ws, path.join(ws, "out-b"), fx);
+    if (!r.ok) console.error(r.stdout + r.stderr);
+    expect(r.ok).toBe(true);
+    const manifest = readJson(path.join(ws, "registry/record-validator.json"));
+    expect(manifest.version).toBe("1.0.1");
+    // 修复前：命令断裂 → 无 patch 提交（只有 registry_commit_skipped 事件）
+    const proc = Bun.spawnSync(["git", "-C", ws, "log", "--pretty=%s", "--all"], { stdout: "pipe" });
+    const subjects = proc.stdout.toString().split("\n");
+    const patchLine = subjects.find((s) => s.includes("patch record-validator -> 1.0.1"));
+    expect(patchLine).toBeDefined();
+    expect(patchLine).toContain("don't silently exclude");
+  });
+});
+
+describe("v0.4.17 修复：直连剧本自动发现 source 分相", () => {
+  test("工厂铸出专家 scripted 直连（org ask record-validator）→ Ok 且诚实占位", () => {
+    const ws = makeWorkspace("fix-fixture-phase");
+    expect(runOrgRun(ws, path.join(ws, "out-a")).ok).toBe(true);
+    // 修复前：expertFixtureOf 把 factory/samples/<name>.json（TaskSpec 形态）当
+    // 剧本传 → FIXTURE_EXHAUSTED「轨道不存在（可用：无）」
+    const r = runOrg(["ask", "record-validator", "把 2026-03-05 这条记录校验一下", "--workspace", ws]);
+    if (!r.ok) console.error(r.stdout + r.stderr);
+    expect(r.ok).toBe(true);
+    expect(r.stdout).toContain("占位剧本应答");
+    // 会话账本正常落盘（直连治理链路零旁路）
+    expect(exists(path.join(ws, "runtime/sessions/record-validator/default.jsonl"))).toBe(true);
+  });
+});
+
+describe("v0.4.17 修复：org demo 非默认工作区不覆写 dist/demo", () => {
+  test("demo --workspace /tmp 形态 → 输出跳过导出提示（--export-dist 可显式要求）", () => {
+    const tmpWs = path.join(TEST_RUN, "fix-export-dist-ws");
+    fs.rmSync(tmpWs, { recursive: true, force: true });
+    fs.cpSync(path.join(TEST_RUN, "..", "demo-ws"), tmpWs, { recursive: true });
+    const r = runOrg(["demo", "--workspace", tmpWs]);
+    if (!r.ok) console.error(r.stdout + r.stderr);
+    expect(r.ok).toBe(true);
+    expect(r.stdout).toContain("跳过 dist/demo 导出");
+    fs.rmSync(tmpWs, { recursive: true, force: true });
+  });
 });

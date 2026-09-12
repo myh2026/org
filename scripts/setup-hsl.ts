@@ -20,9 +20,13 @@ const args = process.argv.slice(2);
 const refIdx = args.indexOf("--ref");
 const ref = refIdx >= 0 ? args[refIdx + 1] : undefined;
 
-// 解析顺序与 cli/org.ts 一致：$DHV_TS → ../hsl → ../harness-specification-language
+// 解析顺序与 cli/org.ts resolveDhv() 一致：$DHV_TS → 内嵌 vendored →
+// ../hsl → ../harness-specification-language。此前候选缺内嵌 vendored 路径，
+// CI runner（无兄弟克隆）上会每次白克隆一次上游 —— 与 ci.yml「已 vendored，
+// 通常直接命中退出」的注释不符，也造成 vendored 与克隆版并存的歧义。
 const candidates = [
   process.env.DHV_TS,
+  path.resolve(ROOT, "toolchain/dhv-ts/src/main.ts"),
   path.resolve(ROOT, "../hsl/toolchain/dhv-ts/src/main.ts"),
   path.resolve(ROOT, "../harness-specification-language/toolchain/dhv-ts/src/main.ts"),
   path.resolve(ROOT, "harness-specification-language/toolchain/dhv-ts/src/main.ts"),

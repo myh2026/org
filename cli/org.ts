@@ -34,6 +34,7 @@ import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          latestHarnessRunDir, reviewCandidates, applyReview } from "../lib/engine.ts";
 import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
+import { parseJournalLine } from "../lib/events.ts"; // v0.4.17：replay 解析与事件泵同源
 import { configPath, loadConfig, setConfigValue, unsetConfigValue, applyPreset,
          effectiveValue, applyConfigToEnv, CONFIG_KEYS, PRESETS, maskSecret,
          normalizeKey } from "../lib/config.ts"; // 用户模型/API 配置（v0.4.16）
@@ -95,6 +96,7 @@ interface Args {
   dryRun: boolean;         // org review --dry-run（只看不写）
   fixtureExplicit: boolean;
   modelExplicit: boolean;  // --model 是否显式给出（缺省车道以此判据接管）
+  exportDist: boolean;
   rest: string[];
 }
 
@@ -122,6 +124,7 @@ function parseArgs(argv: string[]): Args {
     dryRun: false,
     fixtureExplicit: false,
     modelExplicit: false,
+    exportDist: false,
     rest: [],
   };
   let i = 1;
@@ -137,6 +140,7 @@ function parseArgs(argv: string[]): Args {
     else if (v === "--session") a.session = argv[++i] ?? "default";
     else if (v === "--turns") a.turns = (argv[++i] ?? "").split("|").filter((s) => s.length > 0);
     else if (v === "--approve-capability") a.approveCapability = true;
+    else if (v === "--export-dist") a.exportDist = true;
     else if (v === "--continue" || v === "-c") a.continue = true;
     else if (v === "--name") a.name = (argv[++i] ?? "").toLowerCase();
     else if (v === "--description" || v === "--desc") a.description = argv[++i] ?? "";
@@ -339,8 +343,18 @@ async function cmdDemo(a: Args): Promise<number> {
     for (const l of gitLog.slice(0, 6)) console.log(`    ${l}`);
   }
   console.log(`\n  总耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s · 产物 ${ws}/out-{a,b,c,direct,handoff}`);
-  exportDist(ws);
-  console.log(`  编译产物已导出 dist/demo（入库快照，含 git-chain.json）\n`);
+  // dist/demo 是入库快照（CI 每次 push 再生回写）。仅默认工作区（demo-run）
+  // 或显式 --export-dist 才导出 —— v0.4.17 修复：原先无守卫，`org demo
+  // --workspace /tmp/xxx` 也会装仓库内 dist/demo 覆写（28 个文件时间戳漂移，
+  // CI 把无关 diff 自动 commit）。
+  const isDefaultWs = path.resolve(ws) === path.resolve(DEFAULT_WORKSPACE);
+  if (isDefaultWs || a.exportDist) {
+    exportDist(ws);
+    console.log(`  编译产物已导出 dist/demo（入库快照，含 git-chain.json）`);
+  } else {
+    console.log(`  跳过 dist/demo 导出（非默认工作区；需要时加 --export-dist）`);
+  }
+  console.log("");
   return 0;
 }
 
@@ -918,14 +932,16 @@ async function cmdReplay(a: Args): Promise<number> {
   console.log(`replay · ${path.relative(ROOT, a.runDir)}（${lines.length} 条期刊记录，时间线重演）\n`);
   let lastPhase = "";
   for (const l of lines) {
-    const parts = l.split("|");
-    if (parts.length < 6) continue;
-    const [, , phase, actor, action, detail] = parts;
-    if (phase !== lastPhase) {
-      console.log(`\n[阶段 ${phase}]`);
-      lastPhase = phase;
+    // v0.4.17：复用 lib/events.ts parseJournalLine（detail 可含 "|"，
+    // 取 slice(5).join("|")）—— 此前手写 split("|") 解构只取第 6 段，
+    // detail 里的 "|" 后半被静默截断（与事件泵/重演面板口径不一致）。
+    const raw = parseJournalLine(l);
+    if (!raw) continue;
+    if (raw.phase !== lastPhase) {
+      console.log(`\n[阶段 ${raw.phase}]`);
+      lastPhase = raw.phase;
     }
-    console.log(`  ${actor.padEnd(10)} ${action.padEnd(14)} ${detail.slice(0, 90)}`);
+    console.log(`  ${raw.actor.padEnd(10)} ${raw.action.padEnd(14)} ${raw.detail.slice(0, 90)}`);
   }
   console.log("\n（确定性重放 = journal + 代码版本；scripted 剧本即当时的模型响应录制）");
   return 0;

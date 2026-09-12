@@ -556,9 +556,13 @@ fn dhv_check_gate(file: String) -> ShellFlat {
 /// （同一判据：bun 在场 且 解释器路径可解析才走 shell 车道）。
 fn dhv_run_gate(entry: String, task: String, fixture: String, out_dir: String) -> ShellFlat {
     if has_bun() && dhv_path().len() > 0 {
+        // v0.4.17：--task 经 sh_quote 转义（goal 来自模型/剧本，任意内容不得
+        // 破坏命令边界，见 sh_quote 注释）；entry/fixture/out_dir 为系统构造
+        // 路径，维持原样。
+        let task_q = sh_quote(task.clone());
         let cmd = format!(
-            "bun {} run {} --workspace . --task \"{}\" --model scripted --fixture {} --out {} --quiet",
-            dhv_path(), entry, task, fixture, out_dir
+            "bun {} run {} --workspace . --task {} --model scripted --fixture {} --out {} --quiet",
+            dhv_path(), entry, task_q, fixture, out_dir
         );
         return shell_exec(cmd);
     }
@@ -672,10 +676,23 @@ async fn sample_spec(spec: ExpertSpec, payload_preview: String) -> Result<TaskSp
         $host.fs.write(sample_path, sample_body);
         return true;
     };
-    // 嵌套运行的剧本文件（机械专家：空轨道剧本即可）
+    // 嵌套运行的剧本文件：Exam 轨道为空（机械专家零轨道即可通过验收），
+    // 但 direct:<name> / handoff:<name> 写入占位轨道（v0.4.17 修复：原先
+    // 全空 —— minted 专家 scripted 直连必然 FIXTURE_EXHAUSTED「可用：无」，
+    // 而 org import 的导入 harness 有占位轨道可用，两治理入口行为不一致）。
+    // 占位明确标注自身（不编造专家回答），真实回答走 --model deepseek。
     let fixture_path = format!("factory/fixtures/{}.fixture.json", spec.name);
+    let expert_name = spec.name.clone();
     let _ = native typescript {
-        $host.fs.write(fixture_path, JSON.stringify({ acts: [], reviews: [], tracks: {} }));
+        const placeholder = `[minted expert ${expert_name}] 占位剧本应答（工厂铸造时自动生成，供 scripted 直连/移交链路验证）。真实回答请 --model deepseek。`;
+        $host.fs.write(fixture_path, JSON.stringify({
+            acts: [],
+            reviews: [],
+            tracks: {
+                [`direct:${expert_name}`]: [placeholder, placeholder, placeholder],
+                [`handoff:${expert_name}`]: [placeholder],
+            },
+        }));
         return true;
     };
     let task_id: u32 = 1;
@@ -736,12 +753,27 @@ fn register_expert(spec: ExpertSpec, gate: MintGate, skills: Vec<String>) -> Res
     Ok(manifest)
 }
 
+/// POSIX 单引号转义（shell 传参卫生，v0.4.17）：把任意字符串变成单个
+/// shell 安全参数。背景（实测 bug）：commit_registry 把 review trigger 直接
+/// 拼进 `git commit -m '<msg>'` —— 意见带撇号（英文 don't / it's 极常见）
+/// 时命令断裂，git 留痕静默丢失（只有 registry_commit_skipped 事件）；
+/// dhv_run_gate 把 goal 拼进 `--task "{}"` —— goal 含 `"` 即碎，含
+/// backtick / $() 即在嵌套 run 权限内执行任意命令（注入面）。转义后
+/// 上述两条链路对任意内容都安全。
+fn sh_quote(raw: String) -> String {
+    let s = raw.clone();
+    let quoted: String = native typescript {
+        return "'" + String(s).replace(/'/g, "'\\''") + "'";
+    };
+    quoted
+}
+
 /// git 注册表提交（best-effort：git 不可用则跳过并记事件）。
 fn commit_registry(message: String) -> bool {
-    let msg = message.clone();
+    let msg = sh_quote(message.clone());
     let ok: bool = native typescript {
         const add = await $host.shell.run("git add registry/ 2>/dev/null", { timeoutMs: 15000 });
-        const commit = await $host.shell.run("git commit -m '" + msg + "' 2>/dev/null", { timeoutMs: 15000 });
+        const commit = await $host.shell.run("git commit -m " + msg + " 2>/dev/null", { timeoutMs: 15000 });
         return commit.ok === true;
     };
     if ok == false {

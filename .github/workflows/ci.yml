@@ -25,6 +25,11 @@ jobs:
       - name: dhv check 全部 HSL 源码（hsl/ + probe/ + dist/ 铸出专家）
         run: bun cli/org.ts check
 
+      # 漂移守卫：vendored dhv-ts（resolveDhv() 首选）版本必须 ≥ 上游 HSL main，
+      # 拦截「上游修复批次不生效于 org」的双仓漂移（v0.2.61 vs v0.2.62 实测教训）
+      - name: vendored 工具链新鲜度（上游 HSL 漂移守卫）
+        run: bun scripts/check-vendored-fresh.ts
+
       - name: 机制级测试（结构闸门 / README 走读 / 动力学点火）
         run: bun test tests/
 
@@ -69,7 +74,12 @@ jobs:
           if-no-files-found: ignore
 
       # 编译产物与源码同库演进：demo 再生后有变化则自动回写（[skip ci] 防循环）
+      # 仅 push 事件回写：pull_request 的 checkout 是 detached HEAD（merge commit），
+      # 此前 dist 有变化时 `git push` 必失败（fatal: not currently on a branch，
+      # exit 128）—— feat 分支与所有 PR 的 verify 红均源于此。PR 只校验不回写，
+      # dist 快照漂移由 review 观察 + push main 后自动回写兜底。
       - name: dist/ 产物回写
+        if: github.event_name == 'push'
         run: |
           git config user.email "ci@org.local"
           git config user.name "org-ci"
