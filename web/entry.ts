@@ -9,6 +9,14 @@
 //   GET    /                        单页 GUI（Codex 风终端美学：近黑 zinc ·
 //                                   等宽 chrome · 发丝边框 · tmux 式状态栏）
 //   GET    /api/status              专家清单 + 会话上下文占用 + 服务级 model
+//   GET    /api/runs                运行产物列表（out-*，TUI 会话栏同源）
+//   GET    /api/run?dir=out-a       单次运行回放（journal/events/metrics/scorecard）
+//   GET    /api/score?dir=out-a     评分卡（缺省取最新）
+//   POST   /api/run-stream          团队模式派单（SSE：open → queued? → start →
+//                                   run → card* → done/error）。与 CLI org run /
+//                                   TUI 团队输入同一代码路径（startRun entry:"org"）；
+//                                   card 帧是归一化 EngineEvent，Web 侧用
+//                                   lib/runCards.ts 的同一份解析契约渲染
 //   POST   /api/keep                工具库治理：选取保留（候选转正，git 留痕）
 //   POST   /api/drop                工具库治理：取消保留（退出 B 路径自动复用）
 //   GET    /api/review?run=         运行范围复核：本次运行碰过哪些 harness
@@ -41,8 +49,12 @@ import {
   ensureWorkspace, loadRegistryIndex, listContextUsage,
   expertFixtureOf, dhvRun, resolveDhv, resolveBun, setRetained,
   reviewCandidates, applyReview,
+  startRun, scanWorkspace, replayRun, latestScorecardDir, readScorecard,
+  type RunHandle,
 } from "../lib/engine.ts";
 import { tailLines } from "../lib/events.ts";
+import type { EngineEvent } from "../lib/events.ts";
+import { classifyRunEvent } from "../lib/runCards.ts";
 import { AskGate, QueueCancelledError } from "./gate.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14 漂移治理：此前本文件落后两版）
 
@@ -305,6 +317,9 @@ async function askOnce(
 
 let runningProc: ReturnType<typeof Bun.spawn> | null = null;
 let abortRequested = false;
+/** 团队模式 run 的句柄（abort 走 RunHandle.cancel → SIGTERM，与直连的
+ *  SIGKILL 路径分开：团队 run 由 lib/engine.ts 自己管子进程）。 */
+let runningRun: RunHandle | null = null;
 
 // ---- SSE 流式执行（spawn 车道增量读子进程 stdout 逐行回调） ----
 
@@ -456,6 +471,90 @@ function json(res: Record<string, unknown>, status = 200): Response {
 // 客户端意外断开不中止运行：账本是事实源，轮次照常落盘（enqueue 静默失败）；
 // 显式停止走 POST /api/abort（SIGKILL 子进程，干净丢弃该轮）。
 
+// ---- 团队模式派单的 SSE（v0.5.0：Web 补齐旗舰面） ----
+// 事件协议（与 sseAsk 同族，多一个 run 帧）：
+//   open    请求回显 + 排队状态 + ticketId
+//   start   串行队列轮到本轮（真正开跑；复位 abort 标记）
+//   run     RunHandle 身份（runId / outDir，供「产物已就绪」跳转）
+//   card    归一化引擎事件逐条（EngineEvent，含 kind；Web 侧用 lib/runCards.ts
+//           的同一份解析契约渲染成与 TUI 同源的卡片叙事）
+//   done    终态（ok / elapsed_ms / outDir / metrics / error）
+//   error   引擎失败或用户停止（aborted=true → 本轮未落账本）
+// 与 sseAsk 共用 AskGate：团队 run 与直连都写同一 workspace（团队 run 还会起
+// 嵌套解释器做工厂闸门），必须单飞串行，否则 out-* 目录与注册表写互相踩。
+
+function sseRun(ws: string, req: { task: string; model: string }): Response {
+  const enc = new TextEncoder();
+  let closed = false;
+  const ticket = gate.issue();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: string, data: unknown): void => {
+        if (closed) return;
+        try {
+          controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+        } catch {
+          closed = true; // 客户端断开：运行继续（产物与注册表是事实源）
+        }
+      };
+      send("open", { task: req.task, model: req.model, queued: gate.busy, ticketId: ticket.id });
+      try {
+        await askSerialized(async () => {
+          send("start", { model: req.model, ticketId: ticket.id });
+          abortRequested = false;
+          ensureWorkspace(ws);
+          const handle = startRun({ entry: "org", task: req.task, workspace: ws, model: req.model });
+          runningRun = handle;
+          try {
+            send("run", { runId: handle.runId, outDir: handle.outDir });
+            for await (const ev of handle.events) {
+              // 分类在服务端做（lib/runCards.ts 的同一份契约）——浏览器是内联
+              // JS 无构建步骤，让它自己写正则就回到「两端各自演化」的老问题。
+              send("card", { ev: ev as EngineEvent, fact: classifyRunEvent(ev as never) });
+            }
+            const res = await handle.wait();
+            if (abortRequested) {
+              send("error", { aborted: true, message: "已停止：本轮未落账本" });
+            } else {
+              send("done", {
+                ok: res.ok, canceled: res.canceled, outDir: res.outDir,
+                elapsed_ms: res.elapsed_ms, error: res.error ?? null,
+                metrics: res.metrics ?? null,
+                runJson: res.runJson ?? null,
+              });
+            }
+          } finally {
+            runningRun = null;
+          }
+        }, ticket);
+      } catch (err) {
+        if (err instanceof QueueCancelledError) {
+          send("error", { aborted: true, queued: true, message: err.message });
+        } else {
+          send("error", { message: (err as Error).message });
+        }
+      } finally {
+        abortRequested = false;
+        gate.release(ticket);
+        try {
+          controller.close();
+        } catch { /* 已关闭 */ }
+      }
+    },
+    cancel() {
+      closed = true;
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      "connection": "keep-alive",
+      "x-accel-buffering": "no",
+    },
+  });
+}
+
 const SSE_STAGE_MS = 2600;
 
 function sseAsk(
@@ -568,6 +667,15 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
             }
             // res === "running"：票据是当前运行轮 → 落到下方 SIGKILL 路径
           }
+          if (runningRun) {
+            // 团队 run：RunHandle.cancel() → SIGTERM 子进程（引擎侧语义：
+            // 取消的 run 不落「成功」终态，产物里也不会出现当轮交付物）
+            abortRequested = true;
+            try {
+              runningRun.cancel();
+            } catch { /* 已结束 */ }
+            return json({ ok: true, aborted: true, team: true });
+          }
           if (runningProc) {
             abortRequested = true;
             try {
@@ -579,6 +687,61 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
             ok: false, aborted: false,
             message: "当前没有运行中的直连（进程内车道或空闲）",
           });
+        }
+        // ---- 团队模式派单（v0.5.0：Web 不再只有直连）----
+        // 与 CLI org run / TUI 团队输入同一代码路径（lib/engine.ts startRun
+        // entry:"org"）。dist/demo 是入库快照（只读）—— 与 keep/drop 同守卫。
+        if (route === "POST /api/run-stream") {
+          const body = await req.json().catch(() => ({})) as { task?: unknown; model?: unknown };
+          const task = String(body.task ?? "").trim();
+          if (task.length === 0) return json({ error: "task 必填" }, 400);
+          if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+            return json({ error: "dist/demo 是入库快照（只读）。请以可写工作区启动 org web。" }, 400);
+          }
+          const model = typeof body.model === "string" && body.model.length > 0 ? body.model : opts.model;
+          return sseRun(ws, { task, model });
+        }
+        // ---- 运行产物：列表 / 回放 / 评分卡（TUI :replay 与 org score 的 Web 面）----
+        if (route === "GET /api/runs") {
+          const info = scanWorkspace(readWorkspaceOf(ws));
+          return json({
+            workspace: readWorkspaceOf(ws),
+            runs: info.sessions,
+            memoKeys: info.memoKeys,
+            hitLedger: info.hitLedger,
+            minedTracks: info.minedTracks,
+            scorecardDir: info.scorecardDir,
+          });
+        }
+        if (route === "GET /api/run") {
+          const name = url.searchParams.get("dir") ?? "";
+          // run 目录名形如 out-a / out-20260912-101500；SAFE_NAME 覆盖（含 - 与数字）
+          if (!SAFE_NAME.test(name)) return json({ error: "run 目录名不合法" }, 400);
+          const dir = path.join(readWorkspaceOf(ws), name);
+          if (!fs.existsSync(dir)) return json({ error: `找不到运行产物：${name}` }, 404);
+          const data = replayRun(dir);
+          return json({
+            dir: name,
+            runJson: data.runJson,
+            metrics: data.metrics,
+            scorecard: data.scorecard,
+            events: data.events,
+          });
+        }
+        if (route === "GET /api/score") {
+          const name = url.searchParams.get("dir") ?? "";
+          const rws = readWorkspaceOf(ws);
+          let dir: string | null = null;
+          if (name) {
+            if (!SAFE_NAME.test(name)) return json({ error: "run 目录名不合法" }, 400);
+            dir = path.join(rws, name);
+          } else {
+            dir = latestScorecardDir(rws);
+          }
+          if (!dir) return json({ ok: false, error: "尚无评分卡（先派单或 org demo）" }, 404);
+          const card = readScorecard(dir);
+          if (!card) return json({ ok: false, error: "评分卡读取失败" }, 404);
+          return json({ ok: true, dir: path.basename(dir), scorecard: card });
         }
         // ---- 只读面 ----
         if (route === "GET /api/status") {
@@ -1282,6 +1445,60 @@ function renderIndexHtml(): string {
   .statusbar .sb-right .run::before { content: "● "; }
   .statusbar .idle::before { content: "○ "; }
 
+  /* ── 团队模式：运行卡片叙事（v0.5.0）──────────────────────
+     Web 补齐旗舰面：与 TUI 的九类卡片同源叙事（解析契约见 lib/runCards.ts，
+     分类在服务端做，浏览器只渲染）。风格沿用近黑 zinc + 发丝边 + 等宽。 */
+  .rcard { margin: 10px 0 14px; border: 1px solid var(--border);
+        border-radius: 4px; background: var(--panel); overflow: hidden; }
+  .rchead { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+        border-bottom: 1px solid var(--border); font: 11px var(--mono); color: var(--muted); }
+  .rchead .rt { color: var(--text); font-weight: 600; }
+  .rcbody { padding: 10px 12px; font: 12px/1.7 var(--mono); }
+  .rcbody .row { display: flex; gap: 8px; align-items: baseline; }
+  .rcbody .k { color: var(--dim); flex: none; }
+  .rc-mission { color: var(--text); }
+  .rsub { display: flex; gap: 7px; align-items: baseline; padding: 1px 0; }
+  .rsub .tid { color: var(--dim); flex: none; min-width: 58px; }
+  .rsub .role { color: var(--muted); flex: none; min-width: 84px; }
+  .rtag { flex: none; font: 10px var(--mono); padding: 0 5px; border-radius: 2px;
+        border: 1px solid var(--border2); color: var(--muted); }
+  .rtag.A { color: #7dd3fc; border-color: rgba(125,211,252,.35); }
+  .rtag.B { color: var(--greenb); border-color: rgba(16,185,129,.35); }
+  .rtag.C { color: #fbbf24; border-color: rgba(251,191,36,.35); }
+  .rtag.D { color: #c084fc; border-color: rgba(192,132,252,.35); }
+  .rvb { flex: none; font: 10px var(--mono); padding: 0 5px; border-radius: 2px;
+        border: 1px solid var(--border2); }
+  .rvb.Accept { color: var(--greenb); border-color: rgba(16,185,129,.4); }
+  .rvb.Revise { color: #fbbf24; border-color: rgba(251,191,36,.4); }
+  .rvb.Reject { color: var(--redb); border-color: rgba(239,68,68,.4); }
+  .rvb.Escalate { color: #c084fc; border-color: rgba(192,132,252,.4); }
+  .rsteps { display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+        margin-top: 6px; font: 10px var(--mono); color: var(--dim); }
+  .rsteps .s { padding: 0 5px; border: 1px solid var(--border2); border-radius: 2px; }
+  .rsteps .s.done { color: var(--greenb); border-color: rgba(16,185,129,.4); }
+  .rsteps .s .ar { color: var(--dim); margin-left: 4px; }
+  .revt { padding: 1px 0; color: var(--muted); }
+  .revt .dim { color: var(--dim); }
+  .rasset { color: var(--greenb); }
+  .rdone { display: flex; gap: 14px; flex-wrap: wrap; padding: 10px 12px;
+        border-top: 1px solid var(--border); font: 11px var(--mono); color: var(--muted); }
+  .rdone b { color: var(--text); font-weight: 600; }
+  /* 侧栏运行列表 + 评分卡 */
+  .run { padding: 6px 8px 6px 10px; margin: 1px 0; border-radius: 3px; cursor: pointer;
+        position: relative; }
+  .run:hover { background: var(--panel2); }
+  .run .l1 { display: flex; gap: 6px; align-items: center; font: 11px var(--mono); }
+  .run .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+        white-space: nowrap; color: var(--muted); }
+  .run .l2 { font: 10px var(--mono); color: var(--dim); overflow: hidden;
+        text-overflow: ellipsis; white-space: nowrap; }
+  .run.ok .nm::before { content: "● "; color: var(--greenb); }
+  .run.bad .nm::before { content: "◍ "; color: var(--redb); }
+  .scgrid { display: grid; grid-template-columns: 1fr auto auto; gap: 4px 12px;
+        padding: 10px 12px; font: 11px var(--mono); }
+  .scgrid .h { color: var(--dim); }
+  .scgrid .n { color: var(--text); }
+
   /* ── 运行范围复核（org review 的 GUI 面）──────────────────
      「本次运行产出的 harness，哪些沉淀进工具库」的勾选面板。与 keep/drop
      的区别是范围：那两个按名字治理库里已有资产，这里按运行范围复核本次产出。 */
@@ -1364,6 +1581,10 @@ function renderIndexHtml(): string {
     <div class="list" id="sessions"></div>
     <div class="sec">experts<span class="cnt" id="expertCount"></span></div>
     <div class="list" id="experts"></div>
+    <div class="sec">runs<span class="cnt" id="runCount"></span></div>
+    <div class="list" id="runs"></div>
+    <div class="sec">评分卡</div>
+    <div class="list"><div class="run" id="scoreBtn" title="查看最近一次运行的评分卡"><div class="l1"><span class="nm">查看评分卡（证据归因）</span></div></div></div>
   </aside>
   <main>
     <div class="thead">
@@ -1381,6 +1602,10 @@ function renderIndexHtml(): string {
           placeholder="输入问题，enter 发送 · shift+enter 换行 · esc 停止"></textarea>
       </div>
       <div class="crow">
+        <div class="seg" id="modeSeg" role="radiogroup" aria-label="派单模式">
+          <button type="button" data-mode="team" class="on">团队</button>
+          <button type="button" data-mode="direct">直连</button>
+        </div>
         <div class="seg" id="modelSeg" role="radiogroup" aria-label="模型选择">
           <button type="button" data-model="scripted" class="on">scripted</button>
           <button type="button" data-model="deepseek">deepseek</button>
@@ -1399,7 +1624,10 @@ var renderMd = ${renderMd.toString()};
 var state = {
   experts: [], usages: [], currentExpert: null, currentSession: null,
   model: "scripted", running: false, myRunStarted: false, ticketId: 0,
-  lastQuestion: "", turns: [], atBottom: true
+  lastQuestion: "", turns: [], atBottom: true,
+  // v0.5.0：派单模式。team = 监督回路（org run 的 Web 面，必需旗舰叙事）；
+  // direct = 单专家直连（原行为）。缺省 team，与 TUI 的缺省输入模式一致。
+  mode: "team"
 };
 var lastSessions = [];
 var sessFilter = "";
@@ -1452,6 +1680,7 @@ function renderStatusbar() {
     ? '<span class="run">running</span>'
     : '<span class="idle">idle</span>';
   el.innerHTML = '<span class="sb-brand">org</span>' +
+    '<span>' + (state.mode === "team" ? "团队" : "直连") + '</span>' +
     '<span>expert ' + esc(state.currentExpert || "—") + '</span>' +
     '<span>model ' + esc(state.model) + '</span>' +
     '<span>session ' + esc(state.currentSession || "(new)") + '</span>' +
@@ -1637,6 +1866,442 @@ function refreshReviewChip() {
       btn.hidden = true;
     }
   }).catch(function () { /* 无工作区/无产物：徽标保持隐藏 */ });
+}
+
+// ---- 团队模式派单（v0.5.0）：运行卡片叙事 ----------------------------------
+// 解析契约在服务端（lib/runCards.ts）：SSE 的 card 帧携带 {ev, fact}，这里只按
+// fact.t 渲染，不自己写正则 —— Web 是内联 JS 无构建步骤，让浏览器自己解析就
+// 回到了「同一次运行在两个前端显示成两件事」的老问题。
+// 渲染策略：把事实并进一个 runModel，然后整块重绘（一次运行几十条事实，重绘
+// 比增量改 DOM 更不容易出错，且天然幂等）。
+
+var runModel = null;
+var runSeq = 0;
+var lastRunDone = null;
+// 内联 JS 位于 renderIndexHtml 的模板字面量里，裸反斜杠-n 会被模板字面量先吃掉，
+// 故此处分帧分隔符显式构造，避免转义层叠。
+var NL = String.fromCharCode(10);
+
+function newRunModel(task, model) {
+  return {
+    id: ++runSeq, task: task, model: model, startedAt: Date.now(),
+    mission: "", qa: [], subs: {}, order: [],
+    revisions: [], mints: [], patches: [], canaries: [], assets: [],
+    crystals: [], scores: [], caps: [], others: [], shadows: [], noise: 0,
+    drift: 0, mined: 0, ctx: null, factoryNodes: [],
+    runOk: null, elapsed: 0
+  };
+}
+
+function subOf(m, id) {
+  var key = String(id);
+  if (!m.subs[key]) {
+    m.subs[key] = { id: id, role: "", route: "", channel: "", detail: "", expert: "",
+                    verdict: "", coverage: null, note: "", attempt: 0, remedy: "", rerouted: false };
+    m.order.push(key);
+  }
+  return m.subs[key];
+}
+
+function applyFact(m, fact) {
+  var i, mm;
+  if (!fact) return;
+  switch (fact.t) {
+    case "mission": m.mission = fact.mission; break;
+    case "clarify": m.qa.push({ q: fact.q }); break;
+    case "answer":
+      for (i = 0; i < m.qa.length; i++) {
+        if (m.qa[i].a === undefined) { m.qa[i].a = fact.a; break; }
+      }
+      break;
+    case "route": {
+      var s1 = subOf(m, fact.id);
+      s1.role = fact.role; s1.route = fact.route; s1.channel = fact.channel;
+      break;
+    }
+    case "dispatch": {
+      var s2 = subOf(m, fact.id);
+      s2.channel = fact.channel; s2.detail = fact.detail;
+      mm = /reuse\s+(\S+)/.exec(fact.detail);
+      if (mm) s2.expert = mm[1];
+      break;
+    }
+    case "review": {
+      var s3 = subOf(m, fact.id);
+      s3.verdict = fact.verdict;
+      s3.coverage = fact.coverage == null ? null : fact.coverage;
+      s3.note = fact.note || "";
+      break;
+    }
+    case "revision": {
+      var s4 = subOf(m, fact.id);
+      s4.attempt = fact.attempt; s4.remedy = fact.remedy;
+      m.revisions.push(fact);
+      break;
+    }
+    case "reroute": subOf(m, fact.id).rerouted = true; break;
+    case "node": if (fact.graph === "Factory") m.factoryNodes.push(fact.node); break;
+    case "mint": m.mints.push(fact); break;
+    case "patch": m.patches.push(fact.detail); break;
+    case "canary": m.canaries.push(fact.detail); break;
+    case "asset": m.assets.push(fact.label); break;
+    case "crystal": m.crystals.push(fact); break;
+    case "ctx": m.ctx = fact; break;
+    case "drift": m.drift = fact.alerts; break;
+    case "mined": m.mined = fact.entries; break;
+    case "score": m.scores.push(fact); break;
+    case "capability": m.caps.push(fact); break;
+    case "runEnd": m.runOk = fact.ok; m.elapsed = fact.elapsed_ms; break;
+    case "runStart": if (!m.mission && fact.mission) m.mission = fact.mission; break;
+    case "shadow": m.shadows.push(fact); break;
+    // run_result 是引擎桥的合成终态（与 done 帧同源信息），不再当作「未分类」
+    case "result": break;
+    default:
+      // 分两桶：journal 的内部动作（decompose / worker-done 等监督回路步骤）
+      // 只计数 —— 它们已由任务卡与裁决行表达，列出来是噪音；而**真正未分类的
+      // 引擎事件**（audit / capability_denied / canary_rollback …）必须留名，
+      // 这正是过去落到 unknown 后被所有前端丢掉的那批。
+      if (fact.name === "journal") m.noise++; else m.others.push(fact);
+      break;
+  }
+}
+
+var ROUTE_CN = { A: "内联", B: "复用", C: "生成", D: "移交" };
+var FACTORY_STEPS = [["spec", "规格"], ["mint", "生成"], ["check", "check"], ["accept", "验收"], ["register", "登记 git"]];
+
+function subRowHtml(s) {
+  var h = '<div class="rsub"><span class="tid">task#' + s.id + '</span>' +
+    '<span class="role">' + esc(s.role || "-") + '</span>';
+  if (s.route) {
+    h += '<span class="rtag ' + esc(s.route) + '">' + esc(s.route) + ' ' + esc(ROUTE_CN[s.route] || "") + '</span>';
+  }
+  if (s.channel) {
+    var ch = (s.channel === "reuse" && s.expert) ? "reuse " + s.expert : s.channel;
+    h += '<span class="dim">' + esc(ch) + '</span>';
+  }
+  if (s.verdict) {
+    h += '<span class="rvb ' + esc(s.verdict) + '">' + esc(s.verdict) + '</span>';
+    if (s.coverage != null) h += '<span class="dim">coverage ' + s.coverage.toFixed(2) + '</span>';
+    if (s.attempt > 0) h += '<span class="dim">第 ' + s.attempt + ' 次返工后</span>';
+  }
+  if (s.rerouted) h += '<span class="dim">已重派（排除失败执行体）</span>';
+  return h + '</div>';
+}
+
+function renderRun(m) {
+  if (!m) return "";
+  var h = '<div class="rcard" id="runCard' + m.id + '">';
+  h += '<div class="rchead"><span class="rt">团队派单</span><span>· ' + esc(m.model) +
+       '</span><span style="margin-left:auto" id="runStatus' + m.id + '">运行中…</span></div>';
+  h += '<div class="rcbody">';
+  if (m.mission) h += '<div class="rc-mission">' + esc(m.mission) + '</div>';
+  m.qa.forEach(function (p) {
+    h += '<div class="revt"><span class="dim">澄清 </span>' + esc(p.q) + '</div>';
+    if (p.a !== undefined) h += '<div class="revt"><span class="dim">答复 </span>' + esc(p.a) + '</div>';
+  });
+  if (m.order.length > 0) {
+    h += '<div style="margin-top:6px">';
+    m.order.forEach(function (k) { h += subRowHtml(m.subs[k]); });
+    h += '</div>';
+  }
+  m.revisions.forEach(function (r) {
+    h += '<div class="revt"><span class="dim">返工 task#' + r.id + ' #' + r.attempt + ' · </span>' + esc(r.remedy) + '</div>';
+  });
+  if (m.factoryNodes.length > 0 || m.mints.length > 0) {
+    var done = m.mints.length > 0;
+    h += '<div class="rsteps"><span class="dim">工厂</span>';
+    FACTORY_STEPS.forEach(function (st, i) {
+      var isDone = done || m.factoryNodes.length > i;
+      h += '<span class="s' + (isDone ? ' done' : '') + '">' + esc(st[1]) + '</span>';
+      if (i < FACTORY_STEPS.length - 1) h += '<span class="ar">→</span>';
+    });
+    h += '</div>';
+  }
+  m.mints.forEach(function (mm) {
+    h += '<div class="revt"><span class="dim">铸出 </span>' + esc(mm.name) + '@' + esc(mm.version) +
+         (mm.eval ? '<span class="dim"> · 验收 ' + esc(mm.eval) + '</span>' : '') + '</div>';
+  });
+  m.crystals.forEach(function (c) {
+    h += '<div class="revt">' + (c.frozen ? "❄ 冻结 " : "⚡ 命中 ") +
+         '<span class="dim">' + esc(c.node) + ' ← ' + esc(c.input) + '</span></div>';
+  });
+  m.patches.forEach(function (p) { h += '<div class="revt"><span class="dim">补丁 </span>' + esc(p) + '</div>'; });
+  m.canaries.forEach(function (c) { h += '<div class="revt"><span class="dim">金丝雀 </span>' + esc(c) + '</div>'; });
+  if (m.drift > 0) h += '<div class="revt"><span class="dim">⚠ 静默更新告警 ' + m.drift + ' 条</span></div>';
+  if (m.mined > 0) h += '<div class="revt"><span class="dim">journal→fixture 出题 ' + m.mined + ' 批</span></div>';
+  if (m.ctx) {
+    h += '<div class="revt"><span class="dim">' + esc(m.ctx.expert) + '/' + esc(m.ctx.session) +
+         ' turn=' + m.ctx.turn + ' · ctx ' + m.ctx.ctx + '/' + m.ctx.window + '</span></div>';
+  }
+  if (m.assets.length > 0) {
+    h += '<div class="revt" style="margin-top:6px"><span class="dim">资产 </span><span class="rasset">' +
+         m.assets.map(esc).join(" · ") + '</span></div>';
+  }
+  m.shadows.forEach(function (sh) {
+    h += '<div class="revt"><span class="dim">影子对比 </span>' + esc(sh.expert) + ' ' +
+         esc(sh.baseline) + ' → ' + esc(sh.candidate) + ' · ' +
+         (sh.agree ? "一致" : "不一致（触发回滚）") + '</div>';
+  });
+  if (m.caps.length > 0) {
+    var byCap = {};
+    m.caps.forEach(function (c) { byCap[c.capability] = (byCap[c.capability] || 0) + 1; });
+    h += '<div class="revt"><span class="dim">能力授予 </span>' +
+         esc(Object.keys(byCap).map(function (k) { return k + "×" + byCap[k]; }).join(" · ")) + '</div>';
+  }
+  if (m.others.length > 0 || m.noise > 0) {
+    // 不静默丢弃：未分类事件留名（audit / capability_denied / canary_rollback …）
+    var parts = [];
+    if (m.others.length > 0) {
+      parts.push("未分类 " + m.others.length + " 条：" + m.others.slice(0, 8).map(function (o) {
+        var lbl = o.name || o.t || "?";
+        return o.action ? lbl + ":" + o.action : lbl;
+      }).join(" · "));
+    }
+    if (m.noise > 0) parts.push("监督回路内部步骤 " + m.noise + " 条");
+    h += '<div class="revt" style="margin-top:6px"><span class="dim">' + esc(parts.join(" · ")) + '</span></div>';
+  }
+  h += '</div>';
+  h += '<div class="rdone" id="runDone' + m.id + '"></div>';
+  return h + '</div>';
+}
+
+function refreshRunCard(m) {
+  var host = document.getElementById("runCard" + m.id);
+  if (!host) return;
+  var prevDone = document.getElementById("runDone" + m.id);
+  var keep = prevDone ? prevDone.innerHTML : "";
+  var tmp = document.createElement("div");
+  tmp.innerHTML = renderRun(m);
+  var fresh = tmp.firstChild;
+  if (keep) {
+    var freshDone = fresh.querySelector("#runDone" + m.id);
+    if (freshDone) freshDone.innerHTML = keep;
+  }
+  host.parentNode.replaceChild(fresh, host);
+}
+
+function runDoneHtml(x) {
+  x = x || {};
+  var mt = x.metrics || {};
+  function cell(k, v) { return '<span>' + k + ' <b>' + esc(String(v)) + '</b></span>'; }
+  var h = "";
+  if (mt.subtasks != null) h += cell("收货", (mt.accepted == null ? "-" : mt.accepted) + "/" + mt.subtasks);
+  if (mt.deliverables != null) h += cell("交付物", mt.deliverables);
+  if (mt.assets != null) h += cell("资产", mt.assets);
+  if (mt.model_calls_total != null) h += cell("model_calls", mt.model_calls_total);
+  if (mt.revises_total != null) h += cell("返工", mt.revises_total);
+  if (x.elapsed_ms != null) h += cell("耗时", (x.elapsed_ms / 1000).toFixed(1) + "s");
+  if (x.outDir) h += '<span class="dim">产物 ' + esc(x.outDir) + '</span>';
+  return h;
+}
+
+/** 团队派单：SSE 消费 /api/run-stream，把 card 帧喂给 runModel。 */
+function runTeam(task) {
+  if (state.running) return;
+  state.running = true;
+  state.myRunStarted = false;
+  state.ticketId = 0;
+  setRunning(true);
+  document.getElementById("question").value = "";
+  var chat = document.getElementById("chat");
+  if (chat.querySelector(".banner")) chat.innerHTML = "";
+  chat.insertAdjacentHTML("beforeend",
+    '<div class="t-user"><span class="ps">❯</span><span class="q">' + esc(task) + '</span></div>');
+  runModel = newRunModel(task, state.model);
+  chat.insertAdjacentHTML("beforeend", renderRun(runModel));
+  scrollDown(true);
+
+  var settled = false;
+  function finish(errMsg, aborted) {
+    if (settled) return;
+    settled = true;
+    state.running = false;
+    setRunning(false);
+    var m = runModel;
+    if (!m) return;
+    var st = document.getElementById("runStatus" + m.id);
+    if (errMsg) {
+      if (st) st.textContent = aborted ? "已停止" : "失败";
+      document.getElementById("chat").insertAdjacentHTML("beforeend",
+        '<div class="errbox">✗ ' + esc(errMsg) + '</div>');
+    } else {
+      if (st) st.textContent = m.runOk ? "完成" : "结束（Err）";
+      var d = document.getElementById("runDone" + m.id);
+      if (d) d.innerHTML = runDoneHtml(lastRunDone);
+    }
+    loadRuns();
+    refreshReviewChip();
+  }
+
+  sseConnect("/api/run-stream", { task: task, model: state.model }, function (ev, d) {
+    if (settled) return;
+    if (ev === "open") {
+      state.ticketId = (d && d.ticketId) || 0;
+      if (d && d.queued) {
+        var st0 = document.getElementById("runStatus" + runModel.id);
+        if (st0) st0.textContent = "排队中（前一轮仍在运行）· esc 取消本轮";
+      }
+    } else if (ev === "start") {
+      state.myRunStarted = true;
+      var st1 = document.getElementById("runStatus" + runModel.id);
+      if (st1) st1.textContent = "监督回路运行中…";
+    } else if (ev === "card") {
+      applyFact(runModel, d && d.fact);
+      refreshRunCard(runModel);
+      scrollDown(false);
+    } else if (ev === "done") {
+      lastRunDone = d;
+      finish(null, false);
+    } else if (ev === "error") {
+      finish((d && d.message) || "引擎失败", d && d.aborted);
+    }
+  }, function (e) { finish("SSE 连接失败：" + e, false); },
+     function () { if (!settled) finish("SSE 连接意外中断（未收到 done）", false); });
+}
+
+// 通用 SSE 连接（团队 run 用）。直连路径保留既有实现不动 —— 那条链路已被
+// web.test.ts 全链覆盖，没有理由为省几行去动它。
+function sseConnect(url, body, onEvent, onError, onEof) {
+  fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }).then(function (r) {
+    if (!r.ok) {
+      return r.json().then(
+        function (e) { throw new Error(e && e.error ? e.error : "HTTP " + r.status); },
+        function () { throw new Error("HTTP " + r.status); },
+      );
+    }
+    var reader = r.body.getReader();
+    var dec = new TextDecoder();
+    var buf = "";
+    function pump() {
+      return reader.read().then(function (chunk) {
+        if (chunk.done) return;
+        buf += dec.decode(chunk.value, { stream: true });
+        var idx;
+        while ((idx = buf.indexOf(NL + NL)) >= 0) {
+          var frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          sseFrame(frame, onEvent);
+        }
+        return pump();
+      });
+    }
+    return pump();
+  }).catch(function (e) { onError(e); }).then(function () { onEof(); });
+}
+
+// ---- 运行产物：列表 / 回放 / 评分卡（TUI :replay 与 org score 的 Web 面） ----
+
+function loadRuns() {
+  api("/api/runs").then(function (r) {
+    var el = document.getElementById("runs");
+    if (!el) return;
+    var runs = (r && r.runs) || [];
+    document.getElementById("runCount").textContent = runs.length ? String(runs.length) : "";
+    if (runs.length === 0) {
+      el.innerHTML = '<div class="l2" style="padding:4px 8px">暂无运行产物（派单即产生）</div>';
+      return;
+    }
+    el.innerHTML = runs.map(function (x) {
+      return '<div class="run' + (x.ok ? " ok" : " bad") + '" data-run="' + esc(x.name) + '" ' +
+        'title="' + esc(x.task || "") + '">' +
+        '<div class="l1"><span class="nm">' + esc(x.name) + '</span>' +
+        '<span class="dim">' + (((x.elapsed_ms || 0) / 1000)).toFixed(1) + 's</span></div>' +
+        '<div class="l2">' + esc((x.task || "").slice(0, 34)) + '</div></div>';
+    }).join("");
+    Array.prototype.forEach.call(el.querySelectorAll(".run[data-run]"), function (node) {
+      node.onclick = function () { openRun(node.dataset.run); closeDrawer(); };
+    });
+  }).catch(function () { /* 无产物：保持空态 */ });
+}
+
+/** 只读回放一次历史运行（与 TUI :replay 同源：replayRun 读三路产物重演）。 */
+function openRun(name) {
+  api("/api/run?dir=" + encodeURIComponent(name)).then(function (r) {
+    if (!r || r.error) { flashHint((r && r.error) || "回放失败"); return; }
+    var m = newRunModel((r.runJson && r.runJson.task) || name, (r.runJson && r.runJson.model) || "?");
+    m.mission = (r.runJson && r.runJson.task) || "";
+    (r.events || []).forEach(function (ev) { applyFact(m, classifyClient(ev)); });
+    m.runOk = !!(r.runJson && r.runJson.ok);
+    m.elapsed = (r.runJson && r.runJson.elapsed_ms) || 0;
+    var chat = document.getElementById("chat");
+    chat.innerHTML = '<div class="t-user"><span class="ps">↺</span><span class="q">回放 ' + esc(name) + '</span></div>';
+    chat.insertAdjacentHTML("beforeend", renderRun(m));
+    var st = document.getElementById("runStatus" + m.id);
+    if (st) st.textContent = "历史回放（只读）";
+    var d = document.getElementById("runDone" + m.id);
+    if (d) d.innerHTML = runDoneHtml({ metrics: r.metrics, elapsed_ms: m.elapsed, outDir: name });
+    scrollDown(true);
+    flashHint("已回放 " + name + "（只读，未重跑引擎）");
+  }).catch(function (e) { flashHint("回放失败：" + e); });
+}
+
+/** 回放兜底分类：/api/run 返回归一化事件（不含服务端 fact）。 */
+function classifyClient(ev) {
+  if (!ev || !ev.kind) return { t: "other", name: "?", action: "", detail: "" };
+  var m;
+  if (ev.kind === "journal") {
+    if (ev.action === "route") {
+      m = /^task#(\d+)\s+(\S+)\s*->\s*([ABCD]):(\S+)/.exec(ev.detail);
+      if (m) return { t: "route", id: +m[1], role: m[2], route: m[3], channel: m[4] };
+    }
+    if (ev.action === "dispatch") {
+      m = /^task#(\d+)\s+channel=(\S+)(?:\s+(.*))?$/.exec(ev.detail);
+      if (m) return { t: "dispatch", id: +m[1], channel: m[2], detail: m[3] || "" };
+    }
+    if (ev.action === "review") {
+      m = /^task#(\d+)\s+(\S+)\s+verdict=(\S+)(?:\s+coverage=([\d.]+))?/.exec(ev.detail);
+      if (m) {
+        return { t: "review", id: +m[1], role: m[2], verdict: m[3],
+                 coverage: m[4] == null ? undefined : +m[4], note: "" };
+      }
+    }
+    if (ev.action === "mint-register") {
+      m = /^([^@\s]+)@(\S+?)(?:\s+eval=(\S+))?\s*$/.exec(ev.detail);
+      if (m) return { t: "mint", name: m[1], version: m[2], eval: m[3] || "" };
+    }
+    if (ev.action === "asset") return { t: "asset", label: ev.detail };
+    if (ev.action === "patch") return { t: "patch", detail: ev.detail };
+    if (ev.action === "canary") return { t: "canary", detail: ev.detail };
+    if (ev.action === "open") return { t: "mission", mission: ev.detail };
+    if (ev.action === "drift") {
+      var dm = /alerts=(\d+)/.exec(ev.detail);
+      return { t: "drift", alerts: dm ? +dm[1] : 0, detail: ev.detail };
+    }
+    return { t: "other", name: "journal", action: ev.action, detail: ev.detail };
+  }
+  if (ev.kind === "run_end") return { t: "runEnd", ok: ev.ok, elapsed_ms: ev.elapsed_ms };
+  if (ev.kind === "crystallize_frozen") return { t: "crystal", node: ev.node, input: ev.input, frozen: true };
+  if (ev.kind === "crystallize_hit") return { t: "crystal", node: ev.node, input: ev.input, frozen: false };
+  if (ev.kind === "fixtures_mined") return { t: "mined", entries: ev.entries, tracks: ev.tracks };
+  if (ev.kind === "score_evidence") return { t: "score", axis: ev.axis, kind: ev.kind2, value: ev.value };
+  if (ev.kind === "capability_granted") {
+    return { t: "capability", capability: ev.capability, mode: ev.mode, granted: true };
+  }
+  return { t: "other", name: ev.kind, action: "", detail: "" };
+}
+
+/** 评分卡面板（org score 的 Web 面）。 */
+function showScorecard() {
+  api("/api/score").then(function (r) {
+    if (!r || !r.ok) { flashHint((r && r.error) || "尚无评分卡"); return; }
+    var c = r.scorecard;
+    var chat = document.getElementById("chat");
+    var h = '<div class="rcard"><div class="rchead"><span class="rt">评分卡</span><span>· ' +
+      esc(r.dir) + ' · 模型 ' + esc(c.model) + '</span><span style="margin-left:auto">证据 ' +
+      c.evidence_count + ' 条</span></div><div class="scgrid">' +
+      '<span class="h">单元</span><span class="h">分数</span><span class="h">置信度</span>';
+    c.cells.forEach(function (x) {
+      h += '<span class="n">' + esc(x.cell) + '</span><span>' + Number(x.score).toFixed(3) +
+           '</span><span class="dim">' + Number(x.confidence).toFixed(2) + '</span>';
+    });
+    h += '</div></div>';
+    chat.insertAdjacentHTML("beforeend", h);
+    scrollDown(true);
+  }).catch(function (e) { flashHint("评分卡读取失败：" + e); });
 }
 
 // 轻量提示（状态栏闪现，2.6s 自清；无侵入）
@@ -2220,7 +2885,11 @@ document.addEventListener("keydown", function (e) {
   }
 });
 document.getElementById("send").onclick = function () {
-  if (state.running) stopRun(); else ask();
+  if (state.running) { stopRun(); return; }
+  var text = document.getElementById("question").value.trim();
+  if (!text) return;
+  // 模式分派：团队 = 监督回路（org run 的 Web 面）；直连 = 单专家（原行为）
+  if (state.mode === "team") runTeam(text); else ask(text);
 };
 function newSession() {
   if (state.running) return;
@@ -2275,6 +2944,37 @@ function renderSeg() {
   );
 }
 
+// 派单模式切换（团队 / 直连）—— 团队是旗舰面，缺省即它
+document.getElementById("modeSeg").addEventListener("click", function (e) {
+  var b = e.target.closest("button");
+  if (!b || state.running) return;
+  state.mode = b.dataset.mode;
+  renderMode();
+});
+function renderMode() {
+  Array.prototype.forEach.call(
+    document.querySelectorAll("#modeSeg button"),
+    function (b) { b.classList.toggle("on", b.dataset.mode === state.mode); },
+  );
+  var team = state.mode === "team";
+  var q = document.getElementById("question");
+  var ex = document.getElementById("experts");
+  if (q) {
+    q.placeholder = team
+      ? "输入任务，enter 派单（团队模式：分解 → 路由 → 审查 → 汇总）· esc 停止"
+      : "输入问题，enter 发送（直连单专家）· shift+enter 换行 · esc 停止";
+  }
+  // 直连需要专家在岗；团队模式不需要（专家由路由决定）
+  if (ex) ex.style.opacity = team ? "0.55" : "1";
+  renderStatusbar();
+}
+
+// 评分卡（org score 的 Web 面）
+document.getElementById("scoreBtn").onclick = function () { showScorecard(); closeDrawer(); };
+
+// 启动即加载运行产物列表
+loadRuns();
+
 // ---- 导出 Markdown ----
 
 document.getElementById("exportBtn").onclick = function () {
@@ -2324,7 +3024,7 @@ api("/api/status").then(function (r) {
   state.workspace = r.workspace || "";
   if (r.model === "scripted" || r.model === "deepseek") state.model = r.model;
   document.getElementById("wsPath").textContent = r.workspace || "";
-  renderTop(); renderExperts(); renderSeg(); renderStatusbar();
+  renderTop(); renderExperts(); renderSeg(); renderStatusbar(); renderMode();
   refreshReviewChip();
   if (state.experts.length > 0) {
     var retained = state.experts.filter(function (e) { return e.retained; });
