@@ -124,6 +124,17 @@
 已补助手，并新增 `tests/chat.test.ts` 的**进程级斜杠冒烟**（管道喂真实 REPL 逐条执行，
 断言不出现 `ReferenceError` / `is not defined`）——这正是能抓到该类缺陷的测试形态。
 
+### 7. 用量/成本时间线（补齐「数据源」承诺的另一半）
+
+v0.5.0 把 `llm_stream_done` 具名化时写明它是「成本面板的数据源」，但当时并没有面板。
+本版补齐：`lib/engine.ts::readCostTimeline()` 把一次运行的逐次模型调用还原成时间线
+（轨道 / 正文与思考字符 / 耗时 / 网关 usage），按轨道聚合 + 总量；
+`scripted` 剧本车道不经过网关时**明说「没有模型调用记录」而不是显示 0**；
+usage 缺失时 tokens 标注为**下界**而不是伪装成精确值。
+
+入口：CLI `org cost [--run <dir>]` · Web 侧栏「查看用量 / 成本时间线」+ `GET /api/cost`。
+测试 `tests/cost.test.ts` 5 例（还原/聚合/下界/零调用明说/损坏容忍/CLI 退出码）。
+
 ### 诚实的边界（本版未做）
 
 按约定范围，以下需要改 vendored 解释器或新增宿主通道，留作后续：

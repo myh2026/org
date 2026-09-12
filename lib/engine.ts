@@ -1435,3 +1435,96 @@ export function deleteSession(ws: string, expert: string, session: string): stri
   fs.rmSync(file);
   return file;
 }
+
+// ---------- v0.5.0：用量/成本时间线（llm_stream_done 的消费面） ----------
+// 为什么单独做：v0.5.0 把 llm_stream_done 具名化时说明了它是「成本面板的数据源」，
+// 但当时并没有面板 —— 本函数补齐那一半。它把一次运行里的逐次模型调用还原成时间线：
+//   每次调用的 track（哪条轨道：direct:<expert> / handoff:<expert> / mint_<stage> …）、
+//   正文与思考字符数、耗时、以及网关回传的 usage（真实 token，若有）。
+// 这是「成本结构随资产沉淀下降」这个核心叙事的**逐调用证据**，而不只是总数。
+
+export interface CostCall {
+  seq: number;
+  ts: string;
+  track: string;
+  chars: number;
+  reasoningChars: number;
+  elapsedMs: number;
+  /** 网关 usage（total_tokens / prompt_tokens / completion_tokens…）；无则 null。 */
+  tokens: number | null;
+  tokenDetail: Record<string, unknown> | null;
+}
+
+export interface CostTimeline {
+  calls: CostCall[];
+  /** 按 track 聚合（同轨道多次调用合并 —— 工厂重试、多轮直连都会出现）。 */
+  byTrack: Array<{ track: string; calls: number; chars: number; reasoningChars: number; elapsedMs: number; tokens: number }>;
+  totals: { calls: number; chars: number; reasoningChars: number; elapsedMs: number; tokens: number };
+  /** 是否所有调用都带 usage（false = 该网关不回传 usage，token 只是下界）。 */
+  tokensComplete: boolean;
+}
+
+/** 从一次运行的产物还原用量时间线（events.jsonl 的 llm_stream_done 事件）。 */
+export function readCostTimeline(outDir: string): CostTimeline {
+  const events = readEventStream(
+    path.join(outDir, "events.jsonl"),
+    path.join(outDir, "journal.jsonl"),
+    path.join(outDir, "llm-stream.jsonl"),
+  );
+  const calls: CostCall[] = [];
+  for (const ev of events) {
+    if (ev.kind !== "llm_stream_done") continue;
+    const usage = ev.usage as Record<string, unknown> | null;
+    const total = usage && typeof usage.total_tokens === "number" ? usage.total_tokens : null;
+    calls.push({
+      seq: ev.seq, ts: ev.ts, track: ev.track,
+      chars: ev.chars, reasoningChars: ev.reasoningChars, elapsedMs: ev.elapsedMs,
+      tokens: total, tokenDetail: usage,
+    });
+  }
+  calls.sort((a, b) => (a.ts === b.ts ? a.seq - b.seq : a.ts < b.ts ? -1 : 1));
+
+  const agg = new Map<string, { calls: number; chars: number; reasoningChars: number; elapsedMs: number; tokens: number }>();
+  const totals = { calls: calls.length, chars: 0, reasoningChars: 0, elapsedMs: 0, tokens: 0 };
+  for (const c of calls) {
+    const slot = agg.get(c.track) ?? { calls: 0, chars: 0, reasoningChars: 0, elapsedMs: 0, tokens: 0 };
+    slot.calls += 1;
+    slot.chars += c.chars;
+    slot.reasoningChars += c.reasoningChars;
+    slot.elapsedMs += c.elapsedMs;
+    slot.tokens += c.tokens ?? 0;
+    agg.set(c.track, slot);
+    totals.chars += c.chars;
+    totals.reasoningChars += c.reasoningChars;
+    totals.elapsedMs += c.elapsedMs;
+    totals.tokens += c.tokens ?? 0;
+  }
+  const byTrack = [...agg.entries()]
+    .map(([track, v]) => ({ track, ...v }))
+    .sort((a, b) => b.calls - a.calls || b.chars - a.chars);
+  return { calls, byTrack, totals, tokensComplete: calls.length > 0 && calls.every((c) => c.tokens !== null) };
+}
+
+/** 用量时间线的可读渲染（CLI org cost 与 Web 面板共用同一字段口径）。 */
+export function renderCostTimeline(t: CostTimeline): string {
+  // 注意 calls 是数组：早先写成 `t.calls === 0`（数组与数字比较恒为 false），
+  // 于是「本次没有模型调用」这条分支永远走不到，坏账会被误报成「tokens 不完整」。
+  if (t.calls.length === 0) {
+    return "（本次运行没有模型调用记录 —— scripted 剧本车道不经过网关，故无 llm_stream_done）";
+  }
+  const lines: string[] = [];
+  lines.push(`模型调用 ${t.totals.calls} 次 · 正文 ${t.totals.chars} 字` +
+    (t.totals.reasoningChars > 0 ? ` · 思考 ${t.totals.reasoningChars} 字` : "") +
+    ` · 累计 ${(t.totals.elapsedMs / 1000).toFixed(1)}s` +
+    (t.tokensComplete
+      ? ` · tokens ${t.totals.tokens}`
+      : ` · tokens ${t.totals.tokens}+ 不完整（网关未回传全部 usage，显示值为下界）`));
+  lines.push("");
+  lines.push("按轨道：");
+  for (const r of t.byTrack) {
+    lines.push(`  ${r.track.padEnd(28)} ${String(r.calls).padStart(3)} 次  ` +
+      `${String(r.chars).padStart(6)} 字  ${(r.elapsedMs / 1000).toFixed(1)}s` +
+      (r.tokens > 0 ? `  ${r.tokens} tok` : ""));
+  }
+  return lines.join("\n");
+}

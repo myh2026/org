@@ -33,6 +33,7 @@ import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          importHarness, listContextUsage, renderContextMeter, expertFixtureOf,
          latestHarnessRunDir, reviewCandidates, applyReview,
          forkSession, revertExpert, archivedVersions, renameSession, deleteSession } from "../lib/engine.ts";
+import { readCostTimeline, renderCostTimeline, latestScorecardDir } from "../lib/engine.ts";
 import { listApprovals, decideApproval, clearGranted } from "../lib/approvals.ts";
 import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
@@ -833,6 +834,31 @@ function askLine(prompt: string): Promise<string | null> {
 // 「反悔」通道：把归档源还原为在岗源（金丝雀回滚用的是同一批归档源），
 // 当前源先归档 → 回退本身可逆，注册表版本号随之回退并 git 留痕。
 // 对应 opencode 的 /undo 与 codex 的 diff/revert。
+// ---- 用量/成本时间线（org cost）----
+// llm_stream_done 的消费面：「成本结构随资产沉淀下降」这个核心叙事的逐调用证据。
+// 注意 scripted 剧本车道不经过网关 → 没有 llm_stream_done，此时诚实说明而不是显示 0。
+async function cmdCost(a: Args): Promise<number> {
+  const dir = a.runDir || latestScorecardDir(a.workspace) || latestHarnessRunDir(a.workspace);
+  if (!dir) {
+    console.error("✗ 没有可读的运行产物 —— 先 org run / org demo，或用 --run <dir> 指定");
+    return 2;
+  }
+  const t = readCostTimeline(dir);
+  console.log(`运行 ${path.relative(process.cwd(), dir) || dir}`);
+  console.log(renderCostTimeline(t));
+  if (t.calls > 0) {
+    console.log("");
+    console.log("逐次调用：");
+    for (const c of t.calls.slice(0, 20)) {
+      console.log(`  ${c.ts}  ${c.track.padEnd(24)} ${String(c.chars).padStart(6)} 字` +
+        `${c.reasoningChars > 0 ? " (思考 " + c.reasoningChars + ")" : ""}  ${(c.elapsedMs / 1000).toFixed(1)}s` +
+        `${c.tokens != null ? "  " + c.tokens + " tok" : ""}`);
+    }
+    if (t.calls.length > 20) console.log(`  … 另有 ${t.calls.length - 20} 次（完整列表见 events.jsonl）`);
+  }
+  return 0;
+}
+
 // ---- 交互式审批队列（org approvals）----
 // 审批是「文件协议」而非进程内通道（图执行当前没有挂起点）：HSL 侧
 // hsl/policy/approval.hsl 落 <id>.json 并有界轮询 <id>.reply.json。
@@ -1318,6 +1344,7 @@ export async function orgMain(): Promise<number> {
     case "review": return cmdReview(a);
     case "revert": return cmdRevert(a);
     case "approvals": return cmdApprovals(a);
+    case "cost": return cmdCost(a);
     case "session": return cmdSession(a);
     case "status": return cmdStatus(a);
     case "score": return cmdScore(a);
@@ -1352,6 +1379,8 @@ export async function orgMain(): Promise<number> {
       工具库治理：选取保留 harness（工厂候选 → 转正，git 留痕）
   org drop <expert> [expert2 ...] [--workspace DIR]
       工具库治理：取消保留（B 路径不再自动复用；显式寻址仍可用）
+  org cost [--run <dir>] [--workspace DIR]
+      用量/成本时间线（逐次模型调用：轨道 · 字符 · 耗时 · tokens）
   org approvals [allow|always|deny <id>] [--workspace DIR]
       交互式审批队列：列出待批准项 / 放行 / 长期放行 / 拒绝（另一个终端也能放行）
   org revert <expert> [--to x.y.z] [--workspace DIR]

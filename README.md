@@ -626,6 +626,7 @@ ORG 有三个前端：Web GUI（`org web`）· TUI 驾驶舱（`org tui`）· ch
 | 配置 / API key（`org config`） | ✔ | — | — | — |
 | **交互式审批（mid-run）** | ✔ `org approvals` | ✔ v0.5.0 徽标+面板 | ✔ `:approve` | ✔ `/approve` |
 | 能力预授权（`--approve-capability`） | ✔ | — | — | — |
+| 用量 / 成本时间线 | ✔ v0.5.0 `org cost` | ✔ v0.5.0 面板 | — | — |
 | 主题 / 事件过滤 | — | — | ✔ `:theme` `:filter` | — |
 | 栏内移动 / 翻页 | — | — | ✔ v0.5.0 `j/k` · `PgUp/PgDn` | ↑↓ 历史 |
 

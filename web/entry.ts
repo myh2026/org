@@ -12,6 +12,7 @@
 //   GET    /api/runs                运行产物列表（out-*，TUI 会话栏同源）
 //   GET    /api/run?dir=out-a       单次运行回放（journal/events/metrics/scorecard）
 //   GET    /api/score?dir=out-a     评分卡（缺省取最新）
+//   GET    /api/cost?dir=out-a      用量/成本时间线（llm_stream_done 的消费面）
 //   GET    /api/approvals           待批准项 + 长期放行集（审批队列文件协议）
 //   POST   /api/approvals           决策：body {id, allow, always?} → 写回复文件
 //   POST   /api/run-stream          团队模式派单（SSE：open → queued? → start →
@@ -58,6 +59,7 @@ import { tailLines } from "../lib/events.ts";
 import type { EngineEvent } from "../lib/events.ts";
 import { classifyRunEvent } from "../lib/runCards.ts";
 import { listApprovals, decideApproval } from "../lib/approvals.ts";
+import { readCostTimeline, latestHarnessRunDir } from "../lib/engine.ts";
 import { AskGate, QueueCancelledError } from "./gate.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14 漂移治理：此前本文件落后两版）
 
@@ -651,6 +653,19 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
           const r = decideApproval(ws, String(body.id ?? ""), body.allow === true, body.always === true, "web");
           if (!r.ok) return json({ ok: false, error: r.error }, r.status);
           return json({ ok: true, id: String(body.id ?? ""), allow: body.allow === true, always: body.always === true });
+        }
+        if (route === "GET /api/cost") {
+          const rws = readWorkspaceOf(ws);
+          const name = url.searchParams.get("dir") ?? "";
+          let dir: string | null = null;
+          if (name) {
+            if (!SAFE_NAME.test(name)) return json({ error: "run 目录名不合法" }, 400);
+            dir = path.join(rws, name);
+          } else {
+            dir = latestScorecardDir(rws) ?? latestHarnessRunDir(rws);
+          }
+          if (!dir || !fs.existsSync(dir)) return json({ ok: false, error: "没有可读的运行产物（先派单）" }, 404);
+          return json({ ok: true, dir: path.basename(dir), timeline: readCostTimeline(dir) });
         }
         // ---- 团队模式派单（v0.5.0：Web 不再只有直连）----
         // 与 CLI org run / TUI 团队输入同一代码路径（lib/engine.ts startRun
@@ -1572,6 +1587,7 @@ function renderIndexHtml(): string {
     <div class="list" id="runs"></div>
     <div class="sec">评分卡</div>
     <div class="list"><div class="run" id="scoreBtn" title="查看最近一次运行的评分卡"><div class="l1"><span class="nm">查看评分卡（证据归因）</span></div></div></div>
+    <div class="list"><div class="run" id="costBtn" title="逐次模型调用：轨道 · 字符 · 耗时 · tokens"><div class="l1"><span class="nm">查看用量 / 成本时间线</span></div></div></div>
   </aside>
   <main>
     <div class="thead">
@@ -2347,6 +2363,37 @@ function openRun(name) {
   }).catch(function (e) { flashHint("回放失败：" + e); });
 }
 
+/** 用量/成本时间线面板（org cost 的 Web 面）。 */
+function showCost() {
+  api("/api/cost").then(function (r) {
+    if (!r || !r.ok) { flashHint((r && r.error) || "没有可读的运行产物"); return; }
+    var t = r.timeline;
+    var chat = document.getElementById("chat");
+    var h = '<div class="rcard"><div class="rchead"><span class="rt">用量 / 成本</span><span>· ' +
+      esc(r.dir) + '</span><span style="margin-left:auto">' + t.totals.calls + ' 次调用 · ' +
+      (t.totals.elapsedMs / 1000).toFixed(1) + 's</span></div><div class="scgrid">' +
+      '<span class="h">轨道</span><span class="h">次数</span><span class="h">耗时</span>';
+    if (t.calls.length === 0) {
+      h += '</div><div class="rvempty">本次运行没有模型调用记录 —— scripted 剧本车道不经过网关，' +
+        '故无 llm_stream_done（用 --model deepseek 才有真实用量）</div></div>';
+    } else {
+      t.byTrack.forEach(function (x) {
+        h += '<span class="n">' + esc(x.track) + '</span><span>' + x.calls +
+             '</span><span class="dim">' + (x.elapsedMs / 1000).toFixed(1) + 's · ' + x.chars + ' 字' +
+             (x.tokens > 0 ? ' · ' + x.tokens + ' tok' : '') + '</span>';
+      });
+      h += '</div><div class="rdone">' +
+        '<span>正文 <b>' + t.totals.chars + '</b> 字</span>' +
+        '<span>思考 <b>' + t.totals.reasoningChars + '</b> 字</span>' +
+        '<span>tokens <b>' + (t.tokensComplete ? t.totals.tokens : t.totals.tokens + "+") + '</b></span>' +
+        (t.tokensComplete ? '' : '<span class="dim">（网关未回传全部 usage，token 为下界）</span>') +
+        '</div></div>';
+    }
+    chat.insertAdjacentHTML("beforeend", h);
+    scrollDown(true);
+  }).catch(function (e) { flashHint("用量读取失败：" + e); });
+}
+
 /** 评分卡面板（org score 的 Web 面）。 */
 function showScorecard() {
   api("/api/score").then(function (r) {
@@ -3048,6 +3095,7 @@ function renderMode() {
 
 // 评分卡（org score 的 Web 面）
 document.getElementById("scoreBtn").onclick = function () { showScorecard(); closeDrawer(); };
+document.getElementById("costBtn").onclick = function () { showCost(); closeDrawer(); };
 
 // 启动即加载运行产物列表 + 开始审批轮询
 loadRuns();
