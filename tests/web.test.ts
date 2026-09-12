@@ -775,3 +775,141 @@ describe("Web GUI：dist/demo 快照只读守卫（DELETE/PATCH）", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// v0.5.0：团队模式派单的 Web 面（此前 Web 只有直连 —— 旗舰监督回路不可见）
+// ---------------------------------------------------------------------------
+
+describe("Web 团队模式：派单 SSE + 运行产物 + 评分卡", () => {
+  let ws: string;
+  let srv: Bun.Server;
+  let base: string;
+
+  beforeAll(() => {
+    ws = makeWorkspace("web-team");
+    srv = startWebServer({ workspace: ws, port: 0, model: "scripted" });
+    base = `http://127.0.0.1:${srv.port}`;
+  }, 120_000);
+
+  afterAll(() => {
+    srv.stop(true);
+  });
+
+  test("POST /api/run-stream：open → start → run → card* → done（真实监督回路）", async () => {
+    const res = await fetch(`${base}/api/run-stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ task: "抓取某站点近一周公告，输出结构化表格" }),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    const text = await res.text();
+
+    // 帧序列：open / start / run 各一，card 多条，done 一条
+    expect(text).toContain("event: open");
+    expect(text).toContain("event: start");
+    expect(text).toContain("event: run");
+    expect(text).toContain("event: done");
+    const cards = text.split("event: card").length - 1;
+    expect(cards).toBeGreaterThan(10);
+    expect(text).not.toContain("event: error");
+
+    // done 帧携带真实 metrics（与 CLI org run 同一代码路径）
+    const doneLine = text.split("\n").filter((l) => l.startsWith("data: ") && l.includes("\"elapsed_ms\"")).pop()!;
+    const done = JSON.parse(doneLine.slice(6)) as { ok: boolean; metrics: Record<string, number>; outDir: string };
+    expect(done.ok).toBe(true);
+    expect(done.metrics.accepted).toBe(3);
+    expect(done.metrics.subtasks).toBe(3);
+    expect(done.metrics.model_calls_total).toBeGreaterThan(0);
+
+    // card 帧是 {ev, fact} 形态：分类在服务端做（浏览器只渲染）
+    const cardLine = text.split("\n").filter((l) => l.startsWith("data: ") && l.includes("\"card\"")).pop();
+    void cardLine;
+    const oneCard = text.split("\n").find((l) => l.startsWith("data: ") && l.includes("\"fact\""));
+    expect(oneCard).toBeDefined();
+    const parsed = JSON.parse(oneCard!.slice(6)) as { ev: { kind: string }; fact: { t: string } };
+    expect(parsed.ev.kind).toBeDefined();
+    expect(parsed.fact.t).toBeDefined();
+  }, 120_000);
+
+  test("card 帧覆盖关键叙事事实（mission/route/review/asset 至少各一）", async () => {
+    const res = await fetch(`${base}/api/run-stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ task: "抓取某站点近一周公告，输出结构化表格" }),
+    });
+    const text = await res.text();
+    const facts = text.split("\n")
+      .filter((l) => l.startsWith("data: ") && l.includes("\"fact\""))
+      .map((l) => (JSON.parse(l.slice(6)) as { fact: { t: string } }).fact.t);
+    for (const want of ["mission", "route", "dispatch", "review", "asset", "runEnd"]) {
+      expect(facts).toContain(want);
+    }
+    // 非法事实不得出现（分类器的兜底必须留名，而不是 undefined）
+    expect(facts).not.toContain(undefined as unknown as string);
+  }, 120_000);
+
+  test("POST /api/run-stream：task 必填 → 400 JSON（不建流）", async () => {
+    const res = await fetch(`${base}/api/run-stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ task: "   " }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("task");
+  }, 120_000);
+
+  test("GET /api/runs：运行产物列表（派单后非空，含 elapsed/task）", async () => {
+    const res = await fetch(`${base}/api/runs`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { runs: Array<{ name: string; ok: boolean; task: string; elapsed_ms: number }> };
+    expect(body.runs.length).toBeGreaterThan(0);
+    const first = body.runs[0]!;
+    expect(first.name).toMatch(/^out-/);
+    expect(first.ok).toBe(true);
+    expect(first.elapsed_ms).toBeGreaterThan(0);
+  }, 120_000);
+
+  test("GET /api/run?dir=：只读回放（events/metrics/runJson）；坏名 400；不存在 404", async () => {
+    const list = (await (await fetch(`${base}/api/runs`)).json()) as { runs: Array<{ name: string }> };
+    const name = list.runs[0]!.name;
+    const ok = await fetch(`${base}/api/run?dir=${encodeURIComponent(name)}`);
+    expect(ok.status).toBe(200);
+    const data = (await ok.json()) as { dir: string; events: unknown[]; runJson: { ok: boolean }; metrics: { accepted: number } };
+    expect(data.dir).toBe(name);
+    expect(data.events.length).toBeGreaterThan(10);
+    expect(data.runJson.ok).toBe(true);
+    expect(data.metrics.accepted).toBe(3);
+
+    // 路径穿越 / 非法名 → 400（SAFE_NAME 守卫）
+    const bad = await fetch(`${base}/api/run?dir=${encodeURIComponent("../etc")}`);
+    expect(bad.status).toBe(400);
+    // 合法但不存在 → 404
+    const missing = await fetch(`${base}/api/run?dir=out-nope`);
+    expect(missing.status).toBe(404);
+  }, 120_000);
+
+  test("GET /api/score：评分卡（cells + evidence_count）", async () => {
+    const res = await fetch(`${base}/api/score`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; dir: string; scorecard: { model: string; evidence_count: number; cells: unknown[] } };
+    expect(body.ok).toBe(true);
+    expect(body.scorecard.model).toBe("scripted");
+    expect(body.scorecard.evidence_count).toBeGreaterThan(0);
+    expect(body.scorecard.cells.length).toBeGreaterThan(0);
+  }, 120_000);
+
+  test("GUI 单页含团队模式要素（模式切换 / 卡片渲染 / 运行列表 / 评分卡）", async () => {
+    const html = await (await fetch(`${base}/`)).text();
+    for (const needle of ["modeSeg", "data-mode=\"team\"", "function runTeam(", "function renderRun(",
+                          "function loadRuns(", "function openRun(", "function showScorecard(",
+                          "id=\"runs\"", "id=\"scoreBtn\"", "function sseConnect("]) {
+      expect(html).toContain(needle);
+    }
+    // 内联脚本必须自洽（模板字面量未吃掉转义）
+    const m = html.match(/<script>([\s\S]*?)<\/script>/);
+    expect(m).not.toBeNull();
+    expect(() => new Function(m![1]!)).not.toThrow();
+  }, 120_000);
+});

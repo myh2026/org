@@ -1,5 +1,5 @@
-{"seq":0,"ts":"2026-09-12T05:32:46.949Z","name":"run_start","data":{"entry":"/home/z/repos/org/hsl/pool/handoff.hsl","model":"scripted","task":"(handoff) small request","scale":"microkernel"}}
-{"seq":1,"ts":"2026-09-12T05:32:46.960Z","name":"capability_granted","data":{"capability":"llm_call","mode":"orchestrated"}}
-{"seq":2,"ts":"2026-09-12T05:32:46.960Z","name":"journal","data":{"name":"handoff_open","detail":"notice-parser"}}
-{"seq":3,"ts":"2026-09-12T05:32:46.965Z","name":"journal","data":{"name":"handoff_close","detail":"notice-parser"}}
-{"seq":4,"ts":"2026-09-12T05:32:46.967Z","name":"run_end","data":{"elapsed_ms":18,"ok":true}}
+{"seq":0,"ts":"2026-09-12T14:14:40.881Z","name":"run_start","data":{"entry":"C:\\Users\\86186\\.zcode\\workspace\\default\\repos\\org\\hsl\\pool\\handoff.hsl","model":"scripted","task":"(handoff) small request","scale":"microkernel"}}
+{"seq":1,"ts":"2026-09-12T14:14:40.899Z","name":"capability_granted","data":{"capability":"llm_call","mode":"orchestrated"}}
+{"seq":2,"ts":"2026-09-12T14:14:40.900Z","name":"journal","data":{"name":"handoff_open","detail":"notice-parser"}}
+{"seq":3,"ts":"2026-09-12T14:14:40.917Z","name":"journal","data":{"name":"handoff_close","detail":"notice-parser"}}
+{"seq":4,"ts":"2026-09-12T14:14:40.920Z","name":"run_end","data":{"elapsed_ms":39,"ok":true}}

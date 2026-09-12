@@ -11,12 +11,13 @@
 // 全部本地 mock（Bun.serve 随机端口）—— 不出网、确定性、毫秒级。
 // ============================================================================
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, beforeAll } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Host } from "../toolchain/dhv-ts/src/host";
 import { parseInput, readSession, listSessions, latestSession, compactLedger } from "../cli/chat.ts";
 import { parseLlmStreamLine, readEventStream } from "../lib/events.ts";
+import { ROOT, CLI, DHV, TEST_RUN, makeWorkspace, runOrgRun, shPath } from "./helpers";
 
 // ---------- 工具 ----------
 
@@ -335,4 +336,55 @@ describe("events.ts：llm-stream 解析与合流", () => {
     expect(events[0]!.kind).toBe("run_start");
     fs.rmSync(dir, { recursive: true, force: true });
   });
+});
+
+// ---------------------------------------------------------------------------
+// v0.5.0：chat 斜杠命令的进程级冒烟（既有单测只覆盖纯函数，斜杠分支零覆盖 ——
+// 于是「引用了未定义的 green/red」这类错误能一路溜到运行期才发现）
+// ---------------------------------------------------------------------------
+
+describe("v0.5.0：chat 斜杠命令进程级冒烟", () => {
+  /** 用管道把命令喂给真实 REPL 进程（readline 支持管道输入），断言无异常且有输出。 */
+  function runChat(commands: string[], args: string[] = []): { out: string; code: number } {
+    const proc = Bun.spawnSync([process.execPath, CLI, "chat", ...args], {
+      cwd: ROOT,
+      env: { ...process.env, DHV_TS: shPath(DHV) },
+      stdin: new TextEncoder().encode(commands.join("\n") + "\n"),
+      stdout: "pipe", stderr: "pipe",
+    });
+    return { out: proc.stdout.toString() + proc.stderr.toString(), code: proc.exitCode };
+  }
+
+  const WS = path.join(TEST_RUN, "chat-slash");
+
+  beforeAll(() => {
+    const ws = makeWorkspace("chat-slash");
+    expect(runOrgRun(ws, path.join(ws, "out-a")).ok).toBe(true);
+  }, 120_000);
+
+  test("/help 列出 v0.5.0 新增命令（审批 / 运行列表 / 评分卡 / 复核 / 治理 / fork / undo）", () => {
+    const r = runChat(["/help", "/exit"], ["notice-parser", "--workspace", WS]);
+    expect(r.code).toBe(0);
+    for (const needle of ["/approvals", "/runs", "/score", "/review", "/keep", "/fork", "/undo"]) {
+      expect(r.out).toContain(needle);
+    }
+  }, 120_000);
+
+  test("斜杠命令不得抛 ReferenceError（逐条真实执行）", () => {
+    // 每条命令都会走一个独立分支；这里断言「没有任何 ReferenceError」，
+    // 正是它能抓到 green/red 未定义那类缺陷。
+    const r = runChat([
+      "/runs", "/score", "/review", "/approvals", "/undo", "/keep no-such-expert", "/drop no-such-expert", "/exit",
+    ], ["notice-parser", "--workspace", WS]);
+    expect(r.out).not.toContain("ReferenceError");
+    expect(r.out).not.toContain("is not defined");
+    expect(r.out).toContain("运行产物");
+    expect(r.out).toContain("评分卡");
+  }, 120_000);
+
+  test("/runs 与 /score 输出关键内容（与 CLI/TUI 同一数据源）", () => {
+    const r = runChat(["/runs", "/score", "/exit"], ["notice-parser", "--workspace", WS]);
+    expect(r.out).toContain("out-a");                  // 运行产物条目（runOrgRun 固定 out-a）
+    expect(r.out).toContain("证据");                    // 评分卡证据计数
+  }, 120_000);
 });

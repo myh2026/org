@@ -107,6 +107,42 @@ export type EngineEvent =
   | { kind: "canary_confirmed"; seq: number; ts: string; expert: string; version: string }
   | { kind: "fixtures_mined"; seq: number; ts: string; entries: number; tracks: number }
   | { kind: "run_end"; seq: number; ts: string; ok: boolean; elapsed_ms: number }
+  // ---- v0.5.0：以下 11 类此前全部落 kind:"unknown"，渲染层 switch 直接丢弃 ----
+  // 它们不是边角料：审计（capability_elevated / agent_imported）、能力拒绝、
+  // 固化降级、金丝雀回滚、静默更新告警、N 版本冗余对比、补丁回滚失败、运行时
+  // panic、以及模型调用的用量收尾（成本面板的数据源）。
+  | { kind: "audit"; seq: number; ts: string; event: string; detail: string }
+  | { kind: "capability_denied"; seq: number; ts: string; capability: string; reason: string }
+  | { kind: "crystallize_degrade"; seq: number; ts: string; node: string; input: string }
+  | { kind: "canary_rollback"; seq: number; ts: string; expert: string; version: string; restored: boolean }
+  | {
+      kind: "redundancy_compare"; seq: number; ts: string;
+      a: string; b: string; agree: boolean; coverageA: number; coverageB: number;
+    }
+  | {
+      kind: "score_drift_alert"; seq: number; ts: string;
+      model: string; cell: string; previous: number; current: number; threshold: number;
+    }
+  | { kind: "registry_commit_skipped"; seq: number; ts: string; message: string }
+  | { kind: "patch_rollback_failed"; seq: number; ts: string; path: string; message: string }
+  | { kind: "run_panic"; seq: number; ts: string; message: string }
+  | {
+      kind: "llm_stream_done"; seq: number; ts: string; track: string;
+      chars: number; reasoningChars: number; elapsedMs: number;
+      usage: Record<string, unknown> | null;
+    }
+  | { kind: "fault"; seq: number; ts: string; action: string; target: string; kind2: string; message: string }
+  // ---- v0.5.0：交互式审批队列的四态（请求 / 结论 / 超时 / 长期放行命中）----
+  | {
+      kind: "approval_requested"; seq: number; ts: string;
+      id: string; capability: string; action: string; detail: string; timeoutMs: number;
+    }
+  | {
+      kind: "approval_resolved"; seq: number; ts: string;
+      id: string; capability: string; allow: boolean; always: boolean; by: string; waitedMs: number;
+    }
+  | { kind: "approval_timeout"; seq: number; ts: string; id: string; capability: string; action: string; timeoutMs: number }
+  | { kind: "approval_cached"; seq: number; ts: string; capability: string; action: string }
   | { kind: "unknown"; seq: number; ts: string; name: string; data: Record<string, unknown> }
   // 引擎桥合成事件（不在磁盘产物中，wait() 完成前注入流尾）
   | {
@@ -176,6 +212,80 @@ export function normalizeEventLine(raw: RawEventLine): EngineEvent {
       return { kind: "fixtures_mined", seq, ts, entries: num(d.entries), tracks: num(d.tracks) };
     case "run_end":
       return { kind: "run_end", seq, ts, ok: d.ok === true, elapsed_ms: num(d.elapsed_ms) };
+    // ---- v0.5.0：具名化此前落到 unknown 的 11 类事件 ----
+    case "audit":
+      return {
+        kind: "audit", seq, ts,
+        event: str(d.event),
+        // 导入线（bridge）带的补充字段拼一段 detail，便于审计展示
+        detail: [str(d.name), str(d.format), str(d.path)].filter((x) => x.length > 0).join(" · "),
+      };
+    case "capability_denied":
+      // 两条来源：能力策略（{capability, reason}）与宿主故障注入（{target, reason}）
+      return {
+        kind: "capability_denied", seq, ts,
+        capability: str(d.capability) || str(d.target),
+        reason: str(d.reason),
+      };
+    case "crystallize_degrade":
+      return { kind: "crystallize_degrade", seq, ts, node: str(d.node), input: str(d.input) };
+    case "canary_rollback":
+      return {
+        kind: "canary_rollback", seq, ts,
+        expert: str(d.expert), version: str(d.version), restored: d.restored === true,
+      };
+    case "redundancy_compare":
+      return {
+        kind: "redundancy_compare", seq, ts,
+        a: str(d.a), b: str(d.b), agree: d.agree === true,
+        coverageA: num(d.coverage_a), coverageB: num(d.coverage_b),
+      };
+    case "score_drift_alert":
+      return {
+        kind: "score_drift_alert", seq, ts,
+        model: str(d.model), cell: str(d.cell),
+        previous: num(d.previous), current: num(d.current), threshold: num(d.threshold),
+      };
+    case "registry_commit_skipped":
+      return { kind: "registry_commit_skipped", seq, ts, message: str(d.message) };
+    case "patch_rollback_failed":
+      return { kind: "patch_rollback_failed", seq, ts, path: str(d.path), message: str(d.message) };
+    case "run_panic":
+      return { kind: "run_panic", seq, ts, message: str(d.message) };
+    case "llm_stream_done":
+      return {
+        kind: "llm_stream_done", seq, ts, track: str(d.track),
+        chars: num(d.chars), reasoningChars: num(d.reasoning_chars),
+        elapsedMs: num(d.elapsed_ms),
+        usage: (d.usage ?? null) as Record<string, unknown> | null,
+      };
+    case "approval_requested":
+      return {
+        kind: "approval_requested", seq, ts,
+        id: str(d.id), capability: str(d.capability), action: str(d.action),
+        detail: str(d.detail), timeoutMs: num(d.timeout_ms),
+      };
+    case "approval_resolved":
+      return {
+        kind: "approval_resolved", seq, ts,
+        id: str(d.id), capability: str(d.capability),
+        allow: d.allow === true, always: d.always === true,
+        by: str(d.by), waitedMs: num(d.waited_ms),
+      };
+    case "approval_timeout":
+      return {
+        kind: "approval_timeout", seq, ts,
+        id: str(d.id), capability: str(d.capability), action: str(d.action), timeoutMs: num(d.timeout_ms),
+      };
+    case "approval_cached":
+      return { kind: "approval_cached", seq, ts, capability: str(d.capability), action: str(d.action) };
+    case "fault_injected":
+    case "fault_rejected":
+      return {
+        kind: "fault", seq, ts,
+        action: raw.name === "fault_injected" ? "injected" : "rejected",
+        target: str(d.target), kind2: str(d.kind), message: str(d.message) || str(d.reason),
+      };
     default:
       return { kind: "unknown", seq, ts, name: raw.name, data: d };
   }

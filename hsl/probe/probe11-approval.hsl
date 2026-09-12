@@ -1,0 +1,39 @@
+// ============================================================================
+// probe11-approval.hsl — 交互式审批队列的行为探针（v0.5.0）
+// ----------------------------------------------------------------------------
+// 三态语义的可重放验证：
+//   队列关闭（缺省）          → NotQueued（CI / 脚本行为零变化）
+//   队列开启 + 无人应答        → Denied（超时降级 —— 绝不挂住 run）
+//   队列开启 + 回复放行/拒绝   → Allowed / Denied
+//   回复带 always → 写入长期放行集，同能力后续请求直接放行（approval_cached）
+// 运行：bun toolchain/dhv-ts/src/main.ts run hsl/probe/probe11-approval.hsl \
+//         --workspace <ws> --task probe --model scripted --out <ws>/out-ap
+// ============================================================================
+
+import { request_approval, ApprovalOutcome, pending_approvals, granted_capabilities } from "../policy/approval.hsl";
+
+export fn main() -> Result<(), String> {
+    println!("pending={} granted=[{}]", pending_approvals(), granted_capabilities());
+    let o1 = request_approval(
+        String::from("capability_change"),
+        String::from("探针：请求放行（第 1 次）"),
+        String::from("detail: probe-one"),
+    );
+    println!("verdict-1 = {}", outcome_label(o1));
+    let o2 = request_approval(
+        String::from("capability_change"),
+        String::from("探针：请求放行（第 2 次，观察长期放行集是否命中）"),
+        String::from("detail: probe-two"),
+    );
+    println!("verdict-2 = {}", outcome_label(o2));
+    println!("granted-after=[{}]", granted_capabilities());
+    Ok(())
+}
+
+fn outcome_label(o: ApprovalOutcome) -> String {
+    match o {
+        ApprovalOutcome::Allowed => String::from("Allowed"),
+        ApprovalOutcome::Denied => String::from("Denied"),
+        ApprovalOutcome::NotQueued => String::from("NotQueued"),
+    }
+}

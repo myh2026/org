@@ -12,6 +12,7 @@ import {
   type TuiState, type Action, type Focus,
 } from "./store.ts";
 import { THEMES, THEME_ORDER, parseThemeName } from "./theme.ts";
+import { listApprovals, decideApproval } from "../lib/approvals.ts";
 import { Screen } from "./renderer.ts";
 import { renderFrame } from "./frame.ts";
 import {
@@ -204,6 +205,22 @@ export class App {
         this.dispatch({ type: "clearScreen" });
         this.draw();
         return;
+      case "j": case "k":
+        // 栏内移动选择（帮助里一直写着这条，但此前没有实现 —— 按下只是把 j/k
+        // 当成可打印字符塞进输入框）。输入框聚焦时仍按字符输入。
+        if (this.state.focus !== "input") {
+          this.dispatch({ type: "moveSel", delta: s === "j" ? 1 : -1 });
+          this.draw();
+          return;
+        }
+        break;
+      case "[5~": case "[6~": // PageUp / PageDown
+        if (this.state.focus !== "input") {
+          this.dispatch({ type: "scroll", deltaLines: s === "[5~" ? 20 : -20 });
+          this.draw();
+          return;
+        }
+        break;
       case "g":
         if (this.state.focus !== "input") { this.dispatch({ type: "scrollTop" }); this.draw(); return; }
         break;
@@ -289,10 +306,40 @@ export class App {
         const card = this.readScorecard(path.join(dir, "scorecard.json"));
         if (!card) { this.dispatch({ type: "notice", text: "评分卡读取失败", tone: "err" }); return; }
         const axis = arg && arg.length > 0 ? arg : undefined;
+        // 双轴匹配：评分卡 cell 形如 "<轴>|<任务类>"；此前只匹配能力轴，
+        // 传任务类（如 structured_extract）会静默空卡 —— 与 CLI org score 对齐。
+        const cells = !axis
+          ? card.cells
+          : card.cells.filter((c) => c.cell.startsWith(axis + "|") || c.cell.endsWith("|" + axis));
+        if (axis && cells.length === 0) {
+          const axes = [...new Set(card.cells.map((c) => c.cell.split("|")[0]))].slice(0, 6);
+          const classes = [...new Set(card.cells.map((c) => c.cell.split("|")[1]))].slice(0, 6);
+          this.dispatch({
+            type: "notice",
+            text: `无匹配单元「${axis}」· 可用能力轴 ${axes.join("/")} · 任务类 ${classes.join("/")}`,
+            tone: "warn",
+          });
+          return;
+        }
         this.dispatch({
           type: "scoreCard", model: card.model, evidence: card.evidence_count,
-          cells: axis ? card.cells.filter((c) => c.cell.startsWith(axis + "|")) : card.cells,
+          cells,
         });
+        return;
+      }
+      case "model": {
+        // 与 chat /model、Web 分段控制同语义（此前 TUI 只能在 org tui --model 时定）
+        const m = (arg ?? "").trim();
+        if (!m) {
+          this.dispatch({ type: "notice", text: `当前模型 ${this.state.model} · 用法 :model scripted|deepseek` });
+          return;
+        }
+        if (m !== "scripted" && m !== "deepseek") {
+          this.dispatch({ type: "notice", text: `未知模型 ${m}（可选 scripted | deepseek）`, tone: "warn" });
+          return;
+        }
+        this.state.model = m;
+        this.dispatch({ type: "notice", text: `模型切换为 ${m}（下一轮派单生效）` });
         return;
       }
       case "theme": {
@@ -414,6 +461,38 @@ export class App {
         });
         return;
       }
+      case "approvals": {
+        // 交互式审批队列（文件协议）—— TUI 面：列待批准 + 长期放行集
+        const view = listApprovals(this.state.workspace);
+        if (view.pending.length === 0) {
+          const g = view.granted.length > 0 ? ` · 长期放行集：${view.granted.join(", ")}` : "";
+          this.dispatch({ type: "notice", text: `✓ 没有待批准的项${g}` });
+          return;
+        }
+        const first = view.pending[0]!;
+        this.dispatch({
+          type: "notice",
+          text: `待批准 ${view.pending.length} 项 · ${first.capability}：${first.action} · :approve ${first.id} / :deny ${first.id}（:approvals 列出全部）`,
+        });
+        for (const p of view.pending.slice(1)) {
+          this.dispatch({ type: "notice", text: `${p.id} [${p.capability}] ${p.action}` });
+        }
+        return;
+      }
+      case "approve": case "always": case "deny": {
+        if (!arg) {
+          this.dispatch({ type: "notice", text: `用法：:${name} <审批 id>（:approvals 查看待批准）`, tone: "warn" });
+          return;
+        }
+        const allow = name !== "deny";
+        const r = decideApproval(this.state.workspace, arg, allow, name === "always", "tui");
+        this.dispatch({
+          type: "notice",
+          text: r.ok ? `${allow ? "✓ 已放行" : "✗ 已拒绝"} ${arg}${name === "always" ? "（长期放行）" : ""}` : r.error!,
+          tone: r.ok ? "info" : "err",
+        });
+        return;
+      }
       case "clear": this.dispatch({ type: "clearScreen" }); return;
       case "help": this.dispatch({ type: "toggleHelp", open: true }); return;
       case "quit": case "q": case "exit":
@@ -456,6 +535,8 @@ export class App {
       entry: "org", task,
       workspace: this.state.workspace,
       model: this.state.model === "deepseek" ? "deepseek" : "scripted",
+      // 人在终端前 → 开交互式审批（能力类决策会停下来问；超时降级为拒绝）
+      approval: true,
     }), { demo: null });
   }
 

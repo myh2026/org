@@ -25,6 +25,7 @@ import {
   tailLines,
 } from "./events.ts";
 import { ROOT } from "./root.ts";
+import { readSession as libReadSession } from "./sessions.ts";
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const STOCK_FIXTURE = path.join(ROOT, "fixtures/run-notices.json");
@@ -42,6 +43,11 @@ export interface RunOptions {
   outDir?: string;                // 默认 <workspace>/out-<ts>
   expert?: string;                // direct 模式必填
   session?: string;               // direct 会话账本 id（默认 "default"）
+  /** 交互式审批（v0.5.0）：true 时给子进程注入 ORG_APPROVAL=1，
+   *  能力类决策（目前是能力变更补丁）会写审批请求并**有界等待**用户回复。
+   *  缺省 false —— 无人在场的场景（CI / 脚本 / org demo）行为零变化，
+   *  且绝不会因为等不到人而挂住 run（超时降级为拒绝）。 */
+  approval?: boolean;
 }
 
 export interface DirectTurn {
@@ -799,15 +805,11 @@ export function readScorecard(outDir: string): Scorecard | null {
 
 function readDirectTurns(workspace: string, expert: string, session: string): DirectTurn[] {
   if (!expert) return [];
-  const file = path.join(workspace, "runtime", "sessions", expert, `${session}.jsonl`);
-  return readLines(file).flatMap((l) => {
-    try {
-      const o = JSON.parse(l) as { turn?: number; question?: string; answer?: string; tokens?: number };
-      return [{ turn: o.turn ?? 0, question: o.question ?? "", answer: o.answer ?? "", tokens: o.tokens }];
-    } catch {
-      return [];
-    }
-  });
+  // v0.5.0：统一到 lib/sessions.ts（此前这里是第三份账本解析，只用逐行 JSON.parse
+  // —— 存量坏账本会让 RunResult.directTurns 静默少数几轮，而 Web 侧显示的是全部）
+  return libReadSession(workspace, expert, session).map((t) => ({
+    turn: t.turn, question: t.question, answer: t.answer, tokens: t.tokens,
+  }));
 }
 
 // ---------- 工作区扫描（左栏 rail 数据源） ----------
@@ -1185,6 +1187,8 @@ export function startRun(opts: RunOptions): RunHandle {
       }
       env.DHV_TS = shPath(resolveDhv());
       const envExtra: Record<string, string> = { DHV_TS: shPath(resolveDhv()) };
+      // 交互式审批开关（缺省不开：见 RunOptions.approval 的说明）
+      if (opts.approval === true) envExtra.ORG_APPROVAL = "1";
       if (opts.entry === "direct") {
         if (!opts.expert) throw new Error("direct 模式必填 expert（?专家名 问题?）");
         envExtra.ORG_ASK_EXPERT = opts.expert;
@@ -1283,4 +1287,244 @@ export function replayRun(outDir: string): ReplayData {
 /** 最新评分卡所在 run 目录（:score 用）。 */
 export function latestScorecardDir(workspace: string): string | null {
   return scanWorkspace(workspace).scorecardDir;
+}
+
+// ---------- v0.5.0：会话派生与版本回退（agent 应有的两个「反悔」通道） ----------
+// 这两个功能的后端原语都已存在，缺的只是用户可触达的入口：
+//   fork   —— 会话账本本来就是 append-only 的普通文件，复制即派生；
+//   revert —— 工厂每次补丁都把旧源归档为 registry/experts/<name>@<旧版本>.hsl
+//             （金丝雀回滚用的正是它），ExpertManifest::revert_version 也已存在。
+// 对应 codex / opencode 的 /fork 与 /undo · diff/revert。
+
+export interface ForkResult {
+  expert: string;
+  from: string;
+  to: string;
+  turns: number;
+  file: string;
+}
+
+/**
+ * 派生会话：把 `<expert>/<from>.jsonl` 复制为 `<to>.jsonl`。
+ * 上下文从派生点继续，原会话不受影响（账本 append-only，复制即分叉）。
+ */
+export function forkSession(ws: string, expert: string, from: string, to: string): ForkResult {
+  if (!validHarnessName(expert)) throw new Error(`专家名不合法：${expert}`);
+  for (const [label, v] of [["源", from], ["目标", to]] as const) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(v)) throw new Error(`${label}会话 id 不合法：${v}`);
+  }
+  const src = path.join(ws, "runtime", "sessions", expert, `${from}.jsonl`);
+  if (!fs.existsSync(src)) throw new Error(`源会话不存在：${expert}/${from}`);
+  const dst = path.join(ws, "runtime", "sessions", expert, `${to}.jsonl`);
+  if (fs.existsSync(dst)) throw new Error(`目标会话已存在：${expert}/${to}（派生不会覆盖，换一个 id）`);
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  const body = fs.readFileSync(src, "utf-8");
+  fs.writeFileSync(dst, body);
+  const turns = body.split("\n").filter((l) => l.trim().length > 0).length;
+  return { expert, from, to, turns, file: dst };
+}
+
+export interface RevertResult {
+  name: string;
+  from: string;
+  to: string;
+  live: string;
+  archived: string | null;
+}
+
+/** 在岗源文件候选（工厂产物在 experts/，导入 harness 在 harnesses/）。 */
+function liveSourceCandidates(ws: string, name: string): string[] {
+  const out: string[] = [];
+  const rec = loadRegistryIndex(ws).find((m) => m.name === name) as Record<string, unknown> | undefined;
+  const entry = rec ? String(rec.entry ?? "") : "";
+  if (entry.endsWith(".hsl")) out.push(path.join(ws, entry));
+  out.push(path.join(ws, "registry", "experts", `${name}.hsl`));
+  out.push(path.join(ws, "registry", "harnesses", `${name}.hsl`));
+  return out;
+}
+
+/** 归档源路径（工厂补丁每次合入都把旧版本源留在这里）。 */
+function archivePathOf(dir: string, name: string, version: string): string {
+  return path.join(dir, `${name}@${version}.hsl`);
+}
+
+/** 某专家已归档的版本号（新→旧按语义排序，仅取 x.y.z 数字形）。 */
+export function archivedVersions(ws: string, name: string): string[] {
+  const seen = new Set<string>();
+  for (const cand of liveSourceCandidates(ws, name)) {
+    const dir = path.dirname(cand);
+    if (!fs.existsSync(dir)) continue;
+    // 归档命名是机械的 `<name>@<x.y.z>.hsl`（工厂合入补丁时写入）。用前缀/后缀
+    // 切分而不是拼正则 —— 专家名里的字符不必再考虑正则元字符转义。
+    const prefix = `${name}@`;
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.startsWith(prefix) || !f.endsWith(".hsl")) continue;
+      const ver = f.slice(prefix.length, -".hsl".length);
+      if (/^[0-9]+\.[0-9]+\.[0-9]+$/.test(ver)) seen.add(ver);
+    }
+  }
+  return [...seen].sort((a, b) => {
+    const pa = a.split(".").map(Number), pb = b.split(".").map(Number);
+    for (let i = 0; i < 3; i++) if (pa[i] !== pb[i]) return pb[i]! - pa[i]!;
+    return 0;
+  });
+}
+
+/**
+ * 版本回退：把归档源还原为在岗源，并把当前源归档（回退本身可逆）。
+ * 「留在岗」的语义对齐金丝雀回滚：注册表版本号随之回退，git 留痕。
+ */
+export function revertExpert(ws: string, name: string, to?: string): RevertResult {
+  const experts = loadRegistryIndex(ws);
+  const rec = experts.find((m) => m.name === name);
+  if (!rec) throw new Error(`注册表中没有专家：${name}`);
+  const current = String(rec.version ?? "");
+  const versions = archivedVersions(ws, name);
+  const target = to ?? versions.find((v) => v !== current) ?? "";
+  if (!target) {
+    throw new Error(`没有可回退的归档版本（${name}@${current}）—— 归档源出现的前提是工厂合入过补丁`);
+  }
+  if (target === current) throw new Error(`目标版本与当前版本相同：${name}@${current}`);
+
+  const live = liveSourceCandidates(ws, name).find((p) => fs.existsSync(p));
+  if (!live) throw new Error(`找不到在岗源文件（${name}）`);
+  const dir = path.dirname(live);
+  const archive = archivePathOf(dir, name, target);
+  if (!fs.existsSync(archive)) throw new Error(`归档源不存在：${path.relative(ws, archive)}（可选：${versions.join(", ") || "无"}）`);
+
+  // 1) 当前源归档（保证可逆）—— 已存在则不覆盖（同一版本重复回退是幂等的）
+  const keep = archivePathOf(dir, name, current);
+  let archived: string | null = null;
+  if (current && !fs.existsSync(keep)) {
+    fs.copyFileSync(live, keep);
+    archived = keep;
+  }
+  // 2) 还原目标版本源
+  fs.copyFileSync(archive, live);
+  // 3) 注册表版本号回退（index.json + 每专家副本，与 setRetained 同双写形态）
+  for (const m of experts) {
+    if (m.name === name) m.version = target;
+  }
+  fs.writeFileSync(path.join(ws, "registry/index.json"), JSON.stringify(experts));
+  const per = path.join(ws, "registry", `${name}.json`);
+  if (fs.existsSync(per)) {
+    try {
+      const obj = JSON.parse(fs.readFileSync(per, "utf-8")) as Record<string, unknown>;
+      obj.version = target;
+      fs.writeFileSync(per, JSON.stringify(obj));
+    } catch { /* 副本损坏容忍：index.json 是权威 */ }
+  }
+  gitCommitRegistry(ws, `revert ${name} ${current} -> ${target} (user revert)`);
+  return { name, from: current, to: target, live, archived };
+}
+
+// ---------- 会话账本改名 / 删除（CLI org session，Web 已有同名端点的 CLI 面） ----------
+
+export function renameSession(ws: string, expert: string, from: string, to: string): string {
+  const src = path.join(ws, "runtime", "sessions", expert, `${from}.jsonl`);
+  const dst = path.join(ws, "runtime", "sessions", expert, `${to}.jsonl`);
+  if (!fs.existsSync(src)) throw new Error(`会话不存在：${expert}/${from}`);
+  if (fs.existsSync(dst)) throw new Error(`目标会话已存在：${expert}/${to}`);
+  fs.renameSync(src, dst);
+  return dst;
+}
+
+export function deleteSession(ws: string, expert: string, session: string): string {
+  const file = path.join(ws, "runtime", "sessions", expert, `${session}.jsonl`);
+  if (!fs.existsSync(file)) throw new Error(`会话不存在：${expert}/${session}`);
+  fs.rmSync(file);
+  return file;
+}
+
+// ---------- v0.5.0：用量/成本时间线（llm_stream_done 的消费面） ----------
+// 为什么单独做：v0.5.0 把 llm_stream_done 具名化时说明了它是「成本面板的数据源」，
+// 但当时并没有面板 —— 本函数补齐那一半。它把一次运行里的逐次模型调用还原成时间线：
+//   每次调用的 track（哪条轨道：direct:<expert> / handoff:<expert> / mint_<stage> …）、
+//   正文与思考字符数、耗时、以及网关回传的 usage（真实 token，若有）。
+// 这是「成本结构随资产沉淀下降」这个核心叙事的**逐调用证据**，而不只是总数。
+
+export interface CostCall {
+  seq: number;
+  ts: string;
+  track: string;
+  chars: number;
+  reasoningChars: number;
+  elapsedMs: number;
+  /** 网关 usage（total_tokens / prompt_tokens / completion_tokens…）；无则 null。 */
+  tokens: number | null;
+  tokenDetail: Record<string, unknown> | null;
+}
+
+export interface CostTimeline {
+  calls: CostCall[];
+  /** 按 track 聚合（同轨道多次调用合并 —— 工厂重试、多轮直连都会出现）。 */
+  byTrack: Array<{ track: string; calls: number; chars: number; reasoningChars: number; elapsedMs: number; tokens: number }>;
+  totals: { calls: number; chars: number; reasoningChars: number; elapsedMs: number; tokens: number };
+  /** 是否所有调用都带 usage（false = 该网关不回传 usage，token 只是下界）。 */
+  tokensComplete: boolean;
+}
+
+/** 从一次运行的产物还原用量时间线（events.jsonl 的 llm_stream_done 事件）。 */
+export function readCostTimeline(outDir: string): CostTimeline {
+  const events = readEventStream(
+    path.join(outDir, "events.jsonl"),
+    path.join(outDir, "journal.jsonl"),
+    path.join(outDir, "llm-stream.jsonl"),
+  );
+  const calls: CostCall[] = [];
+  for (const ev of events) {
+    if (ev.kind !== "llm_stream_done") continue;
+    const usage = ev.usage as Record<string, unknown> | null;
+    const total = usage && typeof usage.total_tokens === "number" ? usage.total_tokens : null;
+    calls.push({
+      seq: ev.seq, ts: ev.ts, track: ev.track,
+      chars: ev.chars, reasoningChars: ev.reasoningChars, elapsedMs: ev.elapsedMs,
+      tokens: total, tokenDetail: usage,
+    });
+  }
+  calls.sort((a, b) => (a.ts === b.ts ? a.seq - b.seq : a.ts < b.ts ? -1 : 1));
+
+  const agg = new Map<string, { calls: number; chars: number; reasoningChars: number; elapsedMs: number; tokens: number }>();
+  const totals = { calls: calls.length, chars: 0, reasoningChars: 0, elapsedMs: 0, tokens: 0 };
+  for (const c of calls) {
+    const slot = agg.get(c.track) ?? { calls: 0, chars: 0, reasoningChars: 0, elapsedMs: 0, tokens: 0 };
+    slot.calls += 1;
+    slot.chars += c.chars;
+    slot.reasoningChars += c.reasoningChars;
+    slot.elapsedMs += c.elapsedMs;
+    slot.tokens += c.tokens ?? 0;
+    agg.set(c.track, slot);
+    totals.chars += c.chars;
+    totals.reasoningChars += c.reasoningChars;
+    totals.elapsedMs += c.elapsedMs;
+    totals.tokens += c.tokens ?? 0;
+  }
+  const byTrack = [...agg.entries()]
+    .map(([track, v]) => ({ track, ...v }))
+    .sort((a, b) => b.calls - a.calls || b.chars - a.chars);
+  return { calls, byTrack, totals, tokensComplete: calls.length > 0 && calls.every((c) => c.tokens !== null) };
+}
+
+/** 用量时间线的可读渲染（CLI org cost 与 Web 面板共用同一字段口径）。 */
+export function renderCostTimeline(t: CostTimeline): string {
+  // 注意 calls 是数组：早先写成 `t.calls === 0`（数组与数字比较恒为 false），
+  // 于是「本次没有模型调用」这条分支永远走不到，坏账会被误报成「tokens 不完整」。
+  if (t.calls.length === 0) {
+    return "（本次运行没有模型调用记录 —— scripted 剧本车道不经过网关，故无 llm_stream_done）";
+  }
+  const lines: string[] = [];
+  lines.push(`模型调用 ${t.totals.calls} 次 · 正文 ${t.totals.chars} 字` +
+    (t.totals.reasoningChars > 0 ? ` · 思考 ${t.totals.reasoningChars} 字` : "") +
+    ` · 累计 ${(t.totals.elapsedMs / 1000).toFixed(1)}s` +
+    (t.tokensComplete
+      ? ` · tokens ${t.totals.tokens}`
+      : ` · tokens ${t.totals.tokens}+ 不完整（网关未回传全部 usage，显示值为下界）`));
+  lines.push("");
+  lines.push("按轨道：");
+  for (const r of t.byTrack) {
+    lines.push(`  ${r.track.padEnd(28)} ${String(r.calls).padStart(3)} 次  ` +
+      `${String(r.chars).padStart(6)} 字  ${(r.elapsedMs / 1000).toFixed(1)}s` +
+      (r.tokens > 0 ? `  ${r.tokens} tok` : ""));
+  }
+  return lines.join("\n");
 }

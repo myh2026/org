@@ -17,6 +17,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { startRun, loadRegistryIndex, expertFixtureOf, renderContextMeter } from "../lib/engine.ts";
+import { listApprovals, decideApproval } from "../lib/approvals.ts";
+import {
+  scanWorkspace, latestScorecardDir, readScorecard, reviewCandidates,
+  latestHarnessRunDir, setRetained, forkSession, revertExpert, archivedVersions,
+} from "../lib/engine.ts";
 import { ORG_VERSION } from "../lib/version.ts";
 
 const CONTEXT_WINDOW = 131072; // 与 direct.hsl / engine.ts 同源的窗口口径
@@ -25,111 +30,32 @@ const HISTORY_CAP = 500;
 
 // ---------- 会话账本（runtime/sessions/<expert>/<session>.jsonl） ----------
 
-export interface SessionTurn {
-  turn: number;
-  question: string;
-  answer: string;
-  tokens: number;
-  ctx_tokens: number;
-  compacted?: boolean;
-  compacted_from?: number;
-}
+import {
+  readSession, latestSession, compactLedger, listSessionIds,
+  type LedgerTurn,
+} from "../lib/sessions.ts";
 
-/** 读会话账本全部轮次（缺失 = 新会话）。 */
-export function readSession(ws: string, expert: string, session: string): SessionTurn[] {
-  const file = path.join(ws, "runtime", "sessions", expert, `${session}.jsonl`);
-  try {
-    return fs.readFileSync(file, "utf-8").split("\n").filter((l) => l.trim().length > 0)
-      .flatMap((l) => {
-        try {
-          const o = JSON.parse(l) as Record<string, unknown>;
-          return [{
-            turn: Number(o.turn ?? 0),
-            question: String(o.question ?? ""),
-            answer: String(o.answer ?? ""),
-            tokens: Number(o.tokens ?? 0),
-            ctx_tokens: Number(o.ctx_tokens ?? 0),
-            compacted: o.compacted === true,
-            compacted_from: Number(o.compacted_from ?? 0),
-          }];
-        } catch {
-          return [];
-        }
-      });
-  } catch {
-    return [];
-  }
-}
+/** 账本轮次。v0.5.0：解析统一到 lib/sessions.ts —— 三份实现会静默分歧
+ *  （例如 Web 此前不解析 compacted，把压缩摘要当普通轮次渲染）。 */
+export type SessionTurn = LedgerTurn;
+// 再导出：本模块既有的 import 路径与 tests/chat.test.ts 保持不变
+export { readSession, latestSession, compactLedger };
 
-export interface SessionSummary {
-  expert: string;
-  session: string;
-  turns: number;
-  tokens: number;
-  ctx_tokens: number;
-  lastQuestion: string;
-  mtimeMs: number;
-}
-
-/** 列专家的全部会话（mtime 降序；/sessions 与 org sessions 共用）。 */
+/** 列专家的全部会话（mtime 降序；/sessions 与 org sessions 共用）。
+ *  解析与容错在 lib/sessions.ts；这里的展示选择是「预取最近问题」。 */
 export function listSessions(ws: string, expert: string): SessionSummary[] {
-  const dir = path.join(ws, "runtime", "sessions", expert);
-  let files: string[] = [];
-  try {
-    files = fs.readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
-  } catch {
-    return [];
-  }
-  const out: SessionSummary[] = [];
-  for (const f of files) {
-    const session = f.slice(0, -".jsonl".length);
-    const turns = readSession(ws, expert, session);
-    if (turns.length === 0) continue;
+  return listSessionIds(ws, expert).map(({ id, turns, mtimeMs }) => {
     const last = turns[turns.length - 1]!;
-    let mtimeMs = 0;
-    try { mtimeMs = fs.statSync(path.join(dir, f)).mtimeMs; } catch { /* 容忍 */ }
-    out.push({
-      expert, session,
+    return {
+      expert,
+      session: id,
       turns: turns.length,
-      tokens: turns.reduce((s, t) => s + t.tokens, 0),
+      tokens: turns.reduce((sum, t) => sum + t.tokens, 0),
       ctx_tokens: last.ctx_tokens,
       lastQuestion: last.question.slice(0, 48),
       mtimeMs,
-    });
-  }
-  return out.sort((a, b) => b.mtimeMs - a.mtimeMs);
-}
-
-/** 最近会话（--continue / 专家切换缺省；无会话返回 "default"）。 */
-export function latestSession(ws: string, expert: string): string {
-  const list = listSessions(ws, expert);
-  return list.length > 0 ? list[0]!.session : "default";
-}
-
-/**
- * 上下文压缩（/compact）：把 N 轮会话史压缩为单轮摘要条目。
- * 账本重写为 {turn:1, question:"(compact)", answer:摘要, compacted:true,
- * compacted_from:N}；原文件备份 <session>.jsonl.bak-<ts>（可手工回滚）。
- * tokens/ctx 按正文长度 /3 重估（与 direct.hsl estimate 同口径）。
- */
-export function compactLedger(ws: string, expert: string, session: string, summary: string, fromTurns: number): { backup: string } {
-  const file = path.join(ws, "runtime", "sessions", expert, `${session}.jsonl`);
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const backup = `${file}.bak-${stamp}`;
-  if (fs.existsSync(file)) fs.copyFileSync(file, backup);
-  const tokens = Math.max(1, Math.round(summary.length / 3));
-  const entry: SessionTurn = {
-    turn: 1,
-    question: `(compact digest of ${fromTurns} turns)`,
-    answer: summary,
-    tokens,
-    ctx_tokens: Math.max(1, Math.round((summary.length + 64) / 3)),
-    compacted: true,
-    compacted_from: fromTurns,
-  };
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(entry) + "\n", "utf-8");
-  return { backup };
+    };
+  });
 }
 
 // ---------- 斜杠命令解析（可测单元） ----------
@@ -172,6 +98,10 @@ const dim = (s: string): string => (isTTY ? `\x1b[2m${s}\x1b[0m` : s);
 const bold = (s: string): string => (isTTY ? `\x1b[1m${s}\x1b[0m` : s);
 const cyan = (s: string): string => (isTTY ? `\x1b[36m${s}\x1b[0m` : s);
 const amber = (s: string): string => (isTTY ? `\x1b[33m${s}\x1b[0m` : s);
+// 成功/失败两色（v0.5.0 补：审批与治理类命令用到，此前只在别处用 dim/cyan/amber
+// —— 漏定义会让整条命令抛 ReferenceError，而斜杠命令不在既有测试覆盖内）
+const green = (s: string): string => (isTTY ? `\x1b[32m${s}\x1b[0m` : s);
+const red = (s: string): string => (isTTY ? `\x1b[31m${s}\x1b[0m` : s);
 
 function clearLine(): void {
   if (isTTY) process.stdout.write("\r\x1b[K");
@@ -389,6 +319,13 @@ async function handleSlash(state: ChatOpts, rl: readline.Interface, command: str
   /history             当前会话轮次回放（问题 → 回答首行）
   /retry               重问上一问题
   /compact             上下文压缩（LLM 摘要会话史 → 重写账本，备份可回滚）
+  /approvals           交互式审批队列（/approve <id> · /always <id> · /deny <id>）
+  /runs                运行产物列表（团队派单的产物；回放走 org replay）
+  /score [轴|任务类]    评分卡（证据归因；双轴匹配）
+  /review              运行范围复核：本次产出的 harness 待决策候选
+  /keep <名> /drop <名> 工具库治理：选取保留 / 取消保留
+  /fork [新 id]        会话派生（账本复制即分叉，原会话不变）
+  /undo [版本]         版本回退（归档源还原为在岗源，可逆）
   /clear               清屏
   /exit /quit /q       退出（Ctrl+D 同）
   !<cmd>               shell 逃逸（用户发起 · 结果直接可见）`);
@@ -499,6 +436,127 @@ async function handleSlash(state: ChatOpts, rl: readline.Interface, command: str
     }
     case "compact": {
       await runCompact(state);
+      return true;
+    }
+    case "approvals": {
+      // 交互式审批队列（文件协议）：与 CLI / TUI / Web 同一实现（lib/approvals.ts）
+      const view = listApprovals(state.workspace);
+      if (view.pending.length === 0) {
+        const g = view.granted.length > 0 ? " · 长期放行集：" + view.granted.join(", ") : "";
+        console.log(green("✓ 没有待批准的项") + dim(g));
+        return true;
+      }
+      console.log(bold("待批准 " + view.pending.length + " 项"));
+      for (const p of view.pending) {
+        console.log("  " + p.id + "  [" + p.capability + "]");
+        console.log("     " + p.action);
+      }
+      console.log(dim("放行 /approve <id> · 长期 /always <id> · 拒绝 /deny <id>"));
+      return true;
+    }
+    case "approve":
+    case "always":
+    case "deny": {
+      const parts = raw.trim().split(" ").filter(function (x) { return x.length > 0; });
+      const id = parts[1] ?? "";
+      if (!id) {
+        console.log(amber("用法：/approve <审批 id>（/approvals 查看待批准）"));
+        return true;
+      }
+      const allow = command !== "deny";
+      const r = decideApproval(state.workspace, id, allow, command === "always", "chat");
+      console.log(r.ok
+        ? (allow ? green("✓ 已放行 " + id + (command === "always" ? "（长期放行）" : "")) : red("✗ 已拒绝 " + id))
+        : amber("✗ " + r.error));
+      return true;
+    }
+    case "runs": {
+      // 运行产物列表（TUI 会话栏 / Web 侧栏 runs 的 chat 面）
+      const info = scanWorkspace(state.workspace);
+      if (info.sessions.length === 0) {
+        console.log(dim("暂无运行产物（团队派单即产生；本 REPL 是直连通道）"));
+        return true;
+      }
+      console.log(bold("运行产物 " + info.sessions.length + " 个"));
+      for (const r of info.sessions.slice(0, 12)) {
+        const mark = r.ok ? green("ok  ") : red("fail");
+        console.log("  " + mark + " " + r.name + "  " + (r.elapsed_ms / 1000).toFixed(1) + "s  " + dim((r.task || "").slice(0, 34)));
+      }
+      console.log(dim("回放：org replay --run <workspace>/<name>"));
+      return true;
+    }
+    case "score": {
+      const dir = latestScorecardDir(state.workspace);
+      if (!dir) { console.log(amber("尚无评分卡（先派单或 org demo）")); return true; }
+      const card = readScorecard(dir);
+      if (!card) { console.log(red("评分卡读取失败")); return true; }
+      const want = (arg ?? "").trim();
+      const cells = !want
+        ? card.cells
+        : card.cells.filter((c) => c.cell.startsWith(want + "|") || c.cell.endsWith("|" + want));
+      if (want && cells.length === 0) {
+        const axes = [...new Set(card.cells.map((c) => c.cell.split("|")[0]))].slice(0, 8);
+        console.log(amber("无匹配单元「" + want + "」· 可用能力轴：" + axes.join(" / ")));
+        return true;
+      }
+      console.log(bold("评分卡 " + card.model + " · 证据 " + card.evidence_count + " 条 · " + dir));
+      for (const c of cells) {
+        console.log("  " + c.cell.padEnd(42) + c.score.toFixed(3) + dim("  置信 " + c.confidence.toFixed(2)));
+      }
+      return true;
+    }
+    case "review": {
+      // 运行范围复核（工具库治理第四动作）：列表 + 指路。逐项交互选取在
+      // org review（那张表与 parseSelection 是 CLI 的强项，REPL 里塞表格反而难用）
+      const dir = latestHarnessRunDir(state.workspace);
+      if (!dir) { console.log(amber("尚无运行产物（先团队派单）")); return true; }
+      const plan = reviewCandidates(state.workspace, dir);
+      if (!plan.scope) { console.log(red("运行产物读取失败")); return true; }
+      if (plan.pending.length === 0) {
+        console.log(green("✓ 本次运行没有待决策候选") + dim(" · " + plan.scope.label));
+        return true;
+      }
+      console.log(bold("本次运行（" + plan.scope.label + "）待决策候选 " + plan.pending.length + " 个"));
+      for (const c of plan.pending) {
+        console.log("  " + c.name + "@" + c.version + "  [" + c.source + "]  " + dim(c.description.slice(0, 40)));
+      }
+      console.log(dim("选取：org review（交互）或 /keep <名> / /drop <名>"));
+      return true;
+    }
+    case "keep": case "drop": {
+      const name = (arg ?? "").trim();
+      if (!name) { console.log(amber("用法：/" + command + " <专家名>")); return true; }
+      const retained = command === "keep";
+      const r = setRetained(state.workspace, [name], retained);
+      if (r.kept.length > 0) {
+        console.log(retained ? green("★ 已保留 " + name) : amber("○ 已取消保留 " + name));
+        console.log(dim("（写入 runtime 外的 registry，并 git 留痕；对下一轮派单生效）"));
+      }
+      if (r.missing.length > 0) console.log(red("注册表中未找到：" + name));
+      return true;
+    }
+    case "fork": {
+      // 会话派生：账本复制即分叉（对应 codex/opencode 的 /fork）
+      const to = (arg ?? "").trim() || (state.session + "-f" + Date.now().toString(36).slice(-4));
+      try {
+        const r = forkSession(state.workspace, state.expert, state.session, to);
+        console.log(green("⑂ 已派生 " + r.expert + "/" + r.from + " → " + r.to) + dim("（" + r.turns + " 轮上下文）"));
+        console.log(dim("切过去继续：/resume " + r.to));
+      } catch (e) {
+        console.log(red("派生失败：" + (e as Error).message));
+      }
+      return true;
+    }
+    case "undo": {
+      // 版本回退：把归档源还原为在岗源（当前源先归档 → 可逆）。对应 opencode /undo
+      try {
+        const vers = archivedVersions(state.workspace, state.expert);
+        const r = revertExpert(state.workspace, state.expert, (arg ?? "").trim() || undefined);
+        console.log(green("↩ 已回退 " + r.name + "：" + r.from + " → " + r.to));
+        if (r.archived) console.log(dim("  当前源已归档（回退可逆）· 其它可回退版本：" + vers.filter((v) => v !== r.to).join(", ")));
+      } catch (e) {
+        console.log(amber("回退不可用：" + (e as Error).message));
+      }
       return true;
     }
     case "clear": {
