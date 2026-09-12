@@ -681,6 +681,15 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
           if (req.method === "GET") {
             return json({ expert, session: id, turns: readSession(readWorkspaceOf(ws), expert, id) });
           }
+          // dist/demo 是入库快照（只读）—— v0.4.17 修复：DELETE/PATCH 此前
+          // 无守卫（keep/drop 有），空工作区起服时读侧回退 dist/demo，写侧
+          // 会把入库快照里的会话账本删掉/改名，污染仓库（实测复现）。
+          if (req.method === "DELETE" || req.method === "PATCH") {
+            const rws = readWorkspaceOf(ws);
+            if (path.resolve(rws) === path.join(ROOT, "dist", "demo")) {
+              return json({ error: "dist/demo 是入库快照（只读）。请以可写工作区启动 org web。" }, 400);
+            }
+          }
           // DELETE：删除会话（账本是唯一事实源：删账本文件 = 删会话）
           if (req.method === "DELETE") {
             const file = sessionFile(readWorkspaceOf(ws), expert, id);

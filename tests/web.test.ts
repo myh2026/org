@@ -744,3 +744,34 @@ describe("renderMd：Markdown 渲染器（服务端单测 = 浏览器同一实�
     expect(renderMd("你好")).toBe("<p>你好</p>");
   });
 });
+
+// ============================================================================
+// v0.4.17 修复回归：会话 DELETE/PATCH 对 dist/demo 入库快照只读守卫
+// （空工作区起服时读侧回退 dist/demo —— 旧代码写侧无守卫，DELETE 会删掉
+//   仓库内 dist/demo/runtime/sessions/ 下的账本文件，污染入库快照）
+// ============================================================================
+describe("Web GUI：dist/demo 快照只读守卫（DELETE/PATCH）", () => {
+  test("空工作区起服 → DELETE /api/session 命中快照守卫 400（不再穿透入库快照）", async () => {
+    const emptyWs = path.join(TEST_RUN, "web-empty-ws");
+    fs.rmSync(emptyWs, { recursive: true, force: true });
+    fs.mkdirSync(emptyWs, { recursive: true }); // 无 registry/index.json → 读侧回退 dist/demo
+    const srv = startWebServer({ workspace: emptyWs, port: 0, model: "scripted" });
+    const b = `http://127.0.0.1:${srv.port}`;
+    try {
+      const del = await fetch(`${b}/api/session/notice-parser/demo`, { method: "DELETE" });
+      expect(del.status).toBe(400);
+      const delBody = (await del.json()) as { error?: string };
+      expect(delBody.error).toContain("只读");
+      const patch = await fetch(`${b}/api/session/notice-parser/demo`, {
+        method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ to: "renamed" }),
+      });
+      expect(patch.status).toBe(400);
+      // 快照账本仍然在盘（未被删）
+      const snap = path.join(import.meta.dir, "..", "dist", "demo", "runtime", "sessions", "notice-parser", "demo.jsonl");
+      expect(fs.existsSync(snap)).toBe(true);
+    } finally {
+      srv.stop(true);
+      fs.rmSync(emptyWs, { recursive: true, force: true });
+    }
+  });
+});

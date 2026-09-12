@@ -274,6 +274,10 @@ describe("流式车道：SSE 逐块解析与 llm-stream.jsonl 落盘", () => {
 
   test("scripted 车道（无网关）不产生 llm-stream.jsonl（负例：观测面降级不炸）", async () => {
     delete process.env.DHV_LLM_GATEWAY;
+    // v0.4.17：负例前提从「环境恰好没装 SDK」改为机械开关 DHV_LLM_DISABLE_SDK=1
+    // —— 装了 z-ai-web-dev-sdk 的机器上（本仓库 bun install 即装）旧写法会
+    // 真实外联成功 → 负例假阴（实测踩坑）。
+    process.env.DHV_LLM_DISABLE_SDK = "1";
     const ws = tmpWs();
     const host = new Host({
       workspace: ws.ws, task: "t", model: "scripted", temperature: 0.1,
@@ -281,15 +285,19 @@ describe("流式车道：SSE 逐块解析与 llm-stream.jsonl 落盘", () => {
       allow: [], scale: "solo", outdir, quiet: true,
     });
     const llm = host.api.llm as { complete: (r: unknown) => Promise<string> };
-    // z-ai 车道在测试环境无 SDK —— 期望抛错而不是产生流文件
+    // 零外联模式：期望抛错（错误可诊断）而不是产生流文件
     let threw = false;
+    let message = "";
     try {
       await llm.complete({ messages: [{ role: "user", content: "x" }], stream: true, track: "t" });
-    } catch {
+    } catch (e) {
       threw = true;
+      message = (e as Error).message;
     }
     expect(threw).toBe(true);
+    expect(message).toContain("DHV_LLM_DISABLE_SDK");
     expect(fs.existsSync(path.join(outdir, "llm-stream.jsonl"))).toBe(false);
+    delete process.env.DHV_LLM_DISABLE_SDK;
     cleanup(ws.dir);
   });
 });

@@ -676,7 +676,12 @@ export function contextUsageOf(ws: string, expert: string, session: string, desc
     billed += Number(o.tokens ?? 0);
     qaChars += (o.question ?? "").length + (o.answer ?? "").length;
   }
-  const context = estimateTokens(description) + Math.ceil(qaChars / 3) + 32 * turns;
+  // 口径统一（v0.4.17 修复）：完全复刻 HSL 侧 direct.hsl estimate_context
+  // —— (desc + Σqa(含当轮) + 64 + 24×(T-1)) / 3，整体 floor。此前 TS 侧是
+  // 「各段分别 ceil + 32×turns」，与 HSL 侧公式不同（注释却声称同源），
+  // 每轮发散 ~10.7 tokens：[ctx] 计量条（HSL 权威落盘）与 org status /
+  // TUI / Web 显示的数字随轮次持续走差。
+  const context = Math.floor((description.length + qaChars + 64 + 24 * Math.max(0, turns - 1)) / 3);
   return { expert, session, turns, billed, context, window: CONTEXT_WINDOW_TOKENS };
 }
 
@@ -716,16 +721,48 @@ export function renderContextMeter(usage: { context: number; window: number }): 
   return `${bar} ${fmt(usage.context)}/${fmt(usage.window)}（${(pct * 100).toFixed(1)}%）`;
 }
 
+/** 剧本形态校验：tracks / acts / reviews 任一键存在即视为 run 剧本 ——
+ *  防 TaskSpec 形态的验收样本（factory/samples/）被误当剧本传给 --fixture
+ *  （实测 bug：对消费 $host.fixture 轨道的专家必然 FIXTURE_EXHAUSTED，
+ *  「可用：无」且毫无提示）。 */
+export function isTracksFixtureFile(abs: string): boolean {
+  try {
+    const obj = JSON.parse(fs.readFileSync(abs, "utf-8")) as Record<string, unknown>;
+    return "tracks" in obj || "acts" in obj || "reviews" in obj;
+  } catch {
+    return false;
+  }
+}
+
 /** 直连剧本自动发现（导入 harness 的零摩擦消费链）：专家 manifest 的
- *  fixture 字段（相对工作区）存在即返回绝对路径；否则 null（调用方回退
- *  STOCK_FIXTURE）。CLI org ask 与 TUI ?专家 共用 —— 导入的 harness
- *  不传 --fixture 也能立即 scripted 问答。 */
+ *  fixture 字段按 source 二相解析（与 HSL 侧 factory/pipeline.hsl
+ *  run_fixture_of 同语义，v0.4.17 修复：原先不分相，工厂专家的 fixture
+ *  字段是 TaskSpec 形态验收样本 —— 把样本当剧本传，scripted 直连工厂
+ *  专家必然 FIXTURE_EXHAUSTED）：
+ *   source=import  → fixture 字段即 tracks 形态 run 剧本，直接可用；
+ *   source=factory → run 剧本走约定 factory/fixtures/<name>.fixture.json；
+ *   其它（manual） → fixture 字段经 tracks 形态校验后可用（防同类错配）；
+ *  均未命中返回 null（调用方回退 STOCK_FIXTURE）。CLI org ask / chat /
+ *  handoff、TUI ?专家、Web GUI 共用。 */
 export function expertFixtureOf(ws: string, expert: string): string | null {
   const hit = loadRegistryIndex(ws).find((m) => m.name === expert);
-  const rel = hit ? String((hit as Record<string, unknown>).fixture ?? "") : "";
-  if (!rel) return null;
-  const abs = path.join(ws, rel);
-  return fs.existsSync(abs) ? abs : null;
+  if (!hit) return null;
+  const rec = hit as Record<string, unknown>;
+  const rel = String(rec.fixture ?? "");
+  const source = String(rec.source ?? "");
+  if (source === "import" && rel) {
+    const abs = path.join(ws, rel);
+    return fs.existsSync(abs) ? abs : null;
+  }
+  if (source === "factory") {
+    const conventional = path.join(ws, "factory", "fixtures", `${expert}.fixture.json`);
+    return fs.existsSync(conventional) ? conventional : null;
+  }
+  if (rel) {
+    const abs = path.join(ws, rel);
+    if (fs.existsSync(abs) && isTracksFixtureFile(abs)) return abs;
+  }
+  return null;
 }
 
 // ---------- 产物读取 ----------
@@ -1164,12 +1201,17 @@ export function startRun(opts: RunOptions): RunHandle {
       let code = 0;
       if (bun) {
         proc = B.spawn([bun, resolveDhv(), ...args], { env, stdout: "pipe", stderr: "pipe" });
-        void proc.stdout.text().then((t) => {
-          for (const l of t.split("\n")) if (l.length > 0) capture.push(l);
-        });
-        void proc.stderr.text().then((t) => {
-          for (const l of t.split("\n")) if (l.length > 0) capture.push(l);
-        });
+        // v0.4.17：捕获 promise 与退出轮询并行，但 finish 前必须 await 全部
+        // 捕获完成 —— 此前 void 悬空，proc.exited 先 resolve 时 finish 读
+        // capture 取错误尾行可能拿到空/不完整（失败原因展示不稳定）。
+        const captureDone = Promise.all([
+          proc.stdout.text().then((t) => {
+            for (const l of t.split("\n")) if (l.length > 0) capture.push(l);
+          }),
+          proc.stderr.text().then((t) => {
+            for (const l of t.split("\n")) if (l.length > 0) capture.push(l);
+          }),
+        ]);
         for (;;) {
           pumpTick(outDir, off, q);
           const exited = await Promise.race([
@@ -1178,6 +1220,7 @@ export function startRun(opts: RunOptions): RunHandle {
           ]);
           if (exited !== null) { code = exited[1]; break; }
         }
+        await captureDone; // 尾行捕获完整后再 finish（失败原因可诊断）
         pumpTick(outDir, off, q); // 收尾 flush
       } else {
         // 进程内 fallback：事件在 import 返回后一次性可见
