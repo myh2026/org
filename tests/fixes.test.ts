@@ -282,6 +282,11 @@ describe("v0.4.13 修复：B 复用语义地板（技能标签命中 ≠ 语义�
 //      FIXTURE_EXHAUSTED（expertFixtureOf 与 HSL run_fixture_of 同语义）
 //   8. org demo 非默认工作区不再覆写 dist/demo（--export-dist 显式导出）
 //   9. Web 会话 DELETE/PATCH 对 dist/demo 入库快照只读守卫
+//
+// 注：本节三例由 v0.4.17 修复批次新增，起初漏了逐例 120_000 超时 —— 裸
+// `bun test tests/` 下三条全部假红（第 8 例要跑完整 org demo，实测 12s+，
+// 远超 bun 默认 5000ms），只有经 package.json 的 test 脚本（带 --timeout）
+// 才绿。已补齐，使两条入口一致。
 // ============================================================================
 
 describe("v0.4.17 修复：shell 传参卫生（sh_quote）", () => {
@@ -307,7 +312,7 @@ describe("v0.4.17 修复：shell 传参卫生（sh_quote）", () => {
     const patchLine = subjects.find((s) => s.includes("patch record-validator -> 1.0.1"));
     expect(patchLine).toBeDefined();
     expect(patchLine).toContain("don't silently exclude");
-  });
+  }, 120_000);
 });
 
 describe("v0.4.17 修复：直连剧本自动发现 source 分相", () => {
@@ -322,7 +327,7 @@ describe("v0.4.17 修复：直连剧本自动发现 source 分相", () => {
     expect(r.stdout).toContain("占位剧本应答");
     // 会话账本正常落盘（直连治理链路零旁路）
     expect(exists(path.join(ws, "runtime/sessions/record-validator/default.jsonl"))).toBe(true);
-  });
+  }, 120_000);
 });
 
 describe("v0.4.17 修复：org demo 非默认工作区不覆写 dist/demo", () => {
@@ -335,5 +340,5 @@ describe("v0.4.17 修复：org demo 非默认工作区不覆写 dist/demo", () =
     expect(r.ok).toBe(true);
     expect(r.stdout).toContain("跳过 dist/demo 导出");
     fs.rmSync(tmpWs, { recursive: true, force: true });
-  });
+  }, 120_000);
 });
