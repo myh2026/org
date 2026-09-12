@@ -100,57 +100,18 @@ function readWorkspaceOf(ws: string): string {
   return ws;
 }
 
-// ---- 会话账本健壮解析 ----
-// org 的 append_session（hsl/pool/direct.hsl）用 format! 裸插值写账本：多行
-// answer 会带字面换行落盘，破坏逐行 JSON（上游序列化卫生已修，v0.4.6，但
-// 存量坏账本仍在盘上）。解析策略（两层兜底，与 engine.ts contextUsageOf 同
-// 思路，此处保留完整轮记录供 GUI 逐轮渲染）：
-//   1. 按 "\n{"turn": 记录边界重组 segment；
-//   2. 逐条先试标准 JSON.parse；
-//   3. 不可解析的 segment 静默跳过（坏行容忍）。
+// ---- 会话账本（v0.5.0：解析统一到 lib/sessions.ts） ----
+// 此前 Web / chat / engine 各有一份账本解析，健壮性还不一致（Web 有记录边界重组与
+// 修复式解析，另两处只逐行 JSON.parse）→ 同一份账本在不同前端显示的轮数不同，且
+// **compacted 只有 chat 解析**（Web 把压缩摘要当普通轮次渲染）。现统一到 lib。
+// 本文件保留 parseLedgerRaw 的再导出：tests/web.test.ts 直接单测它。
 
-export interface LedgerTurn {
-  turn: number;
-  question: string;
-  answer: string;
-  tokens: number;
-  ctx_tokens: number;
-}
-
-export function parseLedgerRaw(raw: string): LedgerTurn[] {
-  const turns: LedgerTurn[] = [];
-  const segments = raw.split(/\n(?=\{"turn":)/);
-  for (const seg of segments) {
-    const t = seg.trim();
-    if (t.length === 0) continue;
-    // 1) 标准 JSON（修复后的正常形态）
-    try {
-      const o = JSON.parse(t) as Record<string, unknown>;
-      turns.push({
-        turn: Number(o.turn ?? 0),
-        question: String(o.question ?? ""),
-        answer: String(o.answer ?? ""),
-        tokens: Number(o.tokens ?? 0),
-        ctx_tokens: Number(o.ctx_tokens ?? 0),
-      });
-      continue;
-    } catch { /* fallthrough：修复式解析 */ }
-    // 2) 修复式：format! 固定字段布局（answer 含裸换行，v0.4.6 前存量）
-    const m = t.match(
-      /^\{"turn":(\d+),"question":"([\s\S]*?)","answer":"([\s\S]*)","tokens":(\d+),"ctx_tokens":(\d+)\}$/,
-    );
-    if (m) {
-      turns.push({
-        turn: Number(m[1]),
-        question: m[2]!,
-        answer: m[3]!,
-        tokens: Number(m[4]),
-        ctx_tokens: Number(m[5]),
-      });
-    }
-  }
-  return turns;
-}
+export type { LedgerTurn } from "../lib/sessions.ts";
+export { parseLedgerRaw } from "../lib/sessions.ts";
+import {
+  parseLedgerRaw, readSession as libReadSession, listSessionIds,
+  type LedgerTurn,
+} from "../lib/sessions.ts";
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
 
@@ -169,43 +130,22 @@ export interface SessionSummary {
   preview: string;
 }
 
+/** 列某专家的会话（mtime 降序）。解析在 lib/sessions.ts；
+ *  展示选择归 Web：预览用**首问**（GUI 侧栏要「这会话在聊什么」的锚点）。 */
 export function listSessions(ws: string, expert: string): SessionSummary[] {
   if (!SAFE_NAME.test(expert)) return [];
-  const dir = path.join(ws, "runtime", "sessions", expert);
-  let files: fs.Dirent[] = [];
-  try {
-    files = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const out: SessionSummary[] = [];
-  for (const f of files) {
-    if (!f.isFile() || !f.name.endsWith(".jsonl")) continue;
-    const id = f.name.slice(0, -".jsonl".length);
-    const turns = readSession(ws, expert, id);
-    if (turns.length === 0) continue;
-    const first = turns[0]!;
-    out.push({
-      id,
-      expert,
-      turns: turns.length,
-      lastAt: fs.statSync(path.join(dir, f.name)).mtime.toISOString(),
-      preview: first.question.slice(0, 40),
-    });
-  }
-  return out.sort((a, b) => b.lastAt.localeCompare(a.lastAt));
+  return listSessionIds(ws, expert).map(({ id, turns, mtimeMs }) => ({
+    id,
+    expert,
+    turns: turns.length,
+    lastAt: new Date(mtimeMs).toISOString(),
+    preview: turns[0]!.question.slice(0, 40),
+  })).sort((a, b) => b.lastAt.localeCompare(a.lastAt));
 }
 
 export function readSession(ws: string, expert: string, session: string): LedgerTurn[] {
-  const file = sessionFile(ws, expert, session);
-  if (!file) return [];
-  let raw: string;
-  try {
-    raw = fs.readFileSync(file, "utf-8");
-  } catch {
-    return [];
-  }
-  return parseLedgerRaw(raw);
+  if (!SAFE_NAME.test(expert) || !SAFE_NAME.test(session)) return [];
+  return libReadSession(ws, expert, session);
 }
 
 // ---- org ask 进程内直连（与 cli/org.ts cmdAsk 同链路） ----
@@ -2574,10 +2514,18 @@ function bannerHtml() {
 }
 
 function turnHtml(t, isLast) {
+  // /compact 的重写条目不是「一轮问答」：显式标注来源轮数，否则用户会看到一条
+  // 问题叫 (compact digest of N turns) 的怪轮次（此前 Web 不解析 compacted 字段）
   var meta = "org · " + (state.currentExpert || "?") + " · turn " + t.turn +
     " · " + t.tokens + " tok · ctx " + t.ctx_tokens;
-  return '<div class="t-user"><span class="ps">❯</span><span class="q">' +
-    esc(t.question) + '</span></div>' +
+  if (t.compacted) {
+    meta = "org · " + (state.currentExpert || "?") + " · 已压缩（原 " +
+      (t.compacted_from || "?") + " 轮摘要） · " + t.tokens + " tok · ctx " + t.ctx_tokens;
+  }
+  var q = t.compacted ? "(compact digest of " + (t.compacted_from || "?") + " turns)" : t.question;
+  return '<div class="t-user' + (t.compacted ? ' compacted' : '') + '"><span class="ps">' +
+    (t.compacted ? "⇲" : "❯") + '</span><span class="q">' +
+    esc(q) + '</span></div>' +
     '<div class="t-bot"><div class="who">' + esc(meta) + '</div>' +
     '<div class="body md">' + renderMd(t.answer || "（空回答）") + '</div>' +
     mactsHtml(isLast) + '</div>';

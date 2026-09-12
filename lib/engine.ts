@@ -25,6 +25,7 @@ import {
   tailLines,
 } from "./events.ts";
 import { ROOT } from "./root.ts";
+import { readSession as libReadSession } from "./sessions.ts";
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const STOCK_FIXTURE = path.join(ROOT, "fixtures/run-notices.json");
@@ -804,15 +805,11 @@ export function readScorecard(outDir: string): Scorecard | null {
 
 function readDirectTurns(workspace: string, expert: string, session: string): DirectTurn[] {
   if (!expert) return [];
-  const file = path.join(workspace, "runtime", "sessions", expert, `${session}.jsonl`);
-  return readLines(file).flatMap((l) => {
-    try {
-      const o = JSON.parse(l) as { turn?: number; question?: string; answer?: string; tokens?: number };
-      return [{ turn: o.turn ?? 0, question: o.question ?? "", answer: o.answer ?? "", tokens: o.tokens }];
-    } catch {
-      return [];
-    }
-  });
+  // v0.5.0：统一到 lib/sessions.ts（此前这里是第三份账本解析，只用逐行 JSON.parse
+  // —— 存量坏账本会让 RunResult.directTurns 静默少数几轮，而 Web 侧显示的是全部）
+  return libReadSession(workspace, expert, session).map((t) => ({
+    turn: t.turn, question: t.question, answer: t.answer, tokens: t.tokens,
+  }));
 }
 
 // ---------- 工作区扫描（左栏 rail 数据源） ----------

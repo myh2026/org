@@ -59,7 +59,7 @@
 - **修复 v0.4.17 批次三条新回归用例缺超时**：它们起初只在带 `--timeout` 的
   npm 脚本下全绿，裸 `bun test tests/` 会假红（第 3 例要跑完整 `org demo`，
   实测 10.8s）。已补齐 `, 120_000`（该文件头部本就写着这条约定）。
-- 全量 **263/263 全绿**（14 文件 · 1055 expect），裸 `bun test tests/` 即可复现。
+- 全量 **266/266 全绿**（14 文件 · 1069 expect），裸 `bun test tests/` 即可复现。
 
 ### 5. 交互式审批：审批队列文件协议（mid-run 暂停等人点头）
 
@@ -93,6 +93,36 @@
 测试：`tests/approval.test.ts` 11 例（队列关闭零变化 / 有界超时降级 / 并发放行 /
 长期放行集命中 / 拒绝 / CLI 五条路径 / Web 端点与状态码 / 四态事件归一化与分类）。
 探针 `hsl/probe/probe11-approval.hsl` 可重放三态。
+
+### 6. 三端能力对齐（账本解析统一 + TUI/chat 补齐）
+
+**账本解析从 4 份收敛为 1 份**（新增 `lib/sessions.ts`）：此前
+`cli/chat.ts` · `web/entry.ts` · `lib/engine.ts` 各有一份账本解析，**健壮性还不一致**
+（Web 有记录边界重组 + 修复式解析，另两处只逐行 `JSON.parse`）—— 同一份账本在 Web 上
+显示 N 轮、在 chat 与 `RunResult.directTurns` 里只剩 M 轮（M ≤ N），静默分歧。
+更具体的一个后果：**`compacted` 字段只有 chat 解析**，Web 把 `/compact` 的摘要条目当
+普通轮次渲染（问题栏赫然写着 `(compact digest of N turns)`）。现统一解析，Web 侧显式
+标注「已压缩（原 N 轮摘要）」。各前端的**展示**差异保留（Web 预览取首问、chat 取最近
+问题）——那是产品选择，不是该统一的东西。
+
+**TUI 修补**（都是「帮助里写了、代码里没有」或死代码）：
+- `j` / `k` 栏内移动：帮助表里一直有这条，但 `app.tsx` 从未处理 —— 按下只是把 j/k
+  当可打印字符塞进输入框。
+- `PgUp` / `PgDn` 翻页：顺带复活了 `store.ts` 里**零调用点**的 `scroll` 动作。
+- `:model scripted|deepseek`：此前只能在 `org tui --model` 时定（chat 有 `/model`、
+  Web 有分段控制，TUI 是唯一没有的）。
+- `:score` 双轴匹配：此前只匹配能力轴，传任务类（如 `structured_extract`）会**静默空卡**；
+  现与 `org score` 对齐并给出「可用能力轴 / 任务类」反馈。
+
+**chat 补齐 7 条命令**：`/runs`（运行产物）· `/score [轴|任务类]`（评分卡，双轴）·
+`/review`（运行范围复核候选）· `/keep` `/drop`（工具库治理）· `/fork`（会话派生）·
+`/undo [版本]`（版本回退）。
+
+**顺带修一个我自己的缺陷**：`cli/chat.ts` 的 `green` / `red` 两个颜色助手**从未定义**
+（现有助手只有 `dim`/`bold`/`cyan`/`amber`）—— `/approve` 与治理类命令会抛
+`ReferenceError`。既有单测只覆盖纯函数，斜杠分支零覆盖，所以它溜到了运行期。
+已补助手，并新增 `tests/chat.test.ts` 的**进程级斜杠冒烟**（管道喂真实 REPL 逐条执行，
+断言不出现 `ReferenceError` / `is not defined`）——这正是能抓到该类缺陷的测试形态。
 
 ### 诚实的边界（本版未做）
 

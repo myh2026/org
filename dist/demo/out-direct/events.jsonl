@@ -1,10 +1,10 @@
-{"seq":0,"ts":"2026-09-12T13:59:17.956Z","name":"run_start","data":{"entry":"C:\\Users\\86186\\.zcode\\workspace\\default\\repos\\org\\hsl\\pool\\direct.hsl","model":"scripted","task":"(direct) multi-turn","scale":"microkernel"}}
-{"seq":1,"ts":"2026-09-12T13:59:17.981Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
-{"seq":2,"ts":"2026-09-12T13:59:17.981Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
-{"seq":3,"ts":"2026-09-12T13:59:18.004Z","name":"journal","data":{"name":"direct_ctx","detail":"notice-parser/demo turn=1 ctx=94 window=131072"}}
-{"seq":4,"ts":"2026-09-12T13:59:18.011Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
-{"seq":5,"ts":"2026-09-12T13:59:18.021Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
-{"seq":6,"ts":"2026-09-12T13:59:18.021Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
-{"seq":7,"ts":"2026-09-12T13:59:18.034Z","name":"journal","data":{"name":"direct_ctx","detail":"notice-parser/demo turn=2 ctx=144 window=131072"}}
-{"seq":8,"ts":"2026-09-12T13:59:18.040Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
-{"seq":9,"ts":"2026-09-12T13:59:18.043Z","name":"run_end","data":{"elapsed_ms":86,"ok":true}}
+{"seq":0,"ts":"2026-09-12T14:14:40.494Z","name":"run_start","data":{"entry":"C:\\Users\\86186\\.zcode\\workspace\\default\\repos\\org\\hsl\\pool\\direct.hsl","model":"scripted","task":"(direct) multi-turn","scale":"microkernel"}}
+{"seq":1,"ts":"2026-09-12T14:14:40.513Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
+{"seq":2,"ts":"2026-09-12T14:14:40.513Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
+{"seq":3,"ts":"2026-09-12T14:14:40.534Z","name":"journal","data":{"name":"direct_ctx","detail":"notice-parser/demo turn=1 ctx=94 window=131072"}}
+{"seq":4,"ts":"2026-09-12T14:14:40.541Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
+{"seq":5,"ts":"2026-09-12T14:14:40.555Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
+{"seq":6,"ts":"2026-09-12T14:14:40.555Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
+{"seq":7,"ts":"2026-09-12T14:14:40.574Z","name":"journal","data":{"name":"direct_ctx","detail":"notice-parser/demo turn=2 ctx=144 window=131072"}}
+{"seq":8,"ts":"2026-09-12T14:14:40.579Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
+{"seq":9,"ts":"2026-09-12T14:14:40.581Z","name":"run_end","data":{"elapsed_ms":87,"ok":true}}

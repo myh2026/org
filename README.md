@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-v0.5.0_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
-[![Tests](https://img.shields.io/badge/tests-263%2F263_passing-brightgreen.svg)](#-测试与验证状态)
+[![Tests](https://img.shields.io/badge/tests-266%2F266_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.61-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
 [![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-三平台单二进制分发)
@@ -19,7 +19,7 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **v0.5.0 当前状态**：可运行实现，**263/263 机制级测试全绿**（14 文件 · 1055 expect）。本版对标 codex / zcode / opencode 补全两块：**Web GUI 补齐团队模式派单面**（`POST /api/run-stream` SSE + 运行卡片叙事 + 运行列表回放 + 评分卡面板 —— 此前 Web 只能直连单专家，旗舰监督回路在 Web 上完全不可见）与**agent 反悔通道**（`org session fork` 会话派生 · `org revert` 版本回退，回退本身可逆）；另把 11 类此前落 `unknown` 被三端静默丢弃的事件（审计 / 能力拒绝 / 金丝雀回滚 / 固化降级 / 静默更新告警 / 补丁回滚失败 / panic / llm_stream_done 用量…）具名化。解析契约单一化：新增 `lib/runCards.ts`，分类在服务端做，浏览器只渲染。（上版 v0.4.17 落地 `org review` 运行范围复核与四个实测缺陷修复。）
+> **v0.5.0 当前状态**：可运行实现，**266/266 机制级测试全绿**（14 文件 · 1069 expect）。本版对标 codex / zcode / opencode 补全两块：**Web GUI 补齐团队模式派单面**（`POST /api/run-stream` SSE + 运行卡片叙事 + 运行列表回放 + 评分卡面板 —— 此前 Web 只能直连单专家，旗舰监督回路在 Web 上完全不可见）与**agent 反悔通道**（`org session fork` 会话派生 · `org revert` 版本回退，回退本身可逆）；另把 11 类此前落 `unknown` 被三端静默丢弃的事件（审计 / 能力拒绝 / 金丝雀回滚 / 固化降级 / 静默更新告警 / 补丁回滚失败 / panic / llm_stream_done 用量…）具名化。解析契约单一化：新增 `lib/runCards.ts`，分类在服务端做，浏览器只渲染。（上版 v0.4.17 落地 `org review` 运行范围复核与四个实测缺陷修复。）
 
 ## 📑 目录
 
@@ -612,27 +612,27 @@ ORG 有三个前端：Web GUI（`org web`）· TUI 驾驶舱（`org tui`）· ch
 | 直连单专家问答 | ✔ `org ask` | ✔ SSE 流式 | ✔ `?专家 问题?` | ✔ 每行即一问 |
 | 暖移交 handoff | ✔ | — | — | — |
 | 事件卡片叙事（路由/裁决/工厂/固化/补丁/done） | ◐ stdout | ✔ v0.5.0 | ✔ 九类卡片 | — |
-| 运行产物列表 + 只读回放 | ✔ `org replay` | ✔ v0.5.0 侧栏「runs」 | ✔ `:replay` | — |
-| 评分卡 | ✔ `org score` | ✔ v0.5.0 面板 | ◐ `:score` | — |
-| 工具库治理 keep / drop | ✔ | ✔ 专家卡 ★/○ | ✔ `:keep` `:drop` | — |
-| 运行范围复核 review | ✔ 交互选取 | ✔ 勾选面板 | ◐ `:review all` | — |
+| 运行产物列表 + 只读回放 | ✔ `org replay` | ✔ v0.5.0 侧栏「runs」 | ✔ `:replay` | ✔ v0.5.0 `/runs` |
+| 评分卡 | ✔ `org score` | ✔ v0.5.0 面板 | ✔ `:score`（双轴） | ✔ v0.5.0 `/score` |
+| 工具库治理 keep / drop | ✔ | ✔ 专家卡 ★/○ | ✔ `:keep` `:drop` | ✔ v0.5.0 `/keep` `/drop` |
+| 运行范围复核 review | ✔ 交互选取 | ✔ 勾选面板 | ◐ `:review all` | ✔ v0.5.0 `/review`（列表） |
 | 导入 harness | ✔ | — | ◐ `:import` | — |
-| **会话派生 fork** | ✔ v0.5.0 | — | — | — |
-| **版本回退 revert** | ✔ v0.5.0 | — | — | — |
+| **会话派生 fork** | ✔ v0.5.0 | — | — | ✔ v0.5.0 `/fork` |
+| **版本回退 revert** | ✔ v0.5.0 | — | — | ✔ v0.5.0 `/undo` |
 | 会话改名 / 删除 | ✔ v0.5.0 | ✔ | — | — |
 | 会话列表 / 恢复 | ✔ | ✔ | ◐（列表是 out-*） | ✔ `/sessions` `/resume` |
 | 上下文计量 + 压缩 | ✔ | ◐ 计量 | ✔ 计量 | ✔ `/ctx` `/compact` |
-| 模型切换 | ✔ `--model` | ✔ 分段控制 | — | ✔ `/model` |
+| 模型切换 | ✔ `--model` | ✔ 分段控制 | ✔ v0.5.0 `:model` | ✔ `/model` |
 | 配置 / API key（`org config`） | ✔ | — | — | — |
 | **交互式审批（mid-run）** | ✔ `org approvals` | ✔ v0.5.0 徽标+面板 | ✔ `:approve` | ✔ `/approve` |
 | 能力预授权（`--approve-capability`） | ✔ | — | — | — |
-| 会话派生 fork | ✔ v0.5.0 | — | — | — |
 | 主题 / 事件过滤 | — | — | ✔ `:theme` `:filter` | — |
+| 栏内移动 / 翻页 | — | — | ✔ v0.5.0 `j/k` · `PgUp/PgDn` | ↑↓ 历史 |
 
 **已知不一致（后续批次）**：Web 缺 import / handoff / demo / config 面板；
-TUI 缺 `:model`、会话改名删除、`j/k` 滚动（帮助里写了但未实现）；
-chat 缺 `review / keep / score / runs` 等命令。三端的会话账本读取目前各有一份实现，
-计划收敛到 `lib/sessions.ts`。
+TUI 缺会话改名删除（TUI 的「会话」是 out-* 运行目录，与 chat 会话账本是两个概念）。
+账本解析已收敛到 `lib/sessions.ts`（v0.5.0：四份实现合一，并修掉 Web 把
+`/compact` 摘要当普通轮次渲染的缺陷）。
 
 ## ⚙️ 运行时动力学
 
@@ -862,7 +862,7 @@ bun cli/org.ts chat
 ```bash
 bun cli/org.ts tui                                   # 终端驾驶舱（三区布局 + 事件卡片流）
 bun cli/org.ts web                                   # Web GUI（http://127.0.0.1:4600）
-bun test tests/                                      # 机制级测试（263 个；端到端用例已逐例声明 120s 超时）
+bun test tests/                                      # 机制级测试（266 个；端到端用例已逐例声明 120s 超时）
 bun cli/org.ts run --task "抓取某站点近一周公告，输出结构化表格"   # 团队模式派单
 bun cli/org.ts chat --model deepseek                 # 真实 LLM 流式对话（先配网关环境变量）
 ```
@@ -1009,7 +1009,7 @@ bun cli/org.ts web --model deepseek                   # Web GUI（SSE delta 逐 
 
 ## ✅ 测试与验证状态
 
-**机制级测试：263 / 263 全绿**（`bun test tests/`，14 文件 · 1055 expect 断言 · 本地约 4–5 分钟 · CI 零外联——scripted 剧本车道）：
+**机制级测试：266 / 266 全绿**（`bun test tests/`，14 文件 · 1069 expect 断言 · 本地约 4–5 分钟 · CI 零外联——scripted 剧本车道）：
 
 > **超时约定（v0.4.17）**：端到端用例真实 spawn 解释器跑完整监督回路（单轮 3–14s），而 bun 的默认每用例超时是 5000ms —— 默认值下 26 例必然假红，且**失效形态是「子进程被 kill 后断言读到非零退出」**，看起来像产品缺陷。全局手段都不可用（bunfig 的 `[test]` 段没有 timeout 键；`[test] preload` 与 `setDefaultTimeout` 在多文件并行 worker 模式下都不生效），因此重用例一律**逐例显式声明 `120_000`**（与 `tests/demo.test.ts` 既有写法一致）。详见 `tests/helpers.ts` 与 BUGFIXES.md B-15。
 
@@ -1051,7 +1051,7 @@ org chat       # 交互式 REPL（scripted 车道免环境）
 
 ## 🧪 CI/CD
 
-- **push / PR**（`ci.yml`）：`dhv check` 全模块 → `bun test tests/ --timeout 120000`（263 例；**超时不可省** —— 端到端用例单轮 3–14s，bun 默认每用例 5s）→ 三连跑冒烟 → `status` 冒烟 → `tui:smoke` → 产物上传 workflow artifact → **dist/ 有变化则自动回写提交**（`chore(dist): … [skip ci]`）；
+- **push / PR**（`ci.yml`）：`dhv check` 全模块 → `bun test tests/ --timeout 120000`（266 例；**超时不可省** —— 端到端用例单轮 3–14s，bun 默认每用例 5s）→ 三连跑冒烟 → `status` 冒烟 → `tui:smoke` → 产物上传 workflow artifact → **dist/ 有变化则自动回写提交**（`chore(dist): … [skip ci]`）；
 - **tag `v*`**（`release.yml`）：同套校验 → 打包源码 + dist 产物 → **5 平台二进制矩阵构建** → 创建 GitHub Release（tar.gz + dist zip + 二进制，发布说明取 CHANGELOG 对应版本段落）；
 - 克隆仓库后无需跑 demo 即可 `check` 与 `status`（读 `dist/demo` 快照）——编译产物与源码同库交付。
 
