@@ -1,5 +1,75 @@
 # CHANGELOG
 
+## v0.5.0（2026-09-12）—— Web 补齐团队模式面 + agent 反悔通道 + 事件具名化
+
+对标 codex / zcode / opencode 的一次「可操作界面 + agent 应有功能」补全。
+范围按实测缺口排序，先补**旗舰能力在前端的可见性**，再补**低成本的 agent 能力**。
+
+### 1. Web GUI 补齐团队模式派单面（此前的最大缺口）
+
+问题：Web 此前只能直连单专家 —— `web/entry.ts` 连 `startRun` 都没 import，
+所有执行路径都落在 `hsl/pool/direct.hsl`。于是 ORG 的旗舰能力（分解 → 路由 →
+派单 → 审查 → 资产沉淀）在 Web 上**完全不可见**，只有 TUI 有。
+
+- **`POST /api/run-stream`**：团队派单 SSE（复用 `sseAsk` 模板 + `AskGate`
+  串行化，团队 run 与直连互斥）。帧序 `open → start → run → card* → done/error`。
+- **`GET /api/runs`** 运行产物列表 · **`GET /api/run?dir=`** 只读回放
+  （`replayRun`；`SAFE_NAME` 守卫，坏名 400 / 不存在 404）· **`GET /api/score`**
+  评分卡。`POST /api/abort` 扩展到团队 run（`RunHandle.cancel` → SIGTERM）。
+- **GUI**：派单模式切换（团队 / 直连，缺省团队，与 TUI 缺省一致）+ 运行卡片叙事
+  （任务树 + A/B/C/D 路由徽标 + 四态裁决 + 工厂 stepper + ❄/⚡ 固化 + 补丁 +
+  金丝雀 + 资产 + 能力授予 + 影子对比 + done 成本行）+ 侧栏运行列表（点击只读
+  回放）+ 评分卡面板。
+- **单一解析源**：新增 `lib/runCards.ts` 承载「事件 → 卡片」的解析契约，
+  TUI 改为 import（保留再导出，既有 import 路径不变）。分类**在服务端做**，
+  SSE / 回放的帧都携带 `fact`，浏览器只渲染 —— 浏览器是内联 JS 无构建步骤，
+  让它自己写正则就会回到「同一次运行在两个前端显示成两件事」的老问题。
+
+### 2. agent 反悔通道：会话派生 + 版本回退
+
+后端原语都已存在，缺的只是用户可触达的入口：
+
+- **`org session fork <expert> <from> <to>`**（对应 codex/opencode 的 `/fork`）：
+  账本 append-only，复制即分叉 —— 上下文从派生点续跑，原会话字节不变。
+  同时补齐 CLI 的会话 `rename` / `rm`（此前只有 Web 有这两个端点）。
+- **`org revert <expert> [--to x.y.z]`**（对应 opencode `/undo`、codex diff/revert）：
+  工厂每次补丁都把旧源归档为 `registry/experts/<name>@<旧版本>.hsl`（金丝雀回滚
+  用的正是这批归档源），还原即回退；**当前源先归档 → 回退本身可逆**，注册表
+  版本号随之回退并 git 留痕。实测 `1.0.1 → 1.0.0 → 1.0.1` 往返。
+
+### 3. 事件具名化：审计与异常不再静默丢弃
+
+此前 11 类事件全部落 `kind:"unknown"`，被三端渲染层 switch 直接丢弃 ——
+**审计与异常在三个前端都看不见**。现补齐具名类型与归一化分支：
+`audit` / `capability_denied` / `crystallize_degrade` / `canary_rollback` /
+`redundancy_compare` / `score_drift_alert` / `registry_commit_skipped` /
+`patch_rollback_failed` / `run_panic` / `llm_stream_done` / `fault`。
+
+其中 `llm_stream_done` 是成本面板的数据源（chars / 思考量 / 耗时 / usage）；
+`capability_denied` 有两条来源且键名不同（能力策略走 `capability`，宿主故障注入
+走 `target`），归一化时都认。Web 卡片以三色调 notice 行显示这些事实。
+
+### 4. 测试批次修复
+
+- 新增 `tests/web.test.ts` +7（团队 SSE 全链与 `done.metrics` 对账 / card 帧
+  事实覆盖 / task 必填 400 / runs 列表 / 回放与坏名不存在 / 评分卡 / GUI 要素
+  与内联脚本可解析）。
+- 新增 `tests/sessions.test.ts` 19 例（fork 隔离与防呆 / revert 往返与防呆 /
+  11 类事件归一化 / 分类器 tone）。
+- **修复 v0.4.17 批次三条新回归用例缺超时**：它们起初只在带 `--timeout` 的
+  npm 脚本下全绿，裸 `bun test tests/` 会假红（第 3 例要跑完整 `org demo`，
+  实测 10.8s）。已补齐 `, 120_000`（该文件头部本就写着这条约定）。
+- 全量 **250/250 全绿**（13 文件 · 981 expect），裸 `bun test tests/` 即可复现。
+
+### 诚实的边界（本版未做）
+
+按约定范围，以下需要改 vendored 解释器或新增宿主通道，留作后续：
+逐步文件 diff（`fs.write/edit` 记录 old/new）、`$host.net.fetch` 与 `net_connect`
+接线、LLM 工具循环（function calling）、附件 / `@path` 提及、自定义 skills 目录、
+桌面通知、**交互式审批（审批队列文件协议）**。三端能力对齐（Web 的
+import/handoff/demo/config；TUI 的 `:model` / `j,k` / 会话管理；chat 的
+`/review` 等）同样在后续批次 —— 本版先把「旗舰面可见」与「反悔通道」落地。
+
 ## v0.4.17（2026-09-12）—— 运行范围复核（org review）+ 四个实测缺陷修复
 
 工具库治理第四动作 **`org review`**：回答「**这一次运行产出的东西里，哪些值得
