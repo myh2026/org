@@ -1,2 +1,2 @@
-{"seq":0,"ts":"2026-09-12T03:12:00.312Z","name":"run_start","data":{"entry":"C:\\Users\\86186\\.zcode\\workspace\\default\\repos\\org\\demo-run\\registry\\experts\\record-validator.hsl","model":"scripted","task":"acceptance rehearsal: validate sample records","scale":"microkernel"}}
-{"seq":1,"ts":"2026-09-12T03:12:00.339Z","name":"run_end","data":{"elapsed_ms":27,"ok":true}}
+{"seq":0,"ts":"2026-09-12T03:20:07.749Z","name":"run_start","data":{"entry":"C:\\Users\\86186\\.zcode\\workspace\\default\\repos\\org\\demo-run-tests\\demo\\registry\\experts\\record-validator.hsl","model":"scripted","task":"acceptance rehearsal: validate sample records","scale":"microkernel"}}
+{"seq":1,"ts":"2026-09-12T03:20:07.774Z","name":"run_end","data":{"elapsed_ms":25,"ok":true}}

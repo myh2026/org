@@ -57,7 +57,7 @@
   端到端文件共 56 例 + `tests/web.test.ts` 的 beforeAll 与 8 个真实 spawn 用例统一
   `}, 120_000);`，与 demo.test.ts 既有写法一致；120s 是放宽等待上限、断言一字未改），
   `package.json` 的 `test` 脚本同步带上 `--timeout 120000`。修后 `bun test tests/`
-  无旗标即 **221/221 全绿**；
+  无旗标即 **220/220 全绿**；
 - **B-16 `cli/org.ts` 缺 `import.meta.main` 守卫**：任何 `import` 都会执行整条 CLI
   并 `process.exit`（表现为导入方被静默终结）。`cli/chat.ts` 早有守卫且
   `tests/chat.test.ts` 正靠它导入纯函数 —— 同一约定在 org.ts 漏了。修复：
