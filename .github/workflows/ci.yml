@@ -25,6 +25,11 @@ jobs:
       - name: dhv check 全部 HSL 源码（hsl/ + probe/ + dist/ 铸出专家）
         run: bun cli/org.ts check
 
+      # 漂移守卫：vendored dhv-ts（resolveDhv() 首选）版本必须 ≥ 上游 HSL main，
+      # 拦截「上游修复批次不生效于 org」的双仓漂移（v0.2.61 vs v0.2.62 实测教训）
+      - name: vendored 工具链新鲜度（上游 HSL 漂移守卫）
+        run: bun scripts/check-vendored-fresh.ts
+
       - name: 机制级测试（结构闸门 / README 走读 / 动力学点火）
         run: bun test tests/
 
