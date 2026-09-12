@@ -220,3 +220,128 @@
   写者都是覆盖攻击者**。修法只有两条路：要么所有写者都从磁盘新鲜加载（本修复选择，
   代价是 I/O）；要么改写为按字段合并。值语义语言里前者更稳——后者要求语言层支持
   字段级寻址。
+
+## B-13（ORG 修复，v0.4.17）工厂闸门依赖 DHV_TS：按指南直接跑解释器时静默降级
+
+- **现象**：不注入 `DHV_TS` 直接跑 `bun toolchain/dhv-ts/src/main.ts run hsl/org.hsl …`
+  （即 HSL 指南 §9.2 记载的标准调用方式，也是本项目 `toolchain/README.md` 的推荐路径），
+  工厂整轮失效但**全场无人报错**：
+
+  ```
+  [factory] check 未过（第 1/3 次），携带诊断再生成
+  - task#3 validate :: (factory failed) (coverage 0.00)
+  [org] 交付物 3 项 · 资产 2 项 · model_calls 5 · revises 2     ← 退出码 0，accepted 3/3
+  ```
+
+  对照：`org run`（CLI）同一任务同一剧本产出 `资产 3 项`、`coverage 1.00`、mint 成功。
+- **根因链**：`hsl/factory/pipeline.hsl::dhv_path()` 在 `DHV_TS` 缺省时返回哨兵串
+  `"UNSET_DHV_TS"`；而两个闸门（`dhv_check_gate` / `dhv_run_gate`）的判据只有
+  `has_bun()`：只要 bun 在 PATH（几乎所有机器）就走 shell 车道，拼出的命令是
+
+  ```
+  bun UNSET_DHV_TS check /…/record-validator.hsl      ← 必然非零退出
+  ```
+
+  进程内兜底车道（`$host.dhv.check`，本来可用且语义等价）因为 `has_bun()` 为真而
+  **永远走不到**。三次再生成全失败 → 有界降级为 `(factory failed)`。
+  为什么测试全绿掩盖了它：`tests/helpers.ts` 的 `runDhv/runOrg` 都显式注入了
+  `DHV_TS: shPath(DHV)`，而 `cli/org.ts` / `lib/engine.ts` 的 `dhvRun` 也会注入 ——
+  **只有「用户按指南直接跑解释器」这一条路径没有注入者**。
+- **修复**（`hsl/factory/pipeline.hsl`）：
+  1. `dhv_path()` 增加自解析级：`DHV_TS` → `process.argv[1]`（本 native 块与解释器
+     同进程，argv[1] 即其入口脚本），拿不到才返回空串；
+  2. 两个闸门的判据改为 `has_bun() && dhv_path().len() > 0` —— 路径不可解析时**退回
+     进程内车道**，不再拼一条注定失败的 shell 命令。
+- **修复后实测**：不设 `DHV_TS` 直接跑 → `[factory] stage=Register` / `资产 3 项` /
+  `coverage 1.00`，与 CLI 车道完全一致（回归锁：`tests/review.test.ts`
+  「工厂闸门自解析工具链」用例）。
+- **教训**：**「哨兵值 + 只在一条分支上判定的前置条件」是静默降级的经典配方**。
+  哨兵串让类型系统帮不上忙，`has_bun()` 单独判定又让兜底分支不可达 —— 正确形状是
+  「前置条件与它保护的命令用同一份判据」（两条车道都要路径可用才选 shell）。
+
+## B-14（ORG 修复，v0.4.17）资产沉淀证据从 journal 丢失：sink_assets 记在 journal 克隆上
+
+- **现象**：`journal.jsonl` 里**一条 `asset` 都没有、`drift` 也没有**，而同一轮的
+  `metrics.json` 明写 `assets: 3`。逐轮核对（`org demo` 的 run A）：
+
+  | 文件 | 条数 | 内容 |
+  |---|---|---|
+  | `journal.jsonl` | 22 | open/decompose/route/dispatch/review/worker-done/mint-register/re-dispatch |
+  | `events.jsonl` 的 journal 镜像 | 26 | 上述 22 + **asset×3 + drift×1** |
+
+  差值 4 恰好是 `sink_assets` 内部那 4 条 `journal.log`。
+- **根因**：`hsl/org.hsl` 的 sink 段写的是
+
+  ```hsl
+  let drift_alerts = sink_assets(state.clone(), journal.clone(), …)?;   // ← clone
+  ```
+
+  而 `sink_assets(state, journal, …)` 按值收参，内部的 `journal.log("registry","asset",…)`
+  与 `journal.log("scorecard","drift",…)` 全部落在**这个临时副本**上，随函数返回一起
+  丢弃；随后 `journal.clone().flush()` 写出的是从未被追加过 asset 的原节点。
+  看似还有一条救命通道（`Journal::log` 会发总线事件，所以 `events.jsonl` 有镜像），
+  但 `lib/events.ts::mergeStreams` 在 `journal.jsonl` 非空时**整体丢弃 events.jsonl 的
+  journal 镜像** —— 两端叠加，资产沉淀证据对所有前端（Web / TUI / chat）与
+  `org replay` 都不可见。`metrics.json` 走 `aggregate` 另一条路，所以表层指标完好，
+  故障只藏在事件流里。
+- **修复**（`hsl/org.hsl`）：两条留痕移到 main 的 sink 段、写在**真实 journal 节点**上
+  （该节点本就 `mut`）；`sink_assets` 不再接收 `Journal` 参数，只负责落盘与漂移检测；
+  基线路径抽成 `baseline_path_of(model)` 供落盘与留痕共用，避免两处字面量各自漂移。
+- **修复后实测**：`journal.jsonl` = 34 行，含 `asset` 与 `drift`；回归锁三例
+  （`tests/review.test.ts`）：`asset` 条数 = `metrics.assets`、`drift` 存在、
+  journal 条目数不少于 events.jsonl 的镜像数。
+- **教训**：**值语义语言里「传值给日志函数」等于把日志写进黑洞**。凡是「`&mut self`
+  风格的方法 + 按值传参」的组合，都要问一句「这个副本活到写盘那一刻了吗」。
+  更一般的：**同一份事实有两条通路时（metrics 与 journal），只对一条做断言就会漏掉
+  另一条的静默丢失** —— 本项的回归锁要求两路对账（条数相等），而不是各自「大于零」。
+
+## B-15（ORG 修复，v0.4.17）测试套件没有配置默认超时：默认配置下 26 例必然假红
+
+- **现象**：干净检出后按 README 跑 `bun test tests/`，**26 例失败**，失败信息统一为
+  `this test timed out after 5000ms`，但失败用例的断言读数呈现为「一个真断言失败」
+  （`Expected: true, Received: false`），极易被误判成产品缺陷。
+- **根因**：本套件是端到端机制测试，用例体真的 spawn 一次解释器跑完整监督回路，实测
+  单轮 **3–14s**（多轮用例 11–14s），而 `bun test` 的**默认每用例超时是 5000ms**。
+  超时后 bun 会 kill 该用例派生的子进程，于是 `runOrgRun(...).ok` 读到的是「子进程被
+  杀死」的假失败。（`tests/web.test.ts` 的 `beforeAll` 同样中招：它跑一次真实
+  `org import`，超时后依赖 `server`/`base` 的用例连带失败且读数是 `undefined`。）
+- **排查过程中的两个否定结论**（都实测过，记录下来避免后人重走）：
+  1. `bunfig.toml` 的 `[test]` 段**没有 timeout 键** —— 写上 `timeout = 20000` 后
+     6s 用例仍报 5000ms 超时；
+  2. `[test] preload = ["./setup.ts"]` + `setDefaultTimeout(20000)` 只在**单文件**
+     调用时生效：同一条 6s 用例 `bun test tests/zz-probe.test.ts` 通过（6.3s）、
+     `bun test tests/`（多文件 → 并行 worker）仍报 5000ms 超时。把
+     `setDefaultTimeout(120_000)` 写进被所有用例文件 import 的 `tests/helpers.ts`
+     也一样 —— 多文件模式下该设置到不了 worker。环境变量 `BUN_TEST_TIMEOUT` 同样无效。
+- **修复**（唯一可靠的两条路都落上）：
+  1. **逐例显式超时**：5 个纯端到端文件（`keep` / `dynamics` / `fixes` / `import` /
+     `check`，共 56 例）统一改为 `}, 120_000);`，`tests/web.test.ts` 的 `beforeAll`
+     与 8 个真实 spawn 的用例同样显式声明 —— 与 `tests/demo.test.ts` 既有写法一致；
+     每个文件头部注明原因。120s 是**放宽等待上限，不是放宽断言**（断言一字未改）；
+  2. `package.json` 的 `test` 脚本改为 `bun test tests/ --timeout 120000`，
+     README 的命令与断言数（220 例 / 816 expect / 12 文件）同步更新。
+- **修复后实测**：`bun test tests/`（无任何旗标）**220/220 全绿**（12 文件 · 816 expect）。
+  **计数口径注记**：本套件的用例总数不是常量 —— `tests/check.test.ts` 会遍历仓库内
+  全部 `*.hsl` 并**为每个文件动态生成一条用例**。工作区里多留一个含 `*.hsl` 的目录
+  （例如手工跑过 `org run` 的临时工作区、且目录名不在 skip 名单内），总数就 +1。
+  实测踩过这个坑：带一个遗留的 `demo-run-speedtest/` 跑是 221 例 / 817 expect，
+  删掉后是 220 例 / 816 expect —— 因此「N/N 全绿」这类断言数、README 徽标与 CI
+  描述都以**干净检出**为准。
+- **教训**：**端到端测试的超时预算必须写进仓库，且要按用例而非全局声明** ——
+  「本地跑不过」被当成环境问题、超时被记成断言失败，这两件事叠加会让人花大量时间
+  去查一个不存在的产品缺陷。另外：**失败信息里出现 `timed out` 时应与真实断言失败
+  区别对待**，CI 值得为此加一条告警。
+
+## B-16（ORG 修复，v0.4.17）cli/org.ts 缺 import.meta.main 守卫：任何 import 都会执行整个 CLI
+
+- **现象**：`import { parseSelection } from "../cli/org"` 会立即执行整条 CLI —— 打印
+  帮助横幅并 `process.exit(0)`，把导入方（含测试进程）一起终结。表现为「测试文件
+  一行结果都没有、只有一段帮助文本、退出码 0」。
+- **根因**：文件尾是裸的 `process.exit(await main())`。同仓库的 `cli/chat.ts` 早已补上
+  守卫并导出 `chatMain`（其文件尾注明确写着「被 org.ts 动态 import 时 import.meta.main
+  为 false，不会重复执行」，且 `tests/chat.test.ts` 正是靠这一点导入 `parseInput`）——
+  **同一约定在 org.ts 漏了**，属于修复只落了一半。
+- **修复**：`main` 改名导出为 `orgMain`，入口改为 `if (import.meta.main) process.exit(await orgMain())`，
+  与 chat.ts 完全对齐。副作用是 CLI 的纯函数（`parseSelection`）从此可单测。
+- **教训**：**「可被导入的入口文件」需要一条明确约定并被全仓遵守**；修了一处（chat.ts）
+  就要全仓 grep 同类入口（`process.exit(` 顶层调用）确认没有遗漏。

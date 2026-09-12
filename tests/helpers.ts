@@ -1,9 +1,30 @@
 // ============================================================================
 // tests/helpers.ts — 测试基础设施
+// ----------------------------------------------------------------------------
+// 文件顶层副作用：把 bun test 的默认每用例超时从 5000ms 提到 120s。
+//
+// 为什么需要：本套件是端到端机制测试 —— 用例体真的 spawn 一次 dhv-ts 解释器
+// 跑完整监督回路（工厂铸专家 + 过程审查返工 + 固化 + 补丁 + 金丝雀），实测单轮
+// 3–14s（多轮用例 11–14s）。默认 5000ms 下 26 例在普通开发机上必然假红，且失效
+// 形态极易误诊：bun 超时后会 kill 该用例派生的子进程，断言读到的是「子进程非零
+// 退出」，看起来像产品缺陷而不是超时。
+//
+// 为什么放在这里而不是 bunfig.toml / tests/setup.ts：bunfig 的 [test] 段没有
+// timeout 键（实测写上仍按 5000ms 生效），而 [test] preload 只在**单文件**调用时
+// 生效，`bun test tests/` 这种多文件（并行 worker）形态下 preload 不会作用于
+// worker —— 实测同一条 6s 用例单跑通过、全量跑仍报 5000ms 超时。helpers.ts 是
+// 各测试文件在用例注册前就求值的公共模块，副作用落在正确的时机与进程里。
+//
+// 120s 与 demo.test.ts 既有的显式 120_000 取值一致 —— 放宽的是等待上限，
+// 不是断言标准（断言一字未改）。纯单测文件（config/chat/gate/gateway）不 import
+// 本模块也不受影响：它们本来就在毫秒级完成。
 // ============================================================================
 
+import { setDefaultTimeout } from "bun:test";
 import * as path from "node:path";
 import * as fs from "node:fs";
+
+setDefaultTimeout(120_000);
 
 export const ROOT = path.resolve(import.meta.dir, "..");
 export const DHV = path.join(ROOT, "toolchain/dhv-ts/src/main.ts");

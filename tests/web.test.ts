@@ -47,7 +47,11 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     server = startWebServer({ workspace: ws, port: 0, model: "scripted" });
     base = `http://127.0.0.1:${server.port}`;
     expect(server.port).toBeGreaterThan(1024); // 随机高端口，非固定端口
-  });
+    // 端到端超时：本 hook 真实 spawn 一次 org import（check 闸门 → 入库 → git 提交），
+    // 实测可超 5s，而 bun 的默认 hook 超时同样是 5000ms —— 一旦超时，依赖 server/base
+    // 的用例会连带失败，且读数是 undefined 而不是「超时」，极易误诊成产品缺陷。
+    // 全局手段为何不可用见 tests/helpers.ts 的说明。
+  }, 120_000);
 
   afterAll(() => {
     server.stop(true);
@@ -124,7 +128,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     expect(out.durationMs).toBeGreaterThanOrEqual(0);
     expect(out.turn).toBe(1);                       // 新会话首轮
     expect(out.logs).toContain("harness 返回 Ok");  // 引擎收尾行
-  });
+  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   test("ask 之后：会话账本落盘 → sessions 列表与逐轮读取全链路", async () => {
     // 账本文件（org 磁盘事实源，GUI 不另建副本）
@@ -150,7 +154,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     expect(t.answer).toContain("占位剧本应答");
     expect(t.tokens).toBeGreaterThan(0);
     expect(t.ctx_tokens).toBeGreaterThan(0);
-  });
+  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   test("POST /api/ask 第二轮：同会话 ctx 单调增长（会话史织入提示词）", async () => {
     const r = await fetch(base + "/api/ask", {
@@ -167,7 +171,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     };
     expect(detail.turns.length).toBe(2);
     expect(detail.turns[1]!.ctx_tokens).toBeGreaterThan(detail.turns[0]!.ctx_tokens);
-  });
+  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   // ---- SSE 流式端点（issue #11）----
 
@@ -237,7 +241,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     expect(events.has("error")).toBe(false);
     // 账本落盘（磁盘事实源）
     expect(exists(path.join(ws, "runtime/sessions/poet/web-sse1.jsonl"))).toBe(true);
-  });
+  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   test("ask-stream 第二轮：同会话 turn=2 + ctx 单调增长（与 JSON 端点同语义）", async () => {
     const r = await fetch(base + "/api/ask-stream", {
@@ -256,7 +260,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     };
     expect(detail.turns.length).toBe(2);
     expect(detail.turns[1]!.ctx_tokens).toBeGreaterThan(detail.turns[0]!.ctx_tokens);
-  });
+  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   test("ask-stream 防呆：必填缺失/坏 JSON → 400 JSON（流建立前拒绝）", async () => {
     const r1 = await fetch(base + "/api/ask-stream", {
@@ -364,7 +368,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     // 账本事实源：A 落盘、B 未落（取消的轮次从未运行）
     expect(exists(path.join(ws, "runtime/sessions/poet/web-queue-a.jsonl"))).toBe(true);
     expect(exists(path.join(ws, "runtime/sessions/poet/web-queue-b.jsonl"))).toBe(false);
-  });
+  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   test("GUI 单页含 SSE 消费实现（渐进渲染要素齐备）", async () => {
     const html = await (await fetch(base + "/")).text();
@@ -454,7 +458,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     // 再删 → 404（幂等防呆）
     const del2 = await fetch(base + "/api/session/poet/web-mgmt-renamed", { method: "DELETE" });
     expect(del2.status).toBe(404);
-  });
+  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   test("PATCH 防呆：坏 JSON/非法名/目标已存在 → 400/400/409", async () => {
     const bad = await fetch(base + "/api/session/poet/web-t1", {
@@ -559,7 +563,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     const logLines = git.stdout.toString().split("\n");
     const curation = logLines.filter((l) => l.includes("(user curation)"));
     expect(curation.length).toBeGreaterThanOrEqual(2);
-  });
+  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   test("keep/drop 防呆：非法名 400 · 不存在专家 404", async () => {
     const bad = await fetch(base + "/api/keep", {

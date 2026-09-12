@@ -283,6 +283,206 @@ export function keepAllCandidates(ws: string): string[] {
   return kept;
 }
 
+// ---------- 运行范围复核：本次运行碰过哪些 harness（org review / Web 候选面） ----------
+// 工具库治理的第四动作（前三：import / keep / drop）。keep 与 drop 回答的是
+// 「库里某个资产要不要留」，review 回答的是「这一次运行产出的东西里，哪些值得
+// 沉淀」—— 选取范围由运行产物本身界定，不靠目录时间戳猜测，判据全在事件流：
+//   journal:mint-register  "name@version eval=N"     → 本次现场铸出（新资产）
+//   journal:asset          "patch name :: note"      → 本次补丁合入（版本演进）
+//   journal:dispatch       "task#N channel=reuse X"  → 本次复用命中（成本结构证据）
+// 语义边界：review 只翻转 retained，不删任何文件。未勾选的候选保持
+// retained=false（B 路径自动复用不命中），资产源码、fixture、评分卡全部留在库里
+// ——「不保留」是可逆的降权，不是删除。drop 的语义同理（退出自动复用，
+// 显式寻址 ?专家 与 C 路径记忆化派单仍可用）。
+
+export interface RunMint {
+  name: string;
+  version: string;
+  eval: string; // mint-register 携带的 fixture 验收分（"1" / "0.67" …）
+}
+
+export interface RunPatch {
+  name: string;
+  note: string; // 补丁 remedy 摘要
+}
+
+/** 一次运行的 harness 接触面（事件溯源得出）。 */
+export interface RunScope {
+  dir: string;
+  label: string;
+  task: string;
+  model: string;
+  ok: boolean;
+  minted: RunMint[];
+  patched: RunPatch[];
+  reused: string[];
+}
+
+/** 复核表里的一行（运行接触面 ∩ 注册表元数据）。 */
+export interface ReviewCandidate {
+  name: string;
+  version: string;
+  source: string;
+  retained: boolean;
+  description: string;
+  capabilities: string[];
+  eval_score: number;
+  pass_rate: number;
+  uses: number;
+  /** 本次运行的接触面：minted（铸出）/ patched（补丁）/ reused（复用命中）。 */
+  origin: string[];
+  /** 本次验收分（仅 minted 有）。 */
+  evalInRun: string;
+  /** 本次补丁说明（仅 patched 有）。 */
+  patchNote: string;
+}
+
+export interface ReviewPlan {
+  scope: RunScope | null;
+  candidates: ReviewCandidate[];
+  /** 待决策集：本次铸出/合入且尚未保留的候选（review 的选取对象）。 */
+  pending: ReviewCandidate[];
+  /** 已在库中保留、本次仅被复用的存量资产（只作上下文展示，不参与选取）。 */
+  settled: ReviewCandidate[];
+}
+
+export interface RunDirInfo {
+  dir: string;
+  name: string;
+  mtimeMs: number;
+}
+
+/** 工作区内全部 run 产物目录，最新在前（按目录 mtime）。 */
+export function listRunDirs(ws: string): RunDirInfo[] {
+  const out: RunDirInfo[] = [];
+  for (const name of listOutDirs(ws)) {
+    const dir = path.join(ws, name);
+    let mtimeMs = 0;
+    try {
+      mtimeMs = fs.statSync(dir).mtimeMs;
+    } catch { /* 目录已消失：忽略 */ }
+    out.push({ dir, name, mtimeMs });
+  }
+  return out.sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+/** 最新 run 目录（org review 的字面缺省 —— 「最近一次运行」）。 */
+export function latestRunDir(ws: string): string | null {
+  return listRunDirs(ws)[0]?.dir ?? null;
+}
+
+/**
+ * 最新「有 harness 产出」的 run 目录（org review 的实用缺省）。
+ * 为什么不用字面最新：一次 demo 会连跑 out-a…out-c 再跑 out-direct /
+ * out-handoff，最后落盘的往往是直连或移交（不铸专家、不打补丁）——按字面
+ * 最新选范围会永远命中最不相关的那次。这里从新到旧取第一个有铸出/补丁的
+ * 运行；全都没有时回落字面最新（由调用方如实展示范围）。
+ */
+export function latestHarnessRunDir(ws: string): string | null {
+  const dirs = listRunDirs(ws);
+  for (const d of dirs) {
+    const scope = runScopeOf(d.dir);
+    if (scope.minted.length > 0 || scope.patched.length > 0) return d.dir;
+  }
+  return dirs[0]?.dir ?? null;
+}
+
+/** 解析一次运行的 harness 接触面。产物缺失时返回全空（不抛错）。 */
+export function runScopeOf(dir: string): RunScope {
+  const events = readEventStream(
+    path.join(dir, "events.jsonl"),
+    path.join(dir, "journal.jsonl"),
+    path.join(dir, "llm-stream.jsonl"),
+  );
+  const minted: RunMint[] = [];
+  const patched: RunPatch[] = [];
+  const reused: string[] = [];
+  for (const ev of events) {
+    if (ev.kind !== "journal") continue;
+    if (ev.action === "mint-register") {
+      const m = /^([^@\s]+)@(\S+?)(?:\s+eval=(\S+))?\s*$/.exec(ev.detail);
+      if (m) minted.push({ name: m[1]!, version: m[2]!, eval: m[3] ?? "" });
+    } else if (ev.action === "asset" && ev.detail.startsWith("patch ")) {
+      const m = /^patch\s+([^@\s:]+)\s*(?:::\s*)?(.*)$/.exec(ev.detail);
+      if (m) patched.push({ name: m[1]!, note: (m[2] ?? "").trim() });
+    } else if (ev.action === "dispatch" && ev.detail.includes("channel=reuse ")) {
+      const name = ev.detail.split("channel=reuse ")[1]?.trim();
+      if (name && !reused.includes(name)) reused.push(name);
+    }
+  }
+  const runJson = readRunJson(dir);
+  return {
+    dir,
+    label: path.basename(dir),
+    task: runJson?.task ?? "",
+    model: runJson?.model ?? "",
+    ok: runJson?.ok === true,
+    minted,
+    patched,
+    reused,
+  };
+}
+
+/**
+ * 组装复核表：runDir（缺省 = 最新 run）的接触面与注册表元数据 join。
+ * 只列出注册表里仍在册的名字 —— 历史运行产物指向已删除专家时静默跳过。
+ */
+export function reviewCandidates(ws: string, runDir?: string | null): ReviewPlan {
+  const dir = runDir ?? latestRunDir(ws);
+  if (!dir || !fs.existsSync(dir)) return { scope: null, candidates: [], pending: [], settled: [] };
+  const scope = runScopeOf(dir);
+  const byName = new Map(loadRegistryIndex(ws).map((m) => [m.name, m]));
+  const origin = new Map<string, Set<string>>();
+  const touch = (name: string, kind: string): void => {
+    const set = origin.get(name) ?? new Set<string>();
+    set.add(kind);
+    origin.set(name, set);
+  };
+  for (const m of scope.minted) touch(m.name, "minted");
+  for (const p of scope.patched) touch(p.name, "patched");
+  for (const r of scope.reused) touch(r, "reused");
+
+  const candidates: ReviewCandidate[] = [];
+  for (const [name, kinds] of origin) {
+    const m = byName.get(name);
+    if (!m) continue;
+    const evalInRun = scope.minted.find((x) => x.name === name)?.eval ?? "";
+    candidates.push({
+      name,
+      version: m.version,
+      source: m.source,
+      retained: m.retained !== false,
+      description: String((m as Record<string, unknown>).description ?? ""),
+      capabilities: Array.isArray(m.capabilities) ? (m.capabilities as string[]) : [],
+      eval_score: typeof m.eval_score === "number" ? m.eval_score : 0,
+      pass_rate: typeof m.pass_rate === "number" ? m.pass_rate : 0,
+      uses: typeof m.uses === "number" ? m.uses : 0,
+      origin: [...kinds],
+      evalInRun,
+      patchNote: scope.patched.find((x) => x.name === name)?.note ?? "",
+    });
+  }
+  // 本次铸出/合入的排前面（有选取价值），仅被复用的存量排后面
+  const rank = (c: ReviewCandidate): number =>
+    c.origin.includes("minted") ? 0 : c.origin.includes("patched") ? 1 : 2;
+  candidates.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+
+  const isDecision = (c: ReviewCandidate): boolean =>
+    c.origin.some((o) => o === "minted" || o === "patched") && !c.retained;
+  const pending = candidates.filter(isDecision);
+  const settled = candidates.filter((c) => !isDecision(c));
+  return { scope, candidates, pending, settled };
+}
+
+/**
+ * 应用复核选取：keep 转正选中项（一次 git 提交留痕）。
+ * 未勾选项不动 —— 它们本来就是 retained=false 的候选，无需额外动作。
+ */
+export function applyReview(ws: string, keep: string[]): { kept: string[]; missing: string[] } {
+  if (keep.length === 0) return { kept: [], missing: [] };
+  return setRetained(ws, keep, true);
+}
+
 // ---------- 工具库治理：导入用户自己的 harness（org import / TUI :import） ----------
 // 语义：导入 = 用户在场交付自己的 .hsl harness 进工具库。与 factory 产物不同，
 // 导入是用户的显式动作 —— source="import" 且 retained=true（B 路径立即可用，

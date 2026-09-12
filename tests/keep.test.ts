@@ -8,6 +8,11 @@
 //   4. 反悔面：drop 后 B 路径再次失联
 //   5. 防呆面：未知名报错、无参用法、dist/demo 只读守卫
 // ============================================================================
+// 端到端用例超时：本文件每个用例都真实 spawn 一次解释器跑完整监督回路（实测单轮
+// 3–14s），而 bun 的默认每用例超时是 5000ms。全局手段都不可用（bunfig 的 [test]
+// 段无 timeout 键；[test] preload 与 setDefaultTimeout 在多文件并行 worker 模式下
+// 都不生效 —— 详见 tests/helpers.ts 的说明），故逐例显式声明 120_000，
+// 与 tests/demo.test.ts 既有写法一致。放宽的是等待上限，不是断言标准。
 
 import { describe, test, expect } from "bun:test";
 import * as path from "node:path";
@@ -50,7 +55,7 @@ describe("工具库治理：keep / drop 数据面", () => {
     expect(readManifest(ws, "record-validator").retained).toBe(false);
     // manual 存量资产不受影响
     expect(retainedOf(ws, "notice-parser")).toBe(true);
-  });
+  }, 120_000);
 
   test("keep 翻转 retained + git 留痕（user curation 与 mint/patch 同链）", () => {
     const ws = mintedWorkspace("keep-flip");
@@ -63,7 +68,7 @@ describe("工具库治理：keep / drop 数据面", () => {
     // keep 不改变版本与 provenance
     const m = readManifest(ws, "record-validator");
     expect(m.version).toBe("1.0.0");
-  });
+  }, 120_000);
 
   test("drop 取消保留（B 路径失联原料）+ git 留痕", () => {
     const ws = mintedWorkspace("keep-drop");
@@ -73,14 +78,14 @@ describe("工具库治理：keep / drop 数据面", () => {
     expect(retainedOf(ws, "record-validator")).toBe(false);
     const log = gitLog(ws);
     expect(log.some((l) => l.includes("drop record-validator@1.0.0") && l.includes("(user curation)"))).toBe(true);
-  });
+  }, 120_000);
 
   test("未知名报错（退出码 1 + 明确反馈）", () => {
     const ws = mintedWorkspace("keep-missing");
     const r = runOrg(["keep", "no-such-expert", "--workspace", ws]);
     expect(r.ok).toBe(false);
     expect(r.stderr).toContain("未在注册表找到");
-  });
+  }, 120_000);
 
   test("无参用法提示 + 注册表清单（○/★ 可见）", () => {
     const ws = mintedWorkspace("keep-usage");
@@ -88,13 +93,13 @@ describe("工具库治理：keep / drop 数据面", () => {
     expect(r.ok).toBe(false);
     expect(r.stderr).toContain("用法：org keep");
     expect(r.stderr).toContain("record-validator");
-  });
+  }, 120_000);
 
   test("dist/demo 入库快照只读（写入拒绝）", () => {
     const r = runOrg(["keep", "record-validator", "--workspace", path.join(ROOT, "dist", "demo")]);
     expect(r.ok).toBe(false);
     expect(r.stderr + r.stdout).toContain("只读");
-  });
+  }, 120_000);
 });
 
 describe("工具库治理：keep / drop 路由面", () => {
@@ -114,7 +119,7 @@ describe("工具库治理：keep / drop 路由面", () => {
     // 记忆化派单仍然执行（磁盘车道）
     const dispatches = journalEvents(events, "dispatch").filter((d) => String(d.detail).includes("task#3"));
     expect(dispatches.length).toBeGreaterThanOrEqual(1);
-  });
+  }, 120_000);
 
   test("keep 转正后 → B 路径恢复命中（channel=reuse）", () => {
     const ws = mintedWorkspace("keep-route-b");
@@ -128,7 +133,7 @@ describe("工具库治理：keep / drop 路由面", () => {
     expect(routes.some((d) => String(d.detail).includes("B:reuse"))).toBe(true);
     const dispatches = journalEvents(events, "dispatch").filter((d) => String(d.detail).includes("task#3"));
     expect(dispatches.some((d) => String(d.detail).includes("channel=reuse record-validator"))).toBe(true);
-  });
+  }, 120_000);
 
   test("drop 反悔 → B 路径再次失联（路由回落 C 记忆化）", () => {
     const ws = mintedWorkspace("keep-route-drop");
@@ -142,7 +147,7 @@ describe("工具库治理：keep / drop 路由面", () => {
     const routes = journalEvents(events, "route").filter((d) => String(d.detail).includes("task#3"));
     expect(routes.some((d) => String(d.detail).includes("C:generate"))).toBe(true);
     expect(routes.some((d) => String(d.detail).includes("B:reuse"))).toBe(false);
-  });
+  }, 120_000);
 });
 
 describe("工具库治理：注册表序列化卫生（真实模型文本防损坏）", () => {
@@ -163,5 +168,5 @@ describe("工具库治理：注册表序列化卫生（真实模型文本防损�
     expect(round.length).toBe(1);
     expect(round[0]!.description).toBe(dirty);
     expect(round[0]!.retained).toBe(true);
-  });
+  }, 120_000);
 });

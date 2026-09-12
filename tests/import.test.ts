@@ -13,6 +13,11 @@
 //   5. 上下文窗口（Codex 风格）：ask 每轮打印 [ctx] 计量条；会话账本记
 //      ctx_tokens；direct_ctx 事件上总线；status 汇总显示
 // ============================================================================
+// 端到端用例超时：本文件每个用例都真实 spawn 一次解释器跑完整监督回路（实测单轮
+// 3–14s），而 bun 的默认每用例超时是 5000ms。全局手段都不可用（bunfig 的 [test]
+// 段无 timeout 键；[test] preload 与 setDefaultTimeout 在多文件并行 worker 模式下
+// 都不生效 —— 详见 tests/helpers.ts 的说明），故逐例显式声明 120_000，
+// 与 tests/demo.test.ts 既有写法一致。放宽的是等待上限，不是断言标准。
 
 import { describe, test, expect } from "bun:test";
 import * as path from "node:path";
@@ -70,7 +75,7 @@ describe("工具库治理：import 数据面", () => {
     expect(e.entry).toBe("registry/harnesses/my-calc.hsl");
     expect(readJson(path.join(ws, "registry/my-calc.json")).name).toBe("my-calc");
     expect(gitLog(ws).some((l) => l.includes("import my-calc@0.1.0 (user harness)"))).toBe(true);
-  });
+  }, 120_000);
 
   test("元数据缺省提取：/// 文档注释 → 描述；#[capability] → 能力", () => {
     const ws = makeWorkspace("import-meta");
@@ -80,7 +85,7 @@ describe("工具库治理：import 数据面", () => {
     const e = indexEntry(ws, "meta-probe")!;
     expect(String(e.description)).toContain("阶乘演示");
     expect(e.capabilities).toEqual(["math"]);
-  });
+  }, 120_000);
 
   test("显式覆盖：--name / --description / --capability 优先于缺省提取", () => {
     const ws = makeWorkspace("import-override");
@@ -96,7 +101,7 @@ describe("工具库治理：import 数据面", () => {
     const e = indexEntry(ws, "custom-name")!;
     expect(e.description).toBe("自定义描述");
     expect(e.capabilities).toEqual(["alpha", "beta"]);
-  });
+  }, 120_000);
 
   test("导入后 keep/drop 照常可用（import 资产参与工具库治理）", () => {
     const ws = makeWorkspace("import-govern");
@@ -106,7 +111,7 @@ describe("工具库治理：import 数据面", () => {
     expect(indexEntry(ws, "gov-probe")!.retained).toBe(false);
     expect(runOrg(["keep", "gov-probe", "--workspace", ws]).ok).toBe(true);
     expect(indexEntry(ws, "gov-probe")!.retained).toBe(true);
-  });
+  }, 120_000);
 });
 
 describe("工具库治理：import 防呆面", () => {
@@ -118,7 +123,7 @@ describe("工具库治理：import 防呆面", () => {
     expect(r.stderr).toContain("dhv check 未通过");
     expect(exists(path.join(ws, "registry/harnesses/broken.hsl"))).toBe(false);
     expect(indexEntry(ws, "broken")).toBeUndefined();
-  });
+  }, 120_000);
 
   test("重名拒绝：注册表已有同名专家（改名或先 drop）", () => {
     const ws = makeWorkspace("import-dup");
@@ -127,7 +132,7 @@ describe("工具库治理：import 防呆面", () => {
     const r2 = runOrg(["import", src, "--workspace", ws]);
     expect(r2.ok).toBe(false);
     expect(r2.stderr).toContain("同名专家");
-  });
+  }, 120_000);
 
   test("非 .hsl 文件拒绝", () => {
     const ws = makeWorkspace("import-ext");
@@ -135,7 +140,7 @@ describe("工具库治理：import 防呆面", () => {
     const r = runOrg(["import", src, "--workspace", ws]);
     expect(r.ok).toBe(false);
     expect(r.stderr).toContain("只接受 .hsl 文件");
-  });
+  }, 120_000);
 
   test("非法名拒绝（--name 大写/下划线；stem 数字开头）", () => {
     const ws = makeWorkspace("import-name");
@@ -147,7 +152,7 @@ describe("工具库治理：import 防呆面", () => {
     const r2 = runOrg(["import", src2, "--workspace", ws]);
     expect(r2.ok).toBe(false);
     expect(r2.stderr).toContain("名字不合法");
-  });
+  }, 120_000);
 });
 
 describe("上下文窗口计量（Codex 风格）", () => {
@@ -159,7 +164,7 @@ describe("上下文窗口计量（Codex 风格）", () => {
     expect(r.stdout).toContain("[ctx] 窗口占用");
     expect(r.stdout).toContain("131.0k");   // 窗口规模显示
     expect(r.stdout).toContain("▓");        // meter 条
-  });
+  }, 120_000);
 
   test("多轮会话：ctx 随轮次单调增长（会话史织入提示词）", () => {
     const ws = makeWorkspace("ctx-grow");
@@ -175,7 +180,7 @@ describe("上下文窗口计量（Codex 风格）", () => {
     expect(ctxLines.length).toBe(2);
     const nums = ctxLines.map((l) => Number(/(\d+)\//.exec(l)?.[1] ?? 0));
     expect(nums[1]!).toBeGreaterThan(nums[0]!);   // 第 2 轮 > 第 1 轮
-  });
+  }, 120_000);
 
   test("会话账本记录 ctx_tokens 字段（磁盘持久，跨调用可读）", () => {
     const ws = makeWorkspace("ctx-ledger");
@@ -184,7 +189,7 @@ describe("上下文窗口计量（Codex 风格）", () => {
     const row = JSON.parse(ledger.trim().split("\n")[0]!) as Record<string, unknown>;
     expect(typeof row.ctx_tokens).toBe("number");
     expect(Number(row.ctx_tokens)).toBeGreaterThan(0);
-  });
+  }, 120_000);
 
   test("direct_ctx 事件上总线（知情权：TUI / replay 可消费）", () => {
     const ws = makeWorkspace("ctx-event");
@@ -195,7 +200,7 @@ describe("上下文窗口计量（Codex 风格）", () => {
       .find((e) => e.name === "journal" && e.data?.name === "direct_ctx");
     expect(hit).toBeDefined();
     expect(String(hit?.data?.detail)).toMatch(/notice-parser\/default turn=1 ctx=\d+ window=131072/);
-  });
+  }, 120_000);
 
   test("org status 汇总上下文窗口占用（每会话一行 meter）", () => {
     const ws = makeWorkspace("ctx-status");
@@ -205,7 +210,7 @@ describe("上下文窗口计量（Codex 风格）", () => {
     expect(r.stdout).toContain("上下文窗口占用");
     expect(r.stdout).toContain("notice-parser/default 1 轮");
     expect(r.stdout).toMatch(/ctx ▓░+/);
-  });
+  }, 120_000);
 });
 
 describe("剧本联动（导入即能用：占位剧本 + 自动发现，v0.4.5）", () => {
@@ -220,7 +225,7 @@ describe("剧本联动（导入即能用：占位剧本 + 自动发现，v0.4.5�
     expect(tracks).toContain("direct:fixgen-probe");
     expect(tracks).toContain("handoff:fixgen-probe");
     expect((fx.tracks as Record<string, string[]>)["direct:fixgen-probe"]!.length).toBeGreaterThanOrEqual(3);
-  });
+  }, 120_000);
 
   test("零参数 ask：不传 --fixture 自动发现占位剧本（占位应答 + 记账 + ctx meter）", () => {
     const ws = makeWorkspace("fixask");
@@ -234,7 +239,7 @@ describe("剧本联动（导入即能用：占位剧本 + 自动发现，v0.4.5�
     expect(r.stdout).toContain("[ctx] 窗口占用");
     // 会话账本落盘（零摩擦链路的完整闭环）
     expect(exists(path.join(ws, "runtime/sessions/fixask-probe/default.jsonl"))).toBe(true);
-  });
+  }, 120_000);
 
   test("handoff 同规则：自动发现 handoff:<name> 占位轨道", () => {
     const ws = makeWorkspace("fixhand");
@@ -244,7 +249,7 @@ describe("剧本联动（导入即能用：占位剧本 + 自动发现，v0.4.5�
     if (!r.ok) console.error(r.stdout + r.stderr);
     expect(r.ok).toBe(true);
     expect(r.stdout).toContain("占位剧本应答");
-  });
+  }, 120_000);
 
   test("显式 --fixture 优先于自动发现（fixtureExplicit 语义）", () => {
     const ws = makeWorkspace("fixexplicit");
@@ -254,7 +259,7 @@ describe("剧本联动（导入即能用：占位剧本 + 自动发现，v0.4.5�
     const r = runOrg(["ask", "fixexp-probe", "q", "--workspace", ws, "--fixture", path.join(ROOT, "fixtures/run-notices.json")]);
     expect(r.ok).toBe(false);
     expect((r.stdout + r.stderr)).not.toContain("使用导入剧本");
-  });
+  }, 120_000);
 });
 
 // ============================================================================
@@ -350,7 +355,7 @@ describe("B 路径执行面（导入 harness 被真实派单执行，v0.4.6）",
     const records = JSON.parse(parseOut) as Array<Record<string, unknown>>;
     expect(records.length).toBeGreaterThanOrEqual(4);
     expect(records.every((x) => typeof x.title === "string" && x.title.length > 0)).toBe(true);
-  });
+  }, 120_000);
 
   test("工单序列化卫生：current-spec.json 始终合法 JSON（payload 转义嵌入）", () => {
     const ws = makeWorkspace("bpath-spec-hygiene");
@@ -363,7 +368,7 @@ describe("B 路径执行面（导入 harness 被真实派单执行，v0.4.6）",
     const spec = readJson(path.join(ws, "factory/current-spec.json"));
     expect(typeof spec.payload).toBe("string");
     expect(() => JSON.parse(String(spec.payload))).not.toThrow();
-  });
+  }, 120_000);
 
   test("uses 计数：B 路径派单一次 → 注册表 uses+1（治理账本跟进）", () => {
     const ws = makeWorkspace("bpath-uses");
@@ -373,5 +378,5 @@ describe("B 路径执行面（导入 harness 被真实派单执行，v0.4.6）",
     const r = runOrgRun(ws, path.join(ws, "out-bpath"));
     expect(r.ok).toBe(true);
     expect(Number(indexEntry(ws, "bpath-parse")!.uses)).toBe(1);
-  });
+  }, 120_000);
 });

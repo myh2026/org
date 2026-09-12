@@ -5,8 +5,8 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.4.15_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
-[![Tests](https://img.shields.io/badge/tests-205%2F205_passing-brightgreen.svg)](#-测试与验证状态)
+[![Status](https://img.shields.io/badge/status-v0.4.17_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Tests](https://img.shields.io/badge/tests-220%2F220_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.61-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
 [![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-三平台单二进制分发)
@@ -19,7 +19,7 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **v0.4.16 当前状态**：可运行实现，**205/205 机制级测试全绿**。本版新增**用户模型/API 持久配置（`org config`：`~/.org/config.json` + 六服务商预设 + 来源归因 + 连通测试 + `default_lane` 缺省车道）**；上一版 v0.4.15 落地**交互式聊天 REPL（`org chat`：多轮对话 · Token 流式输出 · 思考指示器 · 斜杠命令 `/model` `/expert` `/sessions` `/compact` …）**与**流式基础设施三端贯通（宿主 SSE 逐块解析 → `llm-stream.jsonl` append-only 增量落盘 → 引擎泵 150ms 尾随 → `llm_delta` 事件 → CLI 逐 token 渲染 / Web SSE `delta` 事件 / TUI 优雅忽略）**；此前批次已落地：**Web GUI 排队轮预取消（AskGate 票据化）**、**版本单一来源（`lib/version.ts`）**、**DeepSeek 官方 API 直连（网关三件套 + 思考量控制 + 429 退避）**、**工厂有界再生成 + 优雅降级**、**B 复用语义地板（`REUSE_AFFINITY_RATIO=0.3`）**、**工具库治理三动作（`org import` / `org keep` / `org drop`，CLI·TUI·Web 三端同权）**、**Web GUI 工程化重设计（Codex 风终端美学 + Markdown 渲染 + SSE 流式 + 排队取消）**、**OpenCode 级 TUI 驾驶舱**、**Windows/macOS/Linux 五目标单二进制分发**。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因、固化管线（精确匹配档 + 自动降级）全部落地。全叙事可复现（`org demo`，约 2.3s，model_calls 5→1→0）。
+> **v0.4.17 当前状态**：可运行实现，**220/220 机制级测试全绿**。本版新增**运行范围复核（`org review`：按「本次运行产出了什么」选取哪些 harness 沉淀进工具库——范围由运行产物事件溯源界定，CLI 交互选取 / TUI `:review` / Web「待复核 N」勾选面板三端同权；选取只翻转 retained、不删文件，未勾选者保持候选态）**，并修复四个实测缺陷（工厂闸门隐式依赖 `DHV_TS` 导致按指南直跑时静默降级 · 资产沉淀证据从 journal 丢失 · 测试套件无默认超时配置导致 26 例假红 · `cli/org.ts` 缺 `import.meta.main` 守卫导致不可被导入，详见 BUGFIXES.md B-13…B-16）；上一版 v0.4.16 落地**用户模型/API 持久配置（`org config`：`~/.org/config.json` + 六服务商预设 + 来源归因 + 连通测试 + `default_lane` 缺省车道）**；上一版 v0.4.15 落地**交互式聊天 REPL（`org chat`：多轮对话 · Token 流式输出 · 思考指示器 · 斜杠命令 `/model` `/expert` `/sessions` `/compact` …）**与**流式基础设施三端贯通（宿主 SSE 逐块解析 → `llm-stream.jsonl` append-only 增量落盘 → 引擎泵 150ms 尾随 → `llm_delta` 事件 → CLI 逐 token 渲染 / Web SSE `delta` 事件 / TUI 优雅忽略）**；此前批次已落地：**Web GUI 排队轮预取消（AskGate 票据化）**、**版本单一来源（`lib/version.ts`）**、**DeepSeek 官方 API 直连（网关三件套 + 思考量控制 + 429 退避）**、**工厂有界再生成 + 优雅降级**、**B 复用语义地板（`REUSE_AFFINITY_RATIO=0.3`）**、**工具库治理三动作（`org import` / `org keep` / `org drop`，CLI·TUI·Web 三端同权）**、**Web GUI 工程化重设计（Codex 风终端美学 + Markdown 渲染 + SSE 流式 + 排队取消）**、**OpenCode 级 TUI 驾驶舱**、**Windows/macOS/Linux 五目标单二进制分发**。信封契约、主控监督回路、工厂闸门（真实 `dhv check` + fixture 验收）、池化（轻档）、多轮直连 + 暖移交、三档补丁、影子晋升（金丝雀双跑）、静默更新检测、N 版本冗余、评分卡归因、固化管线（精确匹配档 + 自动降级）全部落地。全叙事可复现（`org demo`，约 2.3s，model_calls 5→1→0）。
 
 ## 📑 目录
 
@@ -195,11 +195,12 @@ Accept（收货） │ Revise{意见}（返工，计一次） │ Reject{理由}
 | `stats` | 使用次数、裁决通过率、生成来源（工厂 / 人工 / 导入） |
 | `provenance` | 补丁历史：每次变更的触发原因（对应哪次审查反馈） |
 
-**工具库治理三动作（v0.4.4，用户主权）**：
+**工具库治理四动作（v0.4.4 起，v0.4.17 补齐第四动作，用户主权）**：
 
 - **`org import <file.hsl>`（导入你自己的 harness）**：check 闸门（坏 harness 拒绝入库）→ 复制入 `registry/harnesses/<name>.hsl` → 注册 `source=import · retained=true`（导入即保留，B 路径自动复用立即可用）→ git 留痕（`import <name>@0.1.0 (user harness)`）。元数据自动提取：描述取文件首个 `///` 文档注释，能力取 `#[capability(…)]` 注解扫描；`--name / --description / --capability` 可显式覆盖。TUI 同构命令 `:import <file.hsl>`。
 - **`org keep`（选取保留）**：工厂产出的新专家默认是**候选**（`retained=false`）——注册在库但不参与 B 路径自动复用；用户选取保留后转正。选取动作进 git 账本（`(user curation)` 提交，与 mint / patch / import 同链）。
 - **`org drop`（取消保留）**：再次失联（显式寻址与 C 路径记忆化派单仍可用）。
+- **`org review`（运行范围复核，v0.4.17）**：前三者按**名字**治理库里已有资产，review 按**运行范围**回答「这一次运行产出的东西里，哪些值得沉淀」——范围判据全部来自事件流（`journal:mint-register` 本次铸出 / `journal:asset` 的 `patch <name> :: note` 本次补丁合入 / `journal:dispatch` 的 `channel=reuse <name>` 本次复用命中），不靠目录时间戳猜测；缺省范围取**最近一次有 harness 产出的运行**（一次 demo 会连跑 out-a…out-c 再跑 out-direct/out-handoff，按字面最新选会永远命中最不相关那次）。交互选取：编号逗号分隔 / `a` 全选 / `n` 全不选 / 回车全选 / `q` 取消；非交互通道 `--keep a,b` / `--all` / `--none` / `--dry-run`，且 **stdin 非 TTY 且未给选取时不猜**（退出码 2 + 指路）。**选取只翻转 retained、不删任何文件** —— 未勾选候选保持 `retained=false`（B 路径自动复用不命中），源码 / fixture / 评分卡全部留在库里；「不保留」是可逆的降权而不是删除。`org demo` 的 K 相位在 TTY 下改为**真交互**（人在场就真的问用户选哪几个候选），非交互保持 scripted 全选。
 
 「哪些 harness 值得留下来」是用户的决策权，不是系统的默认行为——导入、选取、反悔全部 git 留痕，构成资产层的增长率账本。专家标识三态：**★ 保留（retained）· ○ 工厂候选（minted）· ◆ 用户导入（import）**，CLI `org status` / chat `/expert` / TUI 专家栏 / Web GUI 专家卡四处理解同一语义。
 
@@ -351,7 +352,7 @@ flowchart TB
 3. 路由：检索子任务琐碎且强依赖主控上下文 → **A 内联**；解析子任务在专家库命中 → **B 复用** notice-parser；校验子任务无匹配专家 → **C 现场生成**，生成物通过真实 `dhv check`（结构铁律）与 fixture 验收（行为闸门）后注册入池；
 4. 派单契约先行：每份工单写明交付物规格、验收标准、预算水位与返工上限；
 5. 主控过程审查发现校验专家覆盖不足，四态裁决为 `Revise`——在早期拦截，而不是汇总后发现全量返工；
-6. 任务结束：**新专家以「候选」身份沉淀（retained=false）**；**用户选取保留**（`org keep`，演示中 scripted 自动选取）→ 候选转正进 git 账本；验收样本、固化 memo 一并沉淀（git 注册表提交留痕）；
+6. 任务结束：**新专家以「候选」身份沉淀（retained=false）**；**用户选取保留**（`org review` 逐项复核 / `org keep` 直接选取；`org demo` 的 K 相位在交互终端下会真的停下来问用户选哪几个，非交互则 scripted 全选）→ 候选转正进 git 账本；验收样本、固化 memo 一并沉淀（git 注册表提交留痕）；
 7. **第二次同类任务**（run B）：校验专家（已转正）直接复用（零工厂成本）；解析专家的日期归一化判定节点持续命中 memo（模型调用 5 → 1）；「覆盖不足」审查意见复发两次 → 自动升级为**补丁提案**，经 check + smoke 闸门合入 record-validator@1.0.1（git 留痕）；
 8. **第三次同类任务**（run C）：判定节点 5/5 全命中（**零模型调用**）；补丁版专家首验即收（**零返工**）——蓝绿发布生效，系统单位成本随使用递减。
 
@@ -560,7 +561,7 @@ notice-parser⟩ 金丝雀发布是先把新版本……          （逐 token �
 ```
 
 - **事件卡片流**：任务分解（A/B/C/D 路由徽标四色）· 工厂五步 stepper · 四态裁决徽标（Accept 绿 / Revise 琥珀 / Reject 红 / Escalate 紫）· 固化（❄冻结 ⚡命中）· 补丁（版本 bump + git sha + 金丝雀确认）· 用户选取（★ 保留 / ○ 候选）· 直连 · 完成卡（成本衰减 5→1→0）· 系统卡；
-- **输入协议**：任务回车派单（团队模式）· `?专家 问题?` 直连 · `:demo` 全叙事演示 · `:keep <name>` / `:drop <name>` / `:import <file.hsl>` 工具库治理（keep/drop 无参作用于专家栏选中项；import 为 check 闸门 → 入库即保留可复用）· `:replay out-…` 历史会话秒开重演（不重跑引擎）· `:filter 任务|分解|工厂|裁决|直连|汇总|动态` 事件流过滤（视图偏好，不随 run 重置）· `:score :theme :status :clear :help :quit`；
+- **输入协议**：任务回车派单（团队模式）· `?专家 问题?` 直连 · `:demo` 全叙事演示 · `:keep <name>` / `:drop <name>` / `:import <file.hsl>` / `:review [all]` 工具库治理（keep/drop 无参作用于专家栏选中项；import 为 check 闸门 → 入库即保留可复用；review 汇总本次运行待决策候选，`:review all` 一键沉淀，逐项选取走 CLI/Web——三端同一套 `reviewCandidates`/`applyReview`）· `:replay out-…` 历史会话秒开重演（不重跑引擎）· `:filter 任务|分解|工厂|裁决|直连|汇总|动态` 事件流过滤（视图偏好，不随 run 重置）· `:score :theme :status :clear :help :quit`；
 - **三主题**（org-dark / org-light / paper）· 窄终端降级 · 帮助浮层（`?`）· 运行取消（Esc）；
 - **键盘**：Tab 切换分区 · j/k 移动 · g/G 回顶回底 · Ctrl+L 清屏 · Ctrl+C 退出；
 - 实现与规格：`tui/`（零依赖 Line/Span 渲染器 + useReducer 单 store），冒烟测试 `bun run tui:smoke`（离屏 20 断言，CI 无 TTY 可跑）。
@@ -590,6 +591,7 @@ notice-parser⟩ 金丝雀发布是先把新版本……          （逐 token �
 - **正常 Agent 功能面**：停止生成（`POST /api/abort` SIGKILL 子进程，该轮不落账本）· **排队轮预取消（v0.4.14）**（排队等待期 `Esc` 取消本轮：票据 id 寻址，不误伤运行中的前一轮；取消轮从不开跑、不落账本，流以 `error{aborted,queued}` 收尾）· 失败重试（错误块按钮，失败轮不落账本安全重发）· 会话重命名（行内编辑，`PATCH` mv 账本）· 会话删除（两步确认，`DELETE` 删账本文件）· 导出会话 Markdown · 模型切换（scripted/deepseek 分段控制）· 智能滚动（底部跟随 + 「回到最新」）· 空态终端 banner；
 - **只读端点**：`GET /api/status`（专家清单 + 会话上下文占用 + 服务级 model，与 `org status` 同数据源）· `GET /api/sessions?expert=X` · `GET /api/session/<E>/<S>`（逐轮 question/answer/tokens/ctx_tokens，账本健壮解析）；
 - **工具库治理端点（v0.4.12）**：`POST /api/keep` / `POST /api/drop`（body `{expert}`）——与 CLI `org keep` / TUI `:keep` 同一代码路径（`setRetained`：翻转 retained + 双写注册表 + git「(user curation)」留痕）；专家卡 hover 浮现 ★/○ 切换钮，导入专家免切换，运行中禁用；
+- **运行范围复核端点（v0.4.17）**：`GET /api/review`（本次运行接触面 + 待决策候选 + 已保留上下文）· `POST /api/review`（body `{run, keep:[名]}`）——与 CLI `org review` 同一代码路径（`reviewCandidates` + `applyReview`）；**越界名 409 明确拒绝**并回传 `allowed` 集合（客户端状态过期时不静默生效一部分）；GUI 顶栏「待复核 N」徽标 → 勾选面板（全选/全不选/已选计数/确认沉淀）→ git「(user curation)」留痕；
 - **交互端点**：`POST /api/ask`（JSON 整轮，兼容并存）· `POST /api/ask-stream`（SSE 流式：`open`（排队状态 + `ticketId` 回显）→ `start` → `stage*`（2.6s 轮换 direct.hsl 真实阶段）→ `log*`（子进程 stdout 逐行实时）→ `delta*`（v0.4.15 逐 token）→ `done`/`error{aborted?,queued?}`；客户端意外断开不中止运行，显式停止/取消走 `/api/abort`）· `DELETE/PATCH /api/session/<E>/<S>` · `POST /api/abort`（停止/取消：无 body 停运行轮，`{id}` 取消排队轮）；
 - **model 回落链**：请求体显式传 > 服务级（`org web --model deepseek`）> scripted——GUI 分段控制即请求体逐次覆盖；
 - **deepseek 网关路由**：`org web --gateway http://127.0.0.1:3030/v1`（或环境变量 `DHV_LLM_GATEWAY`）把 `$host.llm` 指向 OpenAI 兼容端点——独立部署无需本机装 z-ai-web-dev-sdk；启动横幅回显网关地址 · 模型名 · 鉴权状态（防「配了没生效」）；
@@ -824,7 +826,7 @@ bun cli/org.ts chat
 ```bash
 bun cli/org.ts tui                                   # 终端驾驶舱（三区布局 + 事件卡片流）
 bun cli/org.ts web                                   # Web GUI（http://127.0.0.1:4600）
-bun test tests/                                      # 机制级测试（205 个）
+bun test tests/                                      # 机制级测试（220 个；端到端用例已逐例声明 120s 超时）
 bun cli/org.ts run --task "抓取某站点近一周公告，输出结构化表格"   # 团队模式派单
 bun cli/org.ts chat --model deepseek                 # 真实 LLM 流式对话（先配网关环境变量）
 ```
@@ -905,6 +907,7 @@ bun cli/org.ts web --model deepseek                   # Web GUI（SSE delta 逐 
 | `org keep <expert> …` | 工具库治理：选取保留 harness（工厂候选 → 转正，git 留痕） | `bun cli/org.ts keep record-validator --workspace demo-run` |
 | `org drop <expert> …` | 工具库治理：取消保留（B 路径不再自动复用；显式寻址仍可用） | `bun cli/org.ts drop record-validator --workspace demo-run` |
 | `org import <file.hsl>` | 工具库治理：导入你自己的 harness（check 闸门 → 入库 → 即刻可复用） | `bun cli/org.ts import my-tool.hsl --name my-tool`<br>（`--description "…"` `--capability a,b` 可覆盖自动提取） |
+| `org review` | 工具库治理：复核**本次运行**产出的 harness（本次铸出 / 补丁合入 / 复用命中），选取哪些沉淀进工具库 | `bun cli/org.ts review --workspace demo-run`<br>（非交互：`--keep a,b` `--all` `--none` `--dry-run`；`--run <dir>` 指定范围） |
 | `org status` | 库 / 池 / memo / 基准题 / 基线 / 复发计数 / 会话账本（含 ctx 占用）/ git 注册表历史 | `bun cli/org.ts status [--workspace DIR]` |
 | `org score` | 模型评分卡（证据归因聚合） | `bun cli/org.ts score --axis structured_extract` |
 | `org replay --run <dir>` | 确定性重放（journal 时间线重演） | `bun cli/org.ts replay --run demo-run/out-a`（或 `dist/demo/out-a`） |
@@ -966,7 +969,9 @@ bun cli/org.ts web --model deepseek                   # Web GUI（SSE delta 逐 
 
 ## ✅ 测试与验证状态
 
-**机制级测试：205 / 205 全绿**（`bun test tests/`，11 文件 · 689 expect 断言 · 本地约 50s · CI 零外联——scripted 剧本车道）：
+**机制级测试：220 / 220 全绿**（`bun test tests/`，12 文件 · 816 expect 断言 · 本地约 4–5 分钟 · CI 零外联——scripted 剧本车道）：
+
+> **超时约定（v0.4.17）**：端到端用例真实 spawn 解释器跑完整监督回路（单轮 3–14s），而 bun 的默认每用例超时是 5000ms —— 默认值下 26 例必然假红，且**失效形态是「子进程被 kill 后断言读到非零退出」**，看起来像产品缺陷。全局手段都不可用（bunfig 的 `[test]` 段没有 timeout 键；`[test] preload` 与 `setDefaultTimeout` 在多文件并行 worker 模式下都不生效），因此重用例一律**逐例显式声明 `120_000`**（与 `tests/demo.test.ts` 既有写法一致）。详见 `tests/helpers.ts` 与 BUGFIXES.md B-15。
 
 | 测试文件 | 覆盖面 |
 |:---|:---|
@@ -976,6 +981,7 @@ bun cli/org.ts web --model deepseek                   # Web GUI（SSE delta 逐 
 | `tests/web.test.ts` | Web GUI：端到端 ask / SSE 流式 / Markdown 渲染单测（XSS 等 8 例）/ keep-drop 端到端 / 排队取消 E2E（真实 spawn 车道 A 运行中 B 排队 → 取消 B → A 完整收场 + A 落账本 B 未落） |
 | `tests/demo.test.ts` | README 走读：三连跑衰减曲线（5→1→0）、工厂闸门、用户选取（retained 落盘 / B 通道命中 / uses 曲线）、补丁与金丝雀、固化持久化、评分卡归因、journal→fixture、直连、暖移交、git 注册表链 |
 | `tests/keep.test.ts` / `tests/import.test.ts` | 工具库治理：keep/drop 数据面 + 路由面 + 序列化卫生；import 闸门与元数据提取 |
+| `tests/review.test.ts` | 运行范围复核：范围判据 / 待决策集与上下文分离 / 缺省范围跳过无产出运行 / dry-run 不写 / 非交互不猜 / 越界拒绝 / git 留痕 / 幂等重跑 / parseSelection 四态；+ B-13/B-14 回归锁（工厂闸门自解析工具链、资产留痕不落空） |
 | `tests/dynamics.test.ts` | 动力学点火：漂移告警、固化降级、Reject 重派、Escalate 仲裁返工、三档补丁闸门、N 版本冗余 |
 | `tests/fixes.test.ts` | 实测驱动修复回归：recurrence 序列化卫生、工厂再生成（重试成功 + 耗尽显式 Err）、input=mission 路由、语义地板（低亲和走 C / 高亲和仍 B） |
 | `tests/check.test.ts` | 结构闸门：dhv check 全源 + 生成器出题与人工抽查逐字一致 |
@@ -1003,7 +1009,7 @@ org chat       # 交互式 REPL（scripted 车道免环境）
 
 ## 🧪 CI/CD
 
-- **push / PR**（`ci.yml`）：`dhv check` 全模块 → `bun test`（205 例）→ 三连跑冒烟 → `status` 冒烟 → `tui:smoke` → 产物上传 workflow artifact → **dist/ 有变化则自动回写提交**（`chore(dist): … [skip ci]`）；
+- **push / PR**（`ci.yml`）：`dhv check` 全模块 → `bun test tests/ --timeout 120000`（220 例；**超时不可省** —— 端到端用例单轮 3–14s，bun 默认每用例 5s）→ 三连跑冒烟 → `status` 冒烟 → `tui:smoke` → 产物上传 workflow artifact → **dist/ 有变化则自动回写提交**（`chore(dist): … [skip ci]`）；
 - **tag `v*`**（`release.yml`）：同套校验 → 打包源码 + dist 产物 → **5 平台二进制矩阵构建** → 创建 GitHub Release（tar.gz + dist zip + 二进制，发布说明取 CHANGELOG 对应版本段落）；
 - 克隆仓库后无需跑 demo 即可 `check` 与 `status`（读 `dist/demo` 快照）——编译产物与源码同库交付。
 

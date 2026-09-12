@@ -418,7 +418,22 @@ export graph Org(mission: String) -> Result<OrgReport, OrgError> {
 
     // 资产沉淀（新专家 / fixture / 记忆 / 补丁 / 冻结节点 → 工作区与期刊）
     // 返回值 = 静默更新检测的漂移告警数（评分卡 vs 基线）
-    let drift_alerts = sink_assets(state.clone(), journal.clone(), registry.clone(), scorecard.clone(), model_id())?;
+    let drift_alerts = sink_assets(state.clone(), registry.clone(), scorecard.clone(), model_id())?;
+
+    // 资产与漂移留痕 —— 必须落在真实 journal 上（下方 for 循环即此约束的由来）。
+    // 这里曾把两条 log 写在 sink_assets 内部，而 sink_assets 收到的是
+    // journal.clone()：条目落进了临时副本，随函数返回一起丢弃，于是
+    // journal.jsonl 永久缺失 asset / drift —— 只有总线侧的 events.jsonl 有，
+    // 而 TS 读取层（lib/events.ts mergeStreams）在 journal.jsonl 非空时整体
+    // 丢弃 events.jsonl 的 journal 镜像，两端叠加导致资产沉淀证据对所有
+    // 前端与 org replay 都不可见（metrics.json 仍有计数，所以表层看不出来）。
+    // 判据：journal.jsonl 行数应 = events.jsonl 中 journal 镜像的去重条数。
+    for a in state.assets.iter() {
+        journal.log(String::from("registry"), String::from("asset"), a.clone().label());
+    }
+    journal.log(String::from("scorecard"), String::from("drift"),
+        format!("静默更新检测：alerts={} baseline={}", drift_alerts, baseline_path_of(model_id())));
+
     save_recurrence(recurrence.clone());
     let run_id = journal.clone().flush();
 
@@ -936,12 +951,11 @@ fn aggregate(state: OrgState, run_id: String, mined_entries: u32, drift_alerts: 
     }
 }
 
-/// ④ 资产沉淀（新专家 / fixture / 记忆 / 补丁 / 冻结节点 → 工作区与期刊）。
+/// ④ 资产沉淀（新专家 / fixture / 记忆 / 补丁 / 冻结节点 → 落盘）。
 /// 同时执行静默更新检测（评分卡 vs 基线）并写当期基线；返回漂移告警数。
-fn sink_assets(state: OrgState, journal: Journal, registry: Registry, scorecard: Scorecard, model: String) -> Result<u32, OrgError> {
-    for a in state.assets.iter() {
-        journal.log(String::from("registry"), String::from("asset"), a.clone().label());
-    }
+/// 注意：本函数不记期刊（receives no Journal）—— 资产与漂移的 journal.log
+/// 由调用方（main 的 sink 段）在真实 journal 上执行，原因见调用点注释。
+fn sink_assets(state: OrgState, registry: Registry, scorecard: Scorecard, model: String) -> Result<u32, OrgError> {
     // 记忆沉淀（轻档池化：任务历史索引的原料）
     let memories = state.memories.join("\n");
     let _ = native typescript {
@@ -951,7 +965,7 @@ fn sink_assets(state: OrgState, journal: Journal, registry: Registry, scorecard:
     // 评分卡落盘（一等资产：有版本有历史）。
     // evidence_count = 当期归因 + 跨运行累计（registry/scorecards/evidence-ledger.json
     // 是增长账本；cells 分数始终是当期窗口聚合，两者语义分表）。
-    let baseline_path = format!("registry/scorecards/baseline-{}.json", model);
+    let baseline_path = baseline_path_of(model.clone());
     let prev_evidence = read_evidence_ledger();
     let card = scorecard.clone().carried(prev_evidence).to_json();
     let _ = native typescript {
@@ -961,10 +975,13 @@ fn sink_assets(state: OrgState, journal: Journal, registry: Registry, scorecard:
     save_evidence_ledger(prev_evidence + scorecard.clone().evidence_count());
     // 静默更新检测：当期评分卡 vs 基线逐格对比（劣化超阈值 → 审计事件）
     let alerts = drift_check(model.clone(), card.clone(), baseline_path.clone(), DRIFT_THRESHOLD);
-    journal.log(String::from("scorecard"), String::from("drift"),
-        format!("静默更新检测：alerts={} baseline={}", alerts, baseline_path));
     let _ = registry;
     Ok(alerts)
+}
+
+/// 评分卡基线路径（落盘与留痕共用同一构造 —— 避免两处字面量各自漂移）。
+fn baseline_path_of(model: String) -> String {
+    format!("registry/scorecards/baseline-{}.json", model)
 }
 
 // ----------------------------------------------------------------------------
