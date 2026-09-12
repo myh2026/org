@@ -725,7 +725,8 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
             runJson: data.runJson,
             metrics: data.metrics,
             scorecard: data.scorecard,
-            events: data.events,
+            // 与 SSE 的 card 帧同形：附服务端 fact，浏览器只渲染不解析
+            events: data.events.map((ev) => ({ ...ev, fact: classifyRunEvent(ev as never) })),
           });
         }
         if (route === "GET /api/score") {
@@ -1480,6 +1481,9 @@ function renderIndexHtml(): string {
   .revt { padding: 1px 0; color: var(--muted); }
   .revt .dim { color: var(--dim); }
   .rasset { color: var(--greenb); }
+  .revt.nv-info { color: var(--muted); }
+  .revt.nv-warn { color: #fbbf24; }
+  .revt.nv-err { color: var(--redb); }
   .rdone { display: flex; gap: 14px; flex-wrap: wrap; padding: 10px 12px;
         border-top: 1px solid var(--border); font: 11px var(--mono); color: var(--muted); }
   .rdone b { color: var(--text); font-weight: 600; }
@@ -1887,7 +1891,7 @@ function newRunModel(task, model) {
     id: ++runSeq, task: task, model: model, startedAt: Date.now(),
     mission: "", qa: [], subs: {}, order: [],
     revisions: [], mints: [], patches: [], canaries: [], assets: [],
-    crystals: [], scores: [], caps: [], others: [], shadows: [], noise: 0,
+    crystals: [], scores: [], caps: [], others: [], shadows: [], notices: [], noise: 0,
     drift: 0, mined: 0, ctx: null, factoryNodes: [],
     runOk: null, elapsed: 0
   };
@@ -1954,6 +1958,7 @@ function applyFact(m, fact) {
     case "runEnd": m.runOk = fact.ok; m.elapsed = fact.elapsed_ms; break;
     case "runStart": if (!m.mission && fact.mission) m.mission = fact.mission; break;
     case "shadow": m.shadows.push(fact); break;
+    case "notice": m.notices.push(fact); break;
     // run_result 是引擎桥的合成终态（与 done 帧同源信息），不再当作「未分类」
     case "result": break;
     default:
@@ -2048,6 +2053,10 @@ function renderRun(m) {
     h += '<div class="revt"><span class="dim">能力授予 </span>' +
          esc(Object.keys(byCap).map(function (k) { return k + "×" + byCap[k]; }).join(" · ")) + '</div>';
   }
+  m.notices.forEach(function (n) {
+    var cls = n.tone === "err" ? "nv-err" : (n.tone === "warn" ? "nv-warn" : "nv-info");
+    h += '<div class="revt ' + cls + '">' + esc(n.text) + '</div>';
+  });
   if (m.others.length > 0 || m.noise > 0) {
     // 不静默丢弃：未分类事件留名（audit / capability_denied / canary_rollback …）
     var parts = [];
@@ -2224,7 +2233,7 @@ function openRun(name) {
     if (!r || r.error) { flashHint((r && r.error) || "回放失败"); return; }
     var m = newRunModel((r.runJson && r.runJson.task) || name, (r.runJson && r.runJson.model) || "?");
     m.mission = (r.runJson && r.runJson.task) || "";
-    (r.events || []).forEach(function (ev) { applyFact(m, classifyClient(ev)); });
+    (r.events || []).forEach(function (ev) { applyFact(m, ev.fact); });
     m.runOk = !!(r.runJson && r.runJson.ok);
     m.elapsed = (r.runJson && r.runJson.elapsed_ms) || 0;
     var chat = document.getElementById("chat");
@@ -2237,51 +2246,6 @@ function openRun(name) {
     scrollDown(true);
     flashHint("已回放 " + name + "（只读，未重跑引擎）");
   }).catch(function (e) { flashHint("回放失败：" + e); });
-}
-
-/** 回放兜底分类：/api/run 返回归一化事件（不含服务端 fact）。 */
-function classifyClient(ev) {
-  if (!ev || !ev.kind) return { t: "other", name: "?", action: "", detail: "" };
-  var m;
-  if (ev.kind === "journal") {
-    if (ev.action === "route") {
-      m = /^task#(\d+)\s+(\S+)\s*->\s*([ABCD]):(\S+)/.exec(ev.detail);
-      if (m) return { t: "route", id: +m[1], role: m[2], route: m[3], channel: m[4] };
-    }
-    if (ev.action === "dispatch") {
-      m = /^task#(\d+)\s+channel=(\S+)(?:\s+(.*))?$/.exec(ev.detail);
-      if (m) return { t: "dispatch", id: +m[1], channel: m[2], detail: m[3] || "" };
-    }
-    if (ev.action === "review") {
-      m = /^task#(\d+)\s+(\S+)\s+verdict=(\S+)(?:\s+coverage=([\d.]+))?/.exec(ev.detail);
-      if (m) {
-        return { t: "review", id: +m[1], role: m[2], verdict: m[3],
-                 coverage: m[4] == null ? undefined : +m[4], note: "" };
-      }
-    }
-    if (ev.action === "mint-register") {
-      m = /^([^@\s]+)@(\S+?)(?:\s+eval=(\S+))?\s*$/.exec(ev.detail);
-      if (m) return { t: "mint", name: m[1], version: m[2], eval: m[3] || "" };
-    }
-    if (ev.action === "asset") return { t: "asset", label: ev.detail };
-    if (ev.action === "patch") return { t: "patch", detail: ev.detail };
-    if (ev.action === "canary") return { t: "canary", detail: ev.detail };
-    if (ev.action === "open") return { t: "mission", mission: ev.detail };
-    if (ev.action === "drift") {
-      var dm = /alerts=(\d+)/.exec(ev.detail);
-      return { t: "drift", alerts: dm ? +dm[1] : 0, detail: ev.detail };
-    }
-    return { t: "other", name: "journal", action: ev.action, detail: ev.detail };
-  }
-  if (ev.kind === "run_end") return { t: "runEnd", ok: ev.ok, elapsed_ms: ev.elapsed_ms };
-  if (ev.kind === "crystallize_frozen") return { t: "crystal", node: ev.node, input: ev.input, frozen: true };
-  if (ev.kind === "crystallize_hit") return { t: "crystal", node: ev.node, input: ev.input, frozen: false };
-  if (ev.kind === "fixtures_mined") return { t: "mined", entries: ev.entries, tracks: ev.tracks };
-  if (ev.kind === "score_evidence") return { t: "score", axis: ev.axis, kind: ev.kind2, value: ev.value };
-  if (ev.kind === "capability_granted") {
-    return { t: "capability", capability: ev.capability, mode: ev.mode, granted: true };
-  }
-  return { t: "other", name: ev.kind, action: "", detail: "" };
 }
 
 /** 评分卡面板（org score 的 Web 面）。 */

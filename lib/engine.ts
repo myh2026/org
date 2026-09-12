@@ -1284,3 +1284,150 @@ export function replayRun(outDir: string): ReplayData {
 export function latestScorecardDir(workspace: string): string | null {
   return scanWorkspace(workspace).scorecardDir;
 }
+
+// ---------- v0.5.0：会话派生与版本回退（agent 应有的两个「反悔」通道） ----------
+// 这两个功能的后端原语都已存在，缺的只是用户可触达的入口：
+//   fork   —— 会话账本本来就是 append-only 的普通文件，复制即派生；
+//   revert —— 工厂每次补丁都把旧源归档为 registry/experts/<name>@<旧版本>.hsl
+//             （金丝雀回滚用的正是它），ExpertManifest::revert_version 也已存在。
+// 对应 codex / opencode 的 /fork 与 /undo · diff/revert。
+
+export interface ForkResult {
+  expert: string;
+  from: string;
+  to: string;
+  turns: number;
+  file: string;
+}
+
+/**
+ * 派生会话：把 `<expert>/<from>.jsonl` 复制为 `<to>.jsonl`。
+ * 上下文从派生点继续，原会话不受影响（账本 append-only，复制即分叉）。
+ */
+export function forkSession(ws: string, expert: string, from: string, to: string): ForkResult {
+  if (!validHarnessName(expert)) throw new Error(`专家名不合法：${expert}`);
+  for (const [label, v] of [["源", from], ["目标", to]] as const) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(v)) throw new Error(`${label}会话 id 不合法：${v}`);
+  }
+  const src = path.join(ws, "runtime", "sessions", expert, `${from}.jsonl`);
+  if (!fs.existsSync(src)) throw new Error(`源会话不存在：${expert}/${from}`);
+  const dst = path.join(ws, "runtime", "sessions", expert, `${to}.jsonl`);
+  if (fs.existsSync(dst)) throw new Error(`目标会话已存在：${expert}/${to}（派生不会覆盖，换一个 id）`);
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  const body = fs.readFileSync(src, "utf-8");
+  fs.writeFileSync(dst, body);
+  const turns = body.split("\n").filter((l) => l.trim().length > 0).length;
+  return { expert, from, to, turns, file: dst };
+}
+
+export interface RevertResult {
+  name: string;
+  from: string;
+  to: string;
+  live: string;
+  archived: string | null;
+}
+
+/** 在岗源文件候选（工厂产物在 experts/，导入 harness 在 harnesses/）。 */
+function liveSourceCandidates(ws: string, name: string): string[] {
+  const out: string[] = [];
+  const rec = loadRegistryIndex(ws).find((m) => m.name === name) as Record<string, unknown> | undefined;
+  const entry = rec ? String(rec.entry ?? "") : "";
+  if (entry.endsWith(".hsl")) out.push(path.join(ws, entry));
+  out.push(path.join(ws, "registry", "experts", `${name}.hsl`));
+  out.push(path.join(ws, "registry", "harnesses", `${name}.hsl`));
+  return out;
+}
+
+/** 归档源路径（工厂补丁每次合入都把旧版本源留在这里）。 */
+function archivePathOf(dir: string, name: string, version: string): string {
+  return path.join(dir, `${name}@${version}.hsl`);
+}
+
+/** 某专家已归档的版本号（新→旧按语义排序，仅取 x.y.z 数字形）。 */
+export function archivedVersions(ws: string, name: string): string[] {
+  const seen = new Set<string>();
+  for (const cand of liveSourceCandidates(ws, name)) {
+    const dir = path.dirname(cand);
+    if (!fs.existsSync(dir)) continue;
+    // 归档命名是机械的 `<name>@<x.y.z>.hsl`（工厂合入补丁时写入）。用前缀/后缀
+    // 切分而不是拼正则 —— 专家名里的字符不必再考虑正则元字符转义。
+    const prefix = `${name}@`;
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.startsWith(prefix) || !f.endsWith(".hsl")) continue;
+      const ver = f.slice(prefix.length, -".hsl".length);
+      if (/^[0-9]+\.[0-9]+\.[0-9]+$/.test(ver)) seen.add(ver);
+    }
+  }
+  return [...seen].sort((a, b) => {
+    const pa = a.split(".").map(Number), pb = b.split(".").map(Number);
+    for (let i = 0; i < 3; i++) if (pa[i] !== pb[i]) return pb[i]! - pa[i]!;
+    return 0;
+  });
+}
+
+/**
+ * 版本回退：把归档源还原为在岗源，并把当前源归档（回退本身可逆）。
+ * 「留在岗」的语义对齐金丝雀回滚：注册表版本号随之回退，git 留痕。
+ */
+export function revertExpert(ws: string, name: string, to?: string): RevertResult {
+  const experts = loadRegistryIndex(ws);
+  const rec = experts.find((m) => m.name === name);
+  if (!rec) throw new Error(`注册表中没有专家：${name}`);
+  const current = String(rec.version ?? "");
+  const versions = archivedVersions(ws, name);
+  const target = to ?? versions.find((v) => v !== current) ?? "";
+  if (!target) {
+    throw new Error(`没有可回退的归档版本（${name}@${current}）—— 归档源出现的前提是工厂合入过补丁`);
+  }
+  if (target === current) throw new Error(`目标版本与当前版本相同：${name}@${current}`);
+
+  const live = liveSourceCandidates(ws, name).find((p) => fs.existsSync(p));
+  if (!live) throw new Error(`找不到在岗源文件（${name}）`);
+  const dir = path.dirname(live);
+  const archive = archivePathOf(dir, name, target);
+  if (!fs.existsSync(archive)) throw new Error(`归档源不存在：${path.relative(ws, archive)}（可选：${versions.join(", ") || "无"}）`);
+
+  // 1) 当前源归档（保证可逆）—— 已存在则不覆盖（同一版本重复回退是幂等的）
+  const keep = archivePathOf(dir, name, current);
+  let archived: string | null = null;
+  if (current && !fs.existsSync(keep)) {
+    fs.copyFileSync(live, keep);
+    archived = keep;
+  }
+  // 2) 还原目标版本源
+  fs.copyFileSync(archive, live);
+  // 3) 注册表版本号回退（index.json + 每专家副本，与 setRetained 同双写形态）
+  for (const m of experts) {
+    if (m.name === name) m.version = target;
+  }
+  fs.writeFileSync(path.join(ws, "registry/index.json"), JSON.stringify(experts));
+  const per = path.join(ws, "registry", `${name}.json`);
+  if (fs.existsSync(per)) {
+    try {
+      const obj = JSON.parse(fs.readFileSync(per, "utf-8")) as Record<string, unknown>;
+      obj.version = target;
+      fs.writeFileSync(per, JSON.stringify(obj));
+    } catch { /* 副本损坏容忍：index.json 是权威 */ }
+  }
+  gitCommitRegistry(ws, `revert ${name} ${current} -> ${target} (user revert)`);
+  return { name, from: current, to: target, live, archived };
+}
+
+// ---------- 会话账本改名 / 删除（CLI org session，Web 已有同名端点的 CLI 面） ----------
+
+export function renameSession(ws: string, expert: string, from: string, to: string): string {
+  const src = path.join(ws, "runtime", "sessions", expert, `${from}.jsonl`);
+  const dst = path.join(ws, "runtime", "sessions", expert, `${to}.jsonl`);
+  if (!fs.existsSync(src)) throw new Error(`会话不存在：${expert}/${from}`);
+  if (fs.existsSync(dst)) throw new Error(`目标会话已存在：${expert}/${to}`);
+  fs.renameSync(src, dst);
+  return dst;
+}
+
+export function deleteSession(ws: string, expert: string, session: string): string {
+  const file = path.join(ws, "runtime", "sessions", expert, `${session}.jsonl`);
+  if (!fs.existsSync(file)) throw new Error(`会话不存在：${expert}/${session}`);
+  fs.rmSync(file);
+  return file;
+}

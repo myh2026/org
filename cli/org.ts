@@ -31,7 +31,8 @@ import { ROOT, DEFAULT_WORKSPACE } from "../lib/root.ts";
 import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          loadRegistryIndex, setRetained, keepAllCandidates,
          importHarness, listContextUsage, renderContextMeter, expertFixtureOf,
-         latestHarnessRunDir, reviewCandidates, applyReview } from "../lib/engine.ts";
+         latestHarnessRunDir, reviewCandidates, applyReview,
+         forkSession, revertExpert, archivedVersions, renameSession, deleteSession } from "../lib/engine.ts";
 import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
 import { parseJournalLine } from "../lib/events.ts"; // v0.4.17：replay 解析与事件泵同源
@@ -97,6 +98,7 @@ interface Args {
   fixtureExplicit: boolean;
   modelExplicit: boolean;  // --model 是否显式给出（缺省车道以此判据接管）
   exportDist: boolean;
+  toVersion: string;      // org revert --to <x.y.z>
   rest: string[];
 }
 
@@ -125,6 +127,7 @@ function parseArgs(argv: string[]): Args {
     fixtureExplicit: false,
     modelExplicit: false,
     exportDist: false,
+    toVersion: "",
     rest: [],
   };
   let i = 1;
@@ -141,6 +144,7 @@ function parseArgs(argv: string[]): Args {
     else if (v === "--turns") a.turns = (argv[++i] ?? "").split("|").filter((s) => s.length > 0);
     else if (v === "--approve-capability") a.approveCapability = true;
     else if (v === "--export-dist") a.exportDist = true;
+    else if (v === "--to") a.toVersion = argv[++i] ?? "";
     else if (v === "--continue" || v === "-c") a.continue = true;
     else if (v === "--name") a.name = (argv[++i] ?? "").toLowerCase();
     else if (v === "--description" || v === "--desc") a.description = argv[++i] ?? "";
@@ -817,6 +821,84 @@ function askLine(prompt: string): Promise<string | null> {
   });
 }
 
+// ---- 版本回退（org revert）----
+// 「反悔」通道：把归档源还原为在岗源（金丝雀回滚用的是同一批归档源），
+// 当前源先归档 → 回退本身可逆，注册表版本号随之回退并 git 留痕。
+// 对应 opencode 的 /undo 与 codex 的 diff/revert。
+async function cmdRevert(a: Args): Promise<number> {
+  const name = (a.rest[0] ?? "").toLowerCase();
+  if (!name) {
+    console.error("用法：org revert <expert> [--to <x.y.z>] [--workspace DIR]");
+    const experts = loadRegistryIndex(a.workspace).filter((m) => m.source !== "manual");
+    if (experts.length > 0) {
+      console.error("候选（有工厂谱系的专家）：");
+      for (const m of experts) {
+        const vers = archivedVersions(a.workspace, m.name);
+        console.error(`  ${m.name}@${m.version}${vers.length ? "  可回退：" + vers.join(", ") : "  （无归档版本）"}`);
+      }
+    }
+    return 2;
+  }
+  if (!fs.existsSync(path.join(a.workspace, "registry/index.json"))) {
+    console.error(`✗ 工作区 ${a.workspace} 无注册表（先 org demo / org run）`);
+    return 2;
+  }
+  try {
+    const r = revertExpert(a.workspace, name, a.toVersion || undefined);
+    console.log(`↩ 已回退 ${r.name}：${r.from} → ${r.to}（git 留痕）`);
+    console.log(`  在岗源：${path.relative(process.cwd(), r.live)}`);
+    if (r.archived) console.log(`  当前源已归档：${path.relative(process.cwd(), r.archived)}（回退可逆，再 revert 可回到 ${r.from}）`);
+    const rest = archivedVersions(a.workspace, name);
+    if (rest.length > 0) console.log(`  其它可回退版本：${rest.join(", ")}`);
+    return 0;
+  } catch (err) {
+    console.error(`✗ 回退失败：${(err as Error).message}`);
+    return 1;
+  }
+}
+
+// ---- 会话管理（org session fork|rename|rm）----
+// Web 早有会话改名/删除端点，TUI/CLI 没有 —— 这里补齐 CLI 面，并补上 Web/chat
+// 都没有的 **派生（fork）**：账本 append-only，复制即分叉，上下文从派生点续跑。
+async function cmdSession(a: Args): Promise<number> {
+  const [verb, expert, p1, p2] = [a.rest[0] ?? "", (a.rest[1] ?? "").toLowerCase(), a.rest[2] ?? "", a.rest[3] ?? ""];
+  const usage = (): number => {
+    console.error("用法：");
+    console.error("  org session fork <expert> <from> <to>    派生会话（原会话不受影响）");
+    console.error("  org session rename <expert> <from> <to>  会话改名");
+    console.error("  org session rm <expert> <session>        删除会话（删账本文件）");
+    return 2;
+  };
+  if (!verb || !expert) return usage();
+  // 注：会话操作只碰 runtime/sessions/<expert>/*.jsonl，不读注册表 ——
+  // 不设「工作区必须有 registry」的门槛（否则纯会话工作区用不了）。
+  try {
+    if (verb === "fork") {
+      if (!p1 || !p2) return usage();
+      const r = forkSession(a.workspace, expert, p1, p2);
+      console.log(`⑂ 已派生会话 ${r.expert}/${r.from} → ${r.to}（${r.turns} 轮上下文，原会话不变）`);
+      console.log(`  继续对话：org chat ${r.expert} --session ${r.to} --continue`);
+      return 0;
+    }
+    if (verb === "rename" || verb === "mv") {
+      if (!p1 || !p2) return usage();
+      renameSession(a.workspace, expert, p1, p2);
+      console.log(`✓ 已改名 ${expert}/${p1} → ${p2}`);
+      return 0;
+    }
+    if (verb === "rm" || verb === "delete") {
+      if (!p1) return usage();
+      deleteSession(a.workspace, expert, p1);
+      console.log(`✓ 已删除会话 ${expert}/${p1}（账本是唯一事实源：删文件即删会话）`);
+      return 0;
+    }
+    return usage();
+  } catch (err) {
+    console.error(`✗ ${(err as Error).message}`);
+    return 1;
+  }
+}
+
 async function cmdStatus(a: Args): Promise<number> {
   const ws = defaultWorkspace(a);
   console.log(`ORG status · 工作区 ${ws}\n`);
@@ -1176,6 +1258,8 @@ export async function orgMain(): Promise<number> {
     case "drop": return cmdDrop(a);
     case "import": return cmdImport(a);
     case "review": return cmdReview(a);
+    case "revert": return cmdRevert(a);
+    case "session": return cmdSession(a);
     case "status": return cmdStatus(a);
     case "score": return cmdScore(a);
     case "replay": return cmdReplay(a);
@@ -1208,6 +1292,10 @@ export async function orgMain(): Promise<number> {
       工具库治理：选取保留 harness（工厂候选 → 转正，git 留痕）
   org drop <expert> [expert2 ...] [--workspace DIR]
       工具库治理：取消保留（B 路径不再自动复用；显式寻址仍可用）
+  org revert <expert> [--to x.y.z] [--workspace DIR]
+      反悔通道：把归档源还原为在岗源（当前源先归档，回退可逆）+ git 留痕
+  org session fork <expert> <from> <to> | rename | rm
+      会话派生（原会话不变，上下文从派生点续跑）/ 改名 / 删除
   org import <file.hsl> [--name N] [--description "…"] [--capability a,b]
       工具库治理：导入你自己的 harness（check 闸门 → 入库 → 即刻可复用；
       描述缺省取 /// 文档注释 · 能力缺省扫描 #[capability] 注解）
