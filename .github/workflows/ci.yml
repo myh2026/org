@@ -74,7 +74,12 @@ jobs:
           if-no-files-found: ignore
 
       # 编译产物与源码同库演进：demo 再生后有变化则自动回写（[skip ci] 防循环）
+      # 仅 push 事件回写：pull_request 的 checkout 是 detached HEAD（merge commit），
+      # 此前 dist 有变化时 `git push` 必失败（fatal: not currently on a branch，
+      # exit 128）—— feat 分支与所有 PR 的 verify 红均源于此。PR 只校验不回写，
+      # dist 快照漂移由 review 观察 + push main 后自动回写兜底。
       - name: dist/ 产物回写
+        if: github.event_name == 'push'
         run: |
           git config user.email "ci@org.local"
           git config user.name "org-ci"
