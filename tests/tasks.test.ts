@@ -319,14 +319,16 @@ describe("engine：RunHandle.pause/resume（spawn 车道 SIGSTOP/SIGCONT）", ()
       entry: "org", task: "抓取近一周公告，输出结构化表格", workspace: WS, model: "scripted",
     });
     const donePromise = handle.wait();
-    // 80ms 后暂停（scripted 全链 Linux 2-4s；80ms 连 macOS M 系列的
-    // spawn 冷启动都未过 —— 300ms 档在 M 芯片上曾跑完整个 run）
-    await new Promise((r) => setTimeout(r, 80));
-    // 平台速度防御（CI macOS 实测）：pause 前任务已完成 → 本用例的
-    // 「暂停窗口」前提不成立，如实跳过（Linux verify 全量覆盖此路径）
+    // 20ms 后暂停：bun 子进程冷启动（进程 bootstrap + HSL 加载）在任何
+    // 平台都 >20ms —— 此刻进程必然活着且远未完成。此前 300ms/80ms 档
+    // 在 CI macOS M 系列上整个 run 已跑完（实测 ~85ms），kill 打到僵尸
+    // 返回「成功」而窗口断言必炸 —— 暂停点必须是「物理上未完成」的时刻。
+    await new Promise((r) => setTimeout(r, 20));
+    // 平台速度防御（兜底）：pause 前任务已完成 → 前提不成立，如实跳过
+    // （Linux verify 全量覆盖此路径；M 系列极端 runner 兜底）
     const preDone = await Promise.race([
       donePromise.then(() => true),
-      new Promise<boolean>((r) => setTimeout(() => r(false), 5)),
+      new Promise<boolean>((r) => setTimeout(() => r(false), 30)),
     ]);
     if (preDone) {
       console.log("○ spawn 任务在暂停点前已完成（平台过快）—— 暂停窗口断言跳过");
