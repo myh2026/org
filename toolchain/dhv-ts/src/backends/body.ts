@@ -886,18 +886,30 @@ export class Body {
       case 'assign': {
         const t = this.expr(e.target);
         const v = this.expr(e.value);
-        return e.op === '=' ? `${t} = ${v}` : `${t} ${e.op}= ${v}`;
+        // v0.5.4 修正：AST 的 op 已是完整算符（'=' / '+=' / '-=' / …，
+        // parser ASSIGN_OPS），此前模板对复合算符再追加 '=' → 生成
+        // `i +== 1` 非法语法（python py_compile 抓到；上游 emit 一致性
+        // 语料未覆盖复合赋值的 python 活体翻译 —— 覆盖缺口实录）。
+        return `${t} ${e.op} ${v}`;
       }
       case 'call': {
         if (e.callee.kind === 'path') {
-          const args = e.args.map((a) => this.expr(a));
+          // v0.5.4 python：实参外层括号剥离（`fact((n - 1))` → `fact(n - 1)`，
+          // ruff UP034；元组由 pyStripOuter 保护）
+          const args = e.args.map((a) => {
+            const t = this.expr(a);
+            return L === 'python' ? pyStripOuter(t) : t;
+          });
           return this.pathCall(e.callee.segs, args);
         }
         throw new TranspileError('复杂调用链');
       }
       case 'method': {
         const recv = this.expr(e.recv);
-        const args = e.args.map((a) => this.expr(a));
+        const args = e.args.map((a) => {
+          const t = this.expr(a);
+          return L === 'python' ? pyStripOuter(t) : t;
+        });
         // v1.4.9：透传原始实参 AST（go sort_by 闭包体内联替换需要）+ turbofish 泛型实参（parse::<T>）
         return this.method(recv, e.recv, e.name, args, e.args, e.generics);
       }
@@ -1195,6 +1207,11 @@ export class Body {
     // （`"non-point".to_string()` 曾生成 std::to_string("non-point") 非法代码）
     if (name === 'to_string' && kind === 'str' && L === 'cpp') {
       return `std::string(${recv})`;
+    }
+    // v0.5.4 python 同理：字符串接收者的 to_string 是恒等变换 —— 直接返回
+    // 接收者（`str('unit')` 形态触发 ruff UP018「不必要的 str 调用」）。
+    if (name === 'to_string' && kind === 'str' && L === 'python') {
+      return recv;
     }
     // String::contains 与 Vec::contains 同名不同义：String 是子串查找。
     // 🔴 v1.4.7 修复：此前 cpp 走 Vec 表生成 std::find(s.begin(), s.end(), "x")
@@ -2276,7 +2293,7 @@ export class Body {
     if (!hasWildcard) {
       if (L === 'python') {
         out.push(`${indent}else:`);
-        out.push(`${indent}    raise ValueError('dhv: match 不可达分支（S-6 穷尽性）')`);
+        out.push(`${indent}    raise TypeError('dhv: match 不可达分支（S-6 穷尽性）')`);
       } else {
         out.push(`${indent}} else {`);
         out.push(L === 'go'
@@ -2433,6 +2450,13 @@ export class Body {
   }
   private returnLine(i: string, v: string | null): string {
     const L = this.lang.id;
+    // v0.5.4 python：return 值的外层包裹括号剥离（二元表达式全括号化发射
+    // 的副作用 —— `return (a * b)` 触发 ruff UP034「多余括号」；语句位
+    // 剥一层不改变优先级语义，元组字面量由 pyStripOuter 保护）。
+    if (L === 'python') {
+      const bare = pyStripOuter(v);
+      return bare ? `${i}return ${bare}` : `${i}return`;
+    }
     if (L === 'python' || L === 'go') return v ? `${i}return ${v}` : `${i}return`;
     return v ? `${i}return ${v};` : `${i}return;`;
   }
@@ -2581,8 +2605,10 @@ export function languagePrelude(langId: string, goSkipHelpers = false): string[]
         'def _dhv_pop(v):',
         '    return v.pop() if v else None',
         'def _dhv_clone(x):',
-        '    if isinstance(x, list): return list(x)',
-        '    if isinstance(x, dict): return dict(x)',
+        '    if isinstance(x, list):',
+        '        return list(x)',
+        '    if isinstance(x, dict):',
+        '        return dict(x)',
         '    return x',
         'def _dhv_is_sorted(v):',
         '    return all(v[i] <= v[i + 1] for i in range(len(v) - 1))',
@@ -2622,7 +2648,8 @@ export function languagePrelude(langId: string, goSkipHelpers = false): string[]
         '    return a / b',
         // v0.2.55 L-19：interp display 规范的 python 实现（JS Number::toString 风格）
         'def _dhv_float_str(x):',
-        "    if x != x:",
+        "    import math as _dhv_m",
+        "    if _dhv_m.isnan(x):",
         "        return 'NaN'",
         "    if x == float('inf'):",
         "        return 'Infinity'",
@@ -2633,10 +2660,10 @@ export function languagePrelude(langId: string, goSkipHelpers = false): string[]
         '        if a < 1e16:',
         '            return str(int(x))',
         '        if a < 1e21:',
-        "            return '{:.0f}'.format(x)",
+        "            return f'{x:.0f}'",
         '        return repr(x)',
         '    if 1e-7 <= a < 1e-4:',
-        "        s = '{:.20f}'.format(x).rstrip('0').rstrip('.')",
+        "        s = f'{x:.20f}'.rstrip('0').rstrip('.')",
         "        return s if s else '0'",
         '    r = repr(x)',
         "    if 'e' in r:",
@@ -3244,6 +3271,24 @@ function stdMathFreeCall(name: string, args: string[], L: string): string | null
   }
   // rust / go / cpp：自由函数是方法形态（(x).sin()），不可廉价直译 → null
   return null;
+}
+
+/**
+ * v0.5.4：python 语句位外层括号剥离（ruff UP034「多余括号」治理）。
+ * 二元/一元表达式全括号化发射在语句位（return / 调用实参）产生冗余包裹；
+ * 元组字面量 `(a, b)` 的括号是语义的一部分 —— 顶层逗号探测保护，绝不剥。
+ */
+function pyStripOuter(s: string): string {
+  if (s.length < 2 || !s.startsWith('(') || !s.endsWith(')')) return s;
+  const inner = s.slice(1, -1);
+  let depth = 0;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i]!;
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
+    else if (ch === ',' && depth === 0) return s; // 元组字面量 —— 括号是语义
+  }
+  return inner.trim();
 }
 
 function snakeUpper(s: string): string {

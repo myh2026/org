@@ -30,6 +30,16 @@ jobs:
       - name: vendored 工具链新鲜度（上游 HSL 漂移守卫）
         run: bun scripts/check-vendored-fresh.ts
 
+      # v0.5.4：HSL python 产物 ruff 门禁（uv + ruff 工具链；语料 = org 内核
+      # python 投射 + 全特性语料 + 模式全家族 —— 生成器回归当场可见）
+      - name: 安装 uv + ruff（python 工具链）
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          ~/.local/bin/uv tool install ruff
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: ruff gate（HSL python 产物全绿）
+        run: bun scripts/ruff-gate.ts
+
       - name: 机制级测试（结构闸门 / README 走读 / 动力学点火）
         run: bun test tests/
 

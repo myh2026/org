@@ -1,5 +1,52 @@
 # CHANGELOG
 
+## v0.5.4（2026-09-13）—— HSL python 产物 ruff 门禁（生成器六修 + CI 接线 + 语料）
+
+「所有产物 ruff 检测均可通过」的可执行落地：vendored dhv-ts 的 python
+生成器从 134 项 ruff 失败修到**全规则全绿**（ruff 0.16.7 默认集含
+E/F/I001/PLR0124/UP032/UP034/UP018/TRY004），双仓同步（上游
+`feat/v0.2.64-ruff-clean-python` 分支同 commit，上游 176/176 测试 +
+emit 行为级对拍全等回归）。
+
+### python 生成器修复（toolchain/dhv-ts/src/backends/ · 双仓镜像）
+
+| # | 缺陷（实测形态） | 修复 |
+|:--|:--|:--|
+| 1 | **F401×9/文件**：头部 typing/dataclasses/math 全量导入从不裁剪 | `finalizePython`：占位标记 + 正文用量扫描按需生成；导入块 isort 排序与空行约定 |
+| 2 | **F821**：trait 投射 `class X(Protocol)` 但 Protocol 从未导入 | 按需导入覆盖 Protocol |
+| 3 | **F821**：模式匹配引用 `Ok/Err/Some` 无定义（py_compile 不查名字解析故语法校验绿） | prelude 变体桩类按需注入（纯 class，零 import 依赖） |
+| 4 | **复合赋值算符翻倍**：AST op 已是 `'+='`，模板再追加 `=` → `i +== 1` 非法语法（py_compile 抓到） | `${t} ${e.op} ${v}`（上游 emit 一致性语料未覆盖复合赋值 —— 覆盖缺口实录） |
+| 5 | **E701/UP032/PLR0124/UP018/TRY004**：prelude 助手单行 if · `'{}'.format` · `x != x` NaN 判定 · `str('lit')` · match 守卫 ValueError | 逐项修正（多行化/f-string/math.isnan/恒等/TypeError） |
+| 6 | **UP034 + F401**：二元表达式全括号化在语句位产生冗余括号；contract 回退文件的镜像注释名字被误判「已用」 | `pyStripOuter`（元组保护）+ 注释剥离后的用量扫描 |
+| + | **ENOENT**：emit 无 project 的源到不存在目录 → manifest 先写即炸 | outDir 兜底 mkdir |
+| + | python 类型映射缺 i8/i16/u8/u16/i128/u128（nova `u8` 注解泄漏 F821） | registry 补全 int 族 |
+
+### ruff 门禁（scripts/ruff-gate.ts）
+
+- 语料三份：ORG 内核 python 投射（hsl/org.hsl 新增 python 车道）+
+  ORG 自有全特性语料（fixtures/ruff-corpus/kernel-tour.hsl：复合赋值/
+  闭包/递归/Result 模式/trait/常量）+ 模式全家族（vendored pattern-tour）；
+- emit → ruff check（0.16 默认全规则）；失败逐条列出 exit 1；无 ruff 环境
+  诚实失败（不静默跳过）；`--keep` 保留产物排查；
+- CI verify job 接线：uv + ruff 安装 → gate 步骤（在测试前）。
+
+### 双仓漂移治理
+
+- 上游 HSL 仓库：`feat/v0.2.64-ruff-clean-python`（c92caa2 起同批提交，
+  176/176 + emit 行为级对拍 6/6 全等回归）—— vendored 0.2.64 ≥ 上游
+  main 0.2.61，check-vendored-fresh 绿；
+- vendored 补齐 examples/（上游本有，org 裁剪时被去 —— 现作 ruff 语料）。
+
+### 验证
+
+- 全量 **357/357 全绿**（19 文件 · 1481 expect；+ruff.test.ts 6 例锁定：
+  复合赋值回归 + 按需导入 + prelude 卫生 + 桩类 + ENOENT）；
+- `org check` 43 模块（org.hsl python 投射 + kernel-tour 语料入列）·
+  ruff gate 3 语料 22 个 .py 全绿；
+- 上游：run-all 176/176 · emit 行为级对拍（interp ↔ python 真实运行）
+  三方逐行全等 ✓。
+
+
 ## v0.5.3（2026-09-13）—— agent 工具环 + AGENTS.md + @文件引用 + 长期记忆
 
 「org agent 成为正常 agent」的执行层落地：模型不只是回答 —— 它能**读

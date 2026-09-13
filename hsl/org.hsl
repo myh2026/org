@@ -1323,4 +1323,9 @@ project {
     NoticeParser              -> "src/experts/notice_parser.rs"    : rust,
     ORG_CONFIG                -> "config/org.yml"                  : yaml,
     EVENTS_SCHEMA             -> "docs/events.schema.json"         : json,
+    // v0.5.4：python 投射车道 —— ORG 内核逻辑同时落到 Python 工程（一源多
+    // 投射的实证 + ruff 门禁语料：scripts/ruff-gate.ts emit 后全量检查）
+    Org                       -> "gen/python/org.py"               : python,
+    Factory                   -> "gen/python/factory.py"           : python,
+    NoticeParser              -> "gen/python/notice_parser.py"     : python,
 }
