@@ -288,6 +288,8 @@ export class TaskRunner {
   private slots = new Map<string, RunningSlot>();
   private stopped = false;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
+  /** 定时任务检查间隔（v0.5.5；独立于 500ms 队列泵 —— 读目录频率更低）。 */
+  private schedTimer: ReturnType<typeof setInterval> | null = null;
   private lockHeartbeat: ReturnType<typeof setInterval> | null = null;
   private lockFile: string;
 
@@ -333,18 +335,51 @@ export class TaskRunner {
     try { fs.rmSync(this.lockFile, { force: true }); } catch { /* 不存在 */ }
   }
 
-  /** 启动队列泵（500ms 领取间隔）。 */
+  /** 启动队列泵（500ms 领取间隔）+ 定时任务检查（30s）。 */
   start(): void {
     if (this.tickTimer) return;
     this.tickTimer = setInterval(() => { void this.tick(); }, 500);
     // 立即跑一次（启动即响应）
     void this.tick();
+    // v0.5.5：定时触发器挂载（taskd / web 内嵌执行器即「有定时能力」）
+    if (!this.schedTimer) {
+      this.schedTimer = setInterval(() => { void this.checkSchedules(); }, 30_000);
+      void this.checkSchedules();
+    }
   }
 
   stop(): void {
     this.stopped = true;
     if (this.tickTimer) clearInterval(this.tickTimer);
     this.tickTimer = null;
+    if (this.schedTimer) clearInterval(this.schedTimer);
+    this.schedTimer = null;
+  }
+
+  /**
+   * 定时任务检查（v0.5.5）：到期 → 领取（schedule.ts 内防双发）→ 入队。
+   * 动态 import 防循环依赖（schedule.ts 不依赖本模块；本模块运行时才连）。
+   * 失败静默 —— 定时面降级，队列泵本体不受影响（下次 30s 重试）。
+   */
+  private async checkSchedules(): Promise<void> {
+    if (this.stopped) return;
+    try {
+      const { dueSchedules } = await import("./schedule.ts");
+      const r = dueSchedules(this.ws);
+      for (const s of r.due) {
+        const t = submitTask(this.ws, s.kind, {
+          task: s.spec.task, expert: s.spec.expert, question: s.spec.question,
+          model: s.spec.model,
+        }, { notify: s.notify });
+        journal(this.ws, t.id, "scheduled", `定时 ${s.id}（${s.expr}）第 ${s.runs} 次触发入队`);
+        console.log(`\u23f0 定时触发 ${s.id}（${s.expr}）→ 任务 ${t.id} 入队`);
+      }
+      for (const sk of r.skipped) {
+        console.log(`\u23f0 定时 ${sk.id} 错过 ${sk.missedBy} → misfire=skip 跳过本周期`);
+      }
+    } catch {
+      // schedule 检查失败不炸队列泵
+    }
   }
 
   /** 单次泵：领取 + 对账 + 收割。公开给 run-next 单发模式复用。 */

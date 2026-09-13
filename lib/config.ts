@@ -40,11 +40,13 @@ import { PROVIDERS } from "./provider-registry.ts";
 /** 配置键（平面字段名 —— 全部 snake_case）。 */
 export type ConfigKey =
   | "gateway" | "api_key" | "model" | "thinking" | "timeout_ms" | "default_lane"
-  | "api_keys" | "fallbacks" | "budget_requests" | "desktop_notify";
+  | "api_keys" | "fallbacks" | "budget_requests" | "desktop_notify"
+  | "notify_webhook_url" | "notify_webhook_events";
 
 export const CONFIG_KEYS: readonly ConfigKey[] = [
   "gateway", "api_key", "model", "thinking", "timeout_ms", "default_lane",
   "api_keys", "fallbacks", "budget_requests", "desktop_notify",
+  "notify_webhook_url", "notify_webhook_events",
 ] as const;
 
 /** 命名车道（文件形态）。 */
@@ -74,6 +76,8 @@ export function normalizeKey(raw: string): ConfigKey | null {
   if (k === "fallback" || k === "fallback_lanes") return "fallbacks";
   if (k === "budget" || k === "budget_per_day" || k === "requests_per_day") return "budget_requests";
   if (k === "desktop" || k === "notify" || k === "notifications") return "desktop_notify";
+  if (k === "webhook" || k === "webhook_url") return "notify_webhook_url";
+  if (k === "webhook_events" || k === "notify_events") return "notify_webhook_events";
   return null;
 }
 
@@ -91,13 +95,18 @@ export interface UserConfig {
   budget_requests: string;
   /** 桌面通知开关：on/off/auto（缺省 auto —— 检测到命令才发）。 */
   desktop_notify: string;
+  /** 通知 webhook 出站（v0.5.5）：URL（空 = 关闭）。 */
+  notify_webhook_url: string;
+  /** webhook 事件过滤（逗号分隔 kind；空/"*" = 全发）。 */
+  notify_webhook_events: string;
   lanes: Record<string, LaneConfig>;
 }
 
 export function emptyConfig(): UserConfig {
   return {
     gateway: "", api_key: "", model: "", thinking: "", timeout_ms: "", default_lane: "",
-    api_keys: [], fallbacks: [], budget_requests: "", desktop_notify: "", lanes: {},
+    api_keys: [], fallbacks: [], budget_requests: "", desktop_notify: "",
+    notify_webhook_url: "", notify_webhook_events: "", lanes: {},
   };
 }
 

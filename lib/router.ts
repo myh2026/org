@@ -8,6 +8,9 @@
 //   车道降级链     key 池全部失败 / 超时 → fallback 链的下一个车道（模型名随之改写）
 //   预算水位      budget_requests（org config set budget_requests N）超出 → 429
 //   调用台账      每次尝试落 <ws>/runtime/llm-ledger.jsonl（key 指纹 / 状态 / 延迟）
+//   池状态落盘    429/5xx/timeout → 该 key 冷却并落 <ws>/runtime/llm-pool.json
+//                （v0.5.5：跨进程共享 —— chat / taskd / web 三端同池同冷却；
+//                冷却中的 key 排序沉底，全部冷却则照用不阻断）
 //   流式透传      SSE 字节级转发（注入 include_usage 尽力收 usage；被拒则去 option 重试）
 //
 // 生命周期：ensureRouter() 幂等（多 key / 降级链 / 预算任一命中才启动）；
@@ -141,6 +144,149 @@ function todayBudgetUsed(workspace: string, budget: number): number {
   }
 }
 
+
+// ---- key 池状态落盘（v0.5.5：跨进程共享冷却） --------------------------------
+
+export interface PoolKeyState {
+  /** 冷却到期（epoch ms；小于当下 = 不在冷却）。 */
+  until: number;
+  /** 连续失败次数（冷却时长按档位放大）。 */
+  fails: number;
+  last_status: string;
+  last_ts: string;
+}
+
+export type PoolState = Record<string, Record<string, PoolKeyState>>;
+
+function poolFile(ws: string): string {
+  return path.join(ws, "runtime", "llm-pool.json");
+}
+
+/** 读池状态（坏文件 → 空对象不炸）。 */
+export function readPool(ws: string): PoolState {
+  try {
+    const file = poolFile(ws);
+    if (!fs.existsSync(file)) return {};
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as unknown;
+    if (raw === null || typeof raw !== "object") return {};
+    const out: PoolState = {};
+    for (const [lane, keys] of Object.entries(raw as Record<string, unknown>)) {
+      if (keys === null || typeof keys !== "object") continue;
+      const laneOut: Record<string, PoolKeyState> = {};
+      for (const [keyId, v] of Object.entries(keys as Record<string, unknown>)) {
+        if (v === null || typeof v !== "object") continue;
+        const s = v as Record<string, unknown>;
+        laneOut[keyId] = {
+          until: Number(s.until ?? 0) || 0,
+          fails: Number(s.fails ?? 0) || 0,
+          last_status: String(s.last_status ?? ""),
+          last_ts: String(s.last_ts ?? ""),
+        };
+      }
+      if (Object.keys(laneOut).length > 0) out[lane] = laneOut;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function writePool(ws: string, pool: PoolState): void {
+  try {
+    fs.mkdirSync(path.join(ws, "runtime"), { recursive: true });
+    const tmp = `${poolFile(ws)}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(pool, null, 2) + "\n", "utf-8");
+    fs.renameSync(tmp, poolFile(ws));
+  } catch {
+    // 池状态写失败静默（排序优化丢了不影响正确性 —— 只是照原序用 key）
+  }
+}
+
+/** 冷却时长档位：60s 起，连续失败放大（5 档封顶 300s）。 */
+function cooldownMs(fails: number): number {
+  return Math.min(60_000 * Math.max(1, fails), 300_000);
+}
+
+/** 记一次 key 失败：429/5xx/timeout 进冷却；其它 4xx 只记状态（key 失效是常态，不冷却）。 */
+export function recordKeyFailure(ws: string, laneName: string, keyId: string, status: string): void {
+  const coolable = status === "429" || (/^\d+$/.test(status) && Number(status) >= 500) || status === "timeout" || status === "net-error";
+  const pool = readPool(ws);
+  const lane = pool[laneName] ?? {};
+  const prev = lane[keyId] ?? { until: 0, fails: 0, last_status: "", last_ts: "" };
+  const fails = coolable ? prev.fails + 1 : prev.fails;
+  lane[keyId] = {
+    until: coolable ? Date.now() + cooldownMs(fails) : prev.until,
+    fails,
+    last_status: status,
+    last_ts: new Date().toISOString(),
+  };
+  pool[laneName] = lane;
+  writePool(ws, pool);
+}
+
+/** 记一次 key 成功：清冷却与连续失败计数。 */
+export function recordKeyOk(ws: string, laneName: string, keyId: string): void {
+  const pool = readPool(ws);
+  const lane = pool[laneName];
+  if (!lane || !lane[keyId]) return; // 无状态零写盘（常见路径零成本）
+  delete lane[keyId];
+  if (Object.keys(lane).length === 0) delete pool[laneName];
+  writePool(ws, pool);
+}
+
+/** 池健康观测（CLI / chat / Web 三端渲染共用）。 */
+export interface LanePoolView {
+  lane: string;
+  keys: Array<{ key_id: string; cooling: boolean; until?: string; fails: number; last_status: string }>;
+}
+
+export function poolView(ws: string, laneName?: string): LanePoolView[] {
+  const pool = readPool(ws);
+  const now = Date.now();
+  const out: LanePoolView[] = [];
+  for (const [lane, keys] of Object.entries(pool)) {
+    if (laneName && lane !== laneName) continue;
+    const list = Object.entries(keys).map(([key_id, s]) => ({
+      key_id,
+      cooling: s.until > now,
+      ...(s.until > now ? { until: new Date(s.until).toISOString() } : {}),
+      fails: s.fails,
+      last_status: s.last_status,
+    }));
+    if (list.length > 0) out.push({ lane, keys: list });
+  }
+  return out;
+}
+
+/** 冷却中的 key 沉底（稳定排序；全冷却 → 原序照用，不阻断）。 */
+function orderAttemptsByCooldown(attempts: Attempt[], ws: string): Attempt[] {
+  const pool = readPool(ws);
+  const laneKeys = pool[(attempts[0]?.lane.name ?? "")];
+  if (!laneKeys || attempts.length < 2) return attempts;
+  const now = Date.now();
+  const cooling = (a: Attempt): boolean => {
+    const s = laneKeys[keyFingerprint(a.key, a.keyIndex)];
+    return s !== undefined && s.until > now;
+  };
+  // 稳定排序（ES2019+ 保证）：冷却的沉底，其余保持轮转序
+  return [...attempts].sort((a, b) => (cooling(a) ? 1 : 0) - (cooling(b) ? 1 : 0));
+}
+
+/** 预算水位（v0.5.5：三端渲染统一口径）。 */
+export interface BudgetWatermark {
+  budget: number;
+  used: number;
+  remaining: number;
+  exceeded: boolean;
+}
+
+export function budgetWatermark(workspace: string): BudgetWatermark {
+  const budget = Number((loadConfig().budget_requests ?? "").trim() || "0");
+  if (budget <= 0) return { budget: 0, used: 0, remaining: 0, exceeded: false };
+  const used = todayBudgetUsed(workspace, budget);
+  return { budget, used, remaining: Math.max(0, budget - used), exceeded: used >= budget };
+}
+
 // ---- 服务器 ----------------------------------------------------------------
 
 async function startRouter(lane: ResolvedLane, workspace: string): Promise<RouterHandle> {
@@ -190,7 +336,9 @@ async function startRouter(lane: ResolvedLane, workspace: string): Promise<Route
       }
       // key 池轮转起点（round-robin：每次请求从池的下一个 key 开始）
       const start = attempts.length > 1 ? rotation.next++ % Math.max(1, liveLane.keys.length) : 0;
-      const ordered = attempts.slice(start).concat(attempts.slice(0, Math.min(start, attempts.length - start)));
+      const rotated = attempts.slice(start).concat(attempts.slice(0, Math.min(start, attempts.length - start)));
+      // v0.5.5：冷却中的 key 沉底（池状态跨进程共享 —— llm-pool.json）
+      const ordered = orderAttemptsByCooldown(rotated, workspace);
       let lastStatus = "net-error";
       let lastCode = 502;
       let lastMsg = "全部尝试失败";
@@ -227,6 +375,7 @@ async function startRouter(lane: ResolvedLane, workspace: string): Promise<Route
               key_id: keyFingerprint(a.key, a.keyIndex), model: a.lane.model, stream,
               status: String(res.status), code: res.status, ms,
             });
+            recordKeyFailure(workspace, a.lane.name, keyFingerprint(a.key, a.keyIndex), String(res.status));
             // stream_options 不被支持（部分服务商 4xx 明示）→ 去 option 重试本 key 一次
             if (stream && res.status >= 400 && res.status < 500 && /stream_options|include_usage/i.test(text)) {
               delete forward.stream_options;
@@ -252,6 +401,7 @@ async function startRouter(lane: ResolvedLane, workspace: string): Promise<Route
             key_id: keyFingerprint(a.key, a.keyIndex), model: a.lane.model, stream,
             status: "timeout", ms: Date.now() - t0,
           });
+          recordKeyFailure(workspace, a.lane.name, keyFingerprint(a.key, a.keyIndex), "timeout");
           continue; // 超时/网络 → 下一车道（换 key 对超时意义不大，但链会推进）
         }
       }
@@ -308,6 +458,8 @@ interface RelayCtx {
 async function relay(res: Response, ctx: RelayCtx): Promise<Response> {
   const { lane, stream, workspace, ms } = ctx;
   const keyId = keyFingerprint(lane.key, lane.keyIndex);
+  // v0.5.5：成功即清冷却与失败计数（池状态跨进程共享）
+  recordKeyOk(workspace, lane.lane.name, keyId);
   if (!stream) {
     const text = await res.text();
     let tokens: number | undefined;

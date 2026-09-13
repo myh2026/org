@@ -5,8 +5,8 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.5.4_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
-[![Tests](https://img.shields.io/badge/tests-357%2F357_passing-brightgreen.svg)](#-测试与验证状态)
+[![Status](https://img.shields.io/badge/status-v0.5.5_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Tests](https://img.shields.io/badge/tests-389%2F389_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.64-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
 [![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-三平台单二进制分发)
@@ -19,7 +19,9 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **v0.5.4 当前状态**：可运行实现，**357/357 机制级测试全绿**（19 文件 · 1481 expect）。本版落地**HSL python 产物 ruff 门禁**：python 生成器从 134 项 ruff 失败修到全规则全绿（按需导入 / 变体桩类 / 复合赋值算符翻倍等六修，双仓同步 + 上游 176/176 回归）· `scripts/ruff-gate.ts` 三语料门禁（ORG 内核 python 投射 + 全特性语料 + 模式全家族）· CI 接线（uv + ruff）。org.hsl 新增 python 投射车道（一源多投射实证）。
+> **v0.5.5 当前状态**：可运行实现，**389/389 机制级测试全绿**（20 文件 · 1600 expect）。本版集中消化 issue #32 遗留清单：**定时任务触发器**（org schedule：五段 cron / @every · 到期自动入队 · misfire 策略 · taskd/web 执行器挂载）· **通知 webhook 出站**（notify_webhook_url · 三通道互不影响）· **key 池状态落盘跨进程共享**（429 冷却 60s→0s 档位 · 沉底排序）· **预算水位三端渲染**（CLI/chat/Web 统一口径）· **chat REPL 指挥台化**（/tools /lane /tasks /sched /notify）。
+
+> **v0.5.4 历史状态**：可运行实现，**357/357 机制级测试全绿**（19 文件 · 1481 expect）。本版落地**HSL python 产物 ruff 门禁**：python 生成器从 134 项 ruff 失败修到全规则全绿（按需导入 / 变体桩类 / 复合赋值算符翻倍等六修，双仓同步 + 上游 176/176 回归）· `scripts/ruff-gate.ts` 三语料门禁（ORG 内核 python 投射 + 全特性语料 + 模式全家族）· CI 接线（uv + ruff）。org.hsl 新增 python 投射车道（一源多投射实证）。
 
 > **v0.5.3 历史状态**：可运行实现，**346/346 机制级测试全绿**（18 文件 · 1460 expect）。本版落地**agent 工具环**（direct 车道模型可调用 fs_read/fs_write/fs_edit/shell_run —— 能力门 + 审批在环 + 有界循环；真实模型端到端实测：读文件→正确回答）与**上下文三注入**（AGENTS.md 工作区规则 · 专家长期记忆 org memory · @文件/目录引用）。工具环三档开关：未设=纯问答（零变化）/ 1=只读 / write=全量+能力门。
 
@@ -514,6 +516,12 @@ flowchart LR
 | `/history` | 轮次回放 | 当前会话逐轮「问题 → 回答首行」，compact 轮有标记 |
 | `/retry` | 重问 | 重发上一问题（失败轮不落账本，重试安全） |
 | `/compact` | 上下文压缩 | LLM 摘要会话史 → 账本重写为单轮摘要（`compacted:true`），备份 `.bak-<ts>` 可手工回滚 |
+| `/tools [off\|read\|write]` | 工具环能力门 | off 纯对话 · read 只读（fs_read/grep）· write 全量（写/执行仍逐项审批在环） |
+| `/lane` | 车道体检 | 当前车道 + key 池健康（冷却/连败）+ 今日预算水位（超限标红） |
+| `/tasks` | 任务队列快照 | 排队/运行/暂停/完成/失败/取消计数 + 最近 5 条 |
+| `/sched` | 定时任务快照 | 表达式 · 下次触发（N 分钟后）· 已触发次数 |
+| `/notify` | 通知快照 | 未读数 + 最近 3 条（task 完成/审批请求） |
+| `/memory` | 长期记忆 | 查看/追加当前专家记忆（每轮自动注入提示词） |
 | `/clear` | 清屏 | 重绘 banner |
 | `/exit`（`/quit` `/q`） | 退出 | Ctrl+D 同效；会话账本保留（`org chat --continue` 接续） |
 | `!<cmd>` | shell 逃逸 | 用户发起 · 结果直接可见（不经 harness 能力面） |
@@ -963,6 +971,11 @@ bun cli/org.ts web --model deepseek                   # Web GUI（SSE delta 逐 
 | `org tui` | 组织驾驶舱（OpenCode 级终端前端）：三区布局 · 事件卡片流 | `bun cli/org.ts tui [":demo"\|":replay out-…"]` |
 | `org web` | Web GUI（Bun.serve 零依赖，默认 4600）：专家卡 + 会话侧栏 + 对话视图 + SSE 流式 | `bun cli/org.ts web --port 4600 --model deepseek --gateway http://127.0.0.1:3030/v1` |
 | `org config` | 用户模型/API 配置（~/.org/config.json 持久化）：预设一键接入 · 来源归因 · 连通测试 · 缺省车道 | `org config preset deepseek`<br>`… config set api_key sk-***`<br>`… config test`<br>`… config set default_lane deepseek` |
+| `org task [list\|submit\|show\|cancel\|pause\|resume\|retry]` | 长程任务队列：P0-P10 优先级 · 孤儿收割 · `run-next` 前台单发 | `bun cli/org.ts task submit "每周汇总并出表格" --priority 3` |
+| `org taskd` | 守护执行器（runner lock 跨进程互斥 · 定时触发器挂载） | `bun cli/org.ts taskd` |
+| `org schedule [list\|add\|rm\|on\|off\|test]` | 定时任务触发器：五段 cron / @every · 到期自动入队 · misfire 策略 | `bun cli/org.ts schedule add "@every 30m" run "巡检任务"`<br>`… schedule test "*/30 9-17 * * 1-5"` |
+| `org notify [list\|read\|clear\|test]` | 通知中心：任务完成/失败/审批请求 · 桌面三级降级 + webhook 出站 | `bun cli/org.ts notify list`<br>`… config set notify_webhook_url https://…/hook` |
+| `org memory [list\|add\|rm]` | 专家长期记忆（每轮自动注入提示词）· `org providers` 服务商健康 + 预算水位 + key 池 | `bun cli/org.ts memory add notice-parser "日期统一 ISO 8601"` |
 
 通用 flag：`--workspace DIR`（工作区，缺省源码模式 `demo-run/`、单二进制 `~/.org/workspace`）· `--model scripted\|deepseek` · `--fixture FILE`（剧本覆盖，缺省导入剧本自动发现）。
 

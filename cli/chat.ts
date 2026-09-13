@@ -26,6 +26,10 @@ import { ORG_VERSION } from "../lib/version.ts";
 import { resolveModelFlag } from "../lib/providers.ts"; // 车道解析（v0.5.1）
 import { expandMentions } from "../lib/mentions.ts"; // @文件引用（v0.5.3）
 import { listMemories, addMemory } from "../lib/memories.ts"; // 长期记忆（v0.5.3）
+import { listTasks } from "../lib/tasks.ts"; // 任务队列快照（v0.5.5）
+import { listSchedules } from "../lib/schedule.ts"; // 定时任务快照（v0.5.5）
+import { readNotifications, unreadCount } from "../lib/notify.ts"; // 通知中心快照（v0.5.5）
+import { poolView, budgetWatermark } from "../lib/router.ts"; // 池状态/预算水位（v0.5.5）
 
 const CONTEXT_WINDOW = 131072; // 与 direct.hsl / engine.ts 同源的窗口口径
 const HISTORY_FILE = "runtime/chat-history.txt";
@@ -330,10 +334,93 @@ async function handleSlash(state: ChatOpts, rl: readline.Interface, command: str
   /fork [新 id]        会话派生（账本复制即分叉，原会话不变）
   /undo [版本]         版本回退（归档源还原为在岗源，可逆）
   /memory             查看/追加专家长期记忆（每轮自动注入）
+  /tools [off|read|write]  工具环能力门（fs 读/写/执行/检索 · write 需审批在环）
+  /lane               当前车道 + key 池健康 + 今日预算水位
+  /tasks              任务队列快照（排队/运行/暂停 + 最近 5 条）
+  /sched              定时任务快照（下次触发 · 已触发次数）
+  /notify             通知中心快照（未读数 + 最近 3 条）
   /clear               清屏
   /exit /quit /q       退出（Ctrl+D 同）
   !<cmd>               shell 逃逸（用户发起 · 结果直接可见）`);
       return true;
+    case "tools": {
+      // 工具环能力门（hsl/pool/tools.hsl 的 ORG_TOOLS 环境变量）：
+      // off = 纯对话；read = 只读工具（fs_read/grep）；write = 全工具
+      //（写/执行仍逐项审批 —— 能力门只是第一道，审批在环是第二道）
+      const want = arg.trim().toLowerCase();
+      if (want === "off" || want === "read" || want === "write") {
+        process.env.ORG_TOOLS = want;
+        const hint = want === "off" ? "纯对话（工具环关闭）"
+          : want === "read" ? "只读工具（fs_read / grep / web_search）"
+          : "全工具（写/执行逐项审批在环 —— org approvals）";
+        console.log(dim(`⟳ 工具环 → ${want} · ${hint}`));
+        if (want !== "off") console.log(dim("  进程内生效；持久化用 org config set tools write（org config 全局口径）"));
+        return true;
+      }
+      const cur = (process.env.ORG_TOOLS ?? "").trim().toLowerCase() || "read";
+      console.log(`工具环：${bold(cur)}${cur === "off" ? dim("（纯对话）") : cur === "read" ? dim("（只读）") : dim("（全工具 · 审批在环）")}`);
+      console.log(dim("  /tools off|read|write 切换（write 的每次写/执行仍走审批队列）"));
+      return true;
+    }
+    case "lane": {
+      const lane = resolveModelFlag(state.model);
+      console.log(`车道：${bold(lane.name)}${dim(`（${lane.origin}）`)}`);
+      if (lane.kind === "real") {
+        console.log(`  ${lane.gateway}/chat/completions · model=${lane.model}${lane.keys.length > 0 ? ` · key×${lane.keys.length}` : ""}${lane.fallbacks.length > 0 ? ` · 降级→${lane.fallbacks.join(",")}` : ""}`);
+      } else {
+        console.log(dim("  剧本车道（零外联）—— /model <车道名> 切真实模型"));
+      }
+      const pools = poolView(state.workspace, lane.kind === "real" ? lane.name : undefined);
+      if (pools.length > 0) {
+        for (const pv of pools) {
+          for (const k of pv.keys) {
+            console.log(`  ${k.key_id} ${k.cooling ? amber(`冷却中 ${Math.max(0, Math.round((Date.parse(k.until!) - Date.now()) / 1000))}s`) : green("可用")} · 连败 ${k.fails} · 上次 ${k.last_status}`);
+          }
+        }
+      }
+      const wm = budgetWatermark(state.workspace);
+      if (wm.budget > 0) {
+        const pct = Math.min(100, Math.round((wm.used / wm.budget) * 100));
+        console.log(`  今日预算 ${wm.used}/${wm.budget}（${pct}% · 剩 ${wm.remaining}）${wm.exceeded ? red(" · 已超额") : ""}`);
+      }
+      return true;
+    }
+    case "tasks": {
+      const all = listTasks(state.workspace);
+      const by = (s: string): number => all.filter((t) => t.status === s).length;
+      console.log(`任务队列：排队 ${by("queued")} · 运行 ${by("running")} · 暂停 ${by("paused")} · 完成 ${by("done")} · 失败 ${by("failed")} · 取消 ${by("cancelled")}`);
+      const recent = all.slice(-5).reverse();
+      for (const t of recent) {
+        const spec = t.kind === "ask" ? `ask ${t.spec.expert}` : "run";
+        console.log(`  ${t.id}  ${spec} · ${t.status}${t.error ? amber(` · ${t.error.slice(0, 40)}`) : ""}`);
+      }
+      if (all.length === 0) console.log(dim("  （空 · org task submit <任务> 或 /sched 定时触发）"));
+      console.log(dim("  完整面：org task list · 执行器 org taskd / org web"));
+      return true;
+    }
+    case "sched": {
+      const list = listSchedules(state.workspace);
+      console.log(`定时任务：${list.length} 条`);
+      const now = new Date();
+      for (const s of list) {
+        const nextMs = Date.parse(s.next_run);
+        const inMin = Number.isFinite(nextMs) ? Math.round((nextMs - now.getTime()) / 60_000) : NaN;
+        const mark = s.invalid ? "⚠" : s.enabled ? "⏰" : "○";
+        console.log(`  ${mark} ${s.id}  ${s.expr} · ${s.kind}${s.enabled ? ` · 下次 ${Number.isFinite(inMin) ? (inMin <= 0 ? "到期" : `${inMin} 分钟后`) : "?"}` : " · 已停用"}`);
+      }
+      if (list.length === 0) console.log(dim("  （空 · org schedule add \"*/30 9-17 * * 1-5\" run \"...\"）"));
+      return true;
+    }
+    case "notify": {
+      const unread = readNotifications(state.workspace, { unreadOnly: true });
+      console.log(`通知：未读 ${bold(String(unread.length))} 条`);
+      for (const n of unread.slice(-3).reverse()) {
+        console.log(`  ● [${n.kind}] ${n.title}${n.detail ? dim(` · ${n.detail.slice(0, 50)}`) : ""}`);
+      }
+      if (unread.length === 0) console.log(dim("  （无未读 —— 长程任务完成/审批请求自动通知）"));
+      console.log(dim("  完整面：org notify list / read all · 桌面/webhook 配置 org config"));
+      return true;
+    }
     case "memory": {
       if (arg.length > 0) {
         // /memory add <内容> —— 追加到当前专家记忆

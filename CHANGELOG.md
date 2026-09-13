@@ -1,5 +1,83 @@
 # CHANGELOG
 
+## v0.5.5（2026-09-13）—— 定时触发器 + webhook 出站 + key 池冷却落盘 + 预算水位三端渲染
+
+issue #32 遗留清单的集中消化：长程任务队列装上**时间维度**（cron /
+@every 到期自动入队），通知中心接**webhook 出站**（桌面/存储/远程三
+通道），路由器 key 池状态**落盘跨进程共享**（429 冷却不再各进程各扫
+各的），预算水位在 **CLI / chat / Web 三端统一口径渲染**。389/389
+机制级测试全绿（20 文件 · 1600 expect，+32 例）。
+
+### 定时任务触发器（lib/schedule.ts · org schedule）
+
+- 表达式：五段 cron（`0,15,30,45 9-17 ... 1-5` / 步进 / 范围 / 列表 /
+  dow 7 归一 · dom-dow Vixie OR 语义）+ `@every 30s|m|h|d` 简化式；
+- nextAfter 逐分钟扫描（UTC 基准确定性 · 366 天上限防死循环 ——
+  「2 月 30 日」如实返回无命中）；
+- 文件协议 `<ws>/runtime/schedules/`（原子写 + journal 审计）；领取
+  即推进 next_run（双重读防双发）；
+- misfire 策略：`skip`（缺省：迟到超 2 分钟跳本周期）/ `run`（补跑
+  一次）—— 长离线后不风暴；
+- 挂载点：TaskRunner.start() 起 30s 检查 timer（org taskd / org web
+  内嵌执行器即「有定时能力」）；无执行器在跑时记录照常推进，任务躺在
+  队列等执行器（多重优雅降级）；
+- CLI：`org schedule list|add|rm|on|off|test`（test 预览未来 3 触发点）；
+- Web：`GET/POST /api/schedules` + `GET /api/schedules/preview` +
+  任务中心旁 ⏰ 定时面板（新建/启停/删除/预览）。
+
+### 通知 webhook 出站（lib/notify.ts）
+
+- `org config set notify_webhook_url URL` 启用；每条通知
+  fire-and-forget POST JSON（5s 超时；失败静默 —— 慢/坏 endpoint 绝不
+  拖累通知写入与业务主流程）；
+- `notify_webhook_events` 事件过滤（逗号分隔 kind；空/`*` 全发）；
+- `org notify test` 实测三通道（存储/桌面/webhook）并显式报告出站
+  结果；payload 契约 `{source:"org", event, title, detail, ts, taskId}`。
+
+### key 池状态落盘（lib/router.ts）
+
+- `runtime/llm-pool.json`：按 lane → key 指纹 → {until, fails,
+  last_status}；429/5xx/timeout 进冷却（60s 起按连败档位放大，封顶
+  300s），4xx 只记状态（key 失效是常态不冷却）；
+- **跨进程共享**：chat / taskd / web 三端同池同冷却（此前轮换状态
+  只在单进程内存里）；
+- 冷却中的 key 在尝试序列中**稳定沉底**（全部冷却则照原序用，不阻断）；
+  成功即清零；
+- `org providers` 输出池健康；Web ⚙ 面板同数据源渲染。
+
+### 预算水位三端渲染
+
+- `budgetWatermark(workspace)` 统一口径：{budget, used, remaining,
+  exceeded}（按当日 ok 请求数；budget 每请求重读）；
+- CLI `org providers`：`█░` 水位条；chat REPL `/lane`：水位行 +
+  池健康；Web ⚙ 面板：水位条 + 池状态列表。
+
+### chat REPL 指挥台化（/tools /lane /tasks /sched /notify）
+
+`org chat` 内直接查看/切换：工具环能力门（off/read/write）、当前车道
++ key 池 + 预算、任务队列快照、定时任务快照、通知未读 —— 不离开会话
+即可掌握全局（issue #32 遗留项「/tools 命令」落地）。
+
+### 顺手修复
+
+- chat help 的 `/model [m]` 显示（既有，实为显示层 ANSI 消费假象，
+  源文件完好；保留占位说明）；
+- `CONFIG_KEYS` 前向扩展：notify_webhook_url / notify_webhook_events
+  （老配置文件缺省空串）。
+
+### 验证
+
+- `bun test tests/`：**389/389**（20 文件 · 1600 expect；v0.5.5 新增
+  tests/v055.test.ts 32 例：cron 解析 7 形态 / nextAfter 8 语义断言
+  （跨小时/跨月/周末跳周一/2 月无命中不死循环）/ 文件协议 + 防双发 +
+  misfire 双策略 / TaskRunner 挂载 e2e / webhook 四态（off/sent/
+  filtered/failed）+ payload 契约 / 池冷却 429-4xx-timeout 分流 + 档位
+  封顶 / 预算水位超限口径）；
+- `org check` 43 模块全绿 · `bun scripts/ruff-gate.ts` 三语料全绿 ·
+  `org demo` 全叙事 · chat REPL 五新命令冒烟 · Web script 块
+  `new Function` 解析回归（模板字符串内 `\"` 转义被消费导致裸引号
+  嵌套的实测缺陷已修）。
+
 ## v0.5.4（2026-09-13）—— HSL python 产物 ruff 门禁（生成器六修 + CI 接线 + 语料）
 
 「所有产物 ruff 检测均可通过」的可执行落地：vendored dhv-ts 的 python

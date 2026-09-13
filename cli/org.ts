@@ -44,14 +44,19 @@ import { configPath, loadConfig, setConfigValue, unsetConfigValue, applyPreset,
          type LaneConfig } from "../lib/config.ts"; // 用户模型/API 配置（v0.4.16）
 import { PROVIDERS, PROVIDER_NAMES, discoverEnvLanes, resolveModelFlag,
          providerRows, testLane, type ProviderRow } from "../lib/providers.ts"; // 服务商注册表与车道解析（v0.5.1）
-import { prepareLlmEnv, readLedger, activeRouter, type LedgerStats } from "../lib/router.ts"; // 本地路由器（v0.5.1）
+import { prepareLlmEnv, readLedger, activeRouter, poolView, budgetWatermark, type LedgerStats } from "../lib/router.ts"; // 本地路由器（v0.5.1 · 池状态/预算水位 v0.5.5）
 import {
   submitTask, listTasks, getTask, readTaskJournal, cancelTask, pauseTask,
   resumeTask, retryTask, runNextTask, TaskRunner, type TaskStatus,
 } from "../lib/tasks.ts"; // 长程任务队列（v0.5.2）
 import {
   notifyEvent, readNotifications, unreadCount, markRead, clearNotifications,
-} from "../lib/notify.ts"; // 通知中心（v0.5.2）
+  webhookNotify,
+} from "../lib/notify.ts"; // 通知中心（v0.5.2 · webhook 出站 v0.5.5）
+import {
+  addSchedule, listSchedules, removeSchedule, setScheduleEnabled,
+  previewNext, type ScheduleRecord,
+} from "../lib/schedule.ts"; // 定时任务触发器（v0.5.5）
 import { expandMentions } from "../lib/mentions.ts"; // @文件引用（v0.5.3）
 import { listMemories, addMemory, removeMemory, allMemories } from "../lib/memories.ts"; // 长期记忆（v0.5.3）
 
@@ -1612,11 +1617,128 @@ async function cmdNotify(a: Args): Promise<number> {
     return 0;
   }
   if (verb === "test") {
-    const r = notifyEvent(ws, "custom", "测试通知", "org notify test —— 桌面通知三级降级链实测", { desktop: true });
+    const r = notifyEvent(ws, "custom", "测试通知", "org notify test —— 桌面/存储/webhook 三通道实测", { desktop: true });
     console.log(`✓ 通知已写入 ${r.id}（桌面弹窗视环境而定，通知中心面板/CLI 始终可读）`);
+    // v0.5.5：webhook 出站同步实测（fire-and-forget 平时静默，test 显式报告）
+    const w = await webhookNotify(r);
+    if (w.status === "sent") console.log(`✓ webhook 出站成功（HTTP ${w.code}）`);
+    else if (w.status === "off") console.log("○ webhook 未配置（org config set notify_webhook_url URL 启用）");
+    else if (w.status === "filtered") console.log("○ webhook 已配置但事件被 notify_webhook_events 过滤");
+    else console.error(`✗ webhook 出站失败：${w.code ?? w.error ?? "未知"}`);
     return 0;
   }
   console.error(`✗ 未知子命令：${verb}（可用：list/read/clear/test）`);
+  return 2;
+}
+
+// ---- org schedule：定时任务触发器（v0.5.5） ------------------------------------
+
+function printScheduleRow(s: ScheduleRecord, now: Date): void {
+  const nextMs = Date.parse(s.next_run);
+  const inMin = Number.isFinite(nextMs) ? Math.round((nextMs - now.getTime()) / 60_000) : NaN;
+  const inStr = !Number.isFinite(inMin) ? "?" : inMin <= 0 ? "到期" : inMin < 90 ? `${inMin} 分钟后` : `${Math.round(inMin / 1440)} 天后`;
+  const mark = s.invalid ? "⚠" : s.enabled ? "⏰" : "○";
+  const spec = s.kind === "run"
+    ? `run · ${s.spec.task.slice(0, 44)}`
+    : `ask · ${s.spec.expert} · ${s.spec.question.slice(0, 32)}`;
+  console.log(`  ${mark} ${s.id}  ${s.expr}`);
+  console.log(`       ${spec}`);
+  console.log(`       下次 ${s.next_run.slice(0, 19).replace("T", " ")}（${inStr}） · 已触发 ${s.runs} 次 · misfire=${s.misfire}${s.invalid ? ` · ${s.invalid}` : ""}`);
+}
+
+async function cmdSchedule(a: Args): Promise<number> {
+  const [verb, ...rest] = a.rest;
+  const ws = defaultWorkspace(a);
+
+  if (verb === undefined || verb === "list") {
+    const list = listSchedules(ws);
+    console.log(`定时任务 · ${ws}/runtime/schedules（${list.length} 条 · 执行器 org taskd / org web 挂载触发）\n`);
+    const now = new Date();
+    for (const s of list) printScheduleRow(s, now);
+    if (list.length === 0) {
+      console.log("（空 · org schedule add \"*/30 9-17 * * 1-5\" run \"任务描述\" 工作时段半小时一跑）");
+    }
+    return 0;
+  }
+
+  if (verb === "add") {
+    const expr = rest[0];
+    const kind = rest[1];
+    if (!expr || (kind !== "run" && kind !== "ask")) {
+      console.error('用法：org schedule add <expr> run "任务描述" [--model m]');
+      console.error('      org schedule add <expr> ask <expert> "问题" [--model m]');
+      console.error('expr：五段 cron（分 时 日 月 周）或 @every 30m');
+      return 2;
+    }
+    // 尾参解析：--model m / --misfire skip|run / --notify on|off + 位置参数
+    const pos: string[] = [];
+    let model = a.model;
+    let misfire: "skip" | "run" = "skip";
+    let notify = true;
+    let i = 2;
+    while (i < rest.length) {
+      const v = rest[i]!;
+      if (v === "--model" || v === "-m") model = rest[++i] ?? model;
+      else if (v === "--misfire") {
+        const mf = rest[++i];
+        if (mf === "run") misfire = "run";
+      } else if (v === "--notify") notify = (rest[++i] !== "off");
+      else if (v.length > 0 && !v.startsWith("--")) pos.push(v);
+      i++;
+    }
+    try {
+      const s = addSchedule(ws, expr, kind, kind === "run"
+        ? { task: pos.join(" "), model }
+        : { expert: pos[0] ?? "", question: pos.slice(1).join(" "), model },
+        { misfire, notify });
+      if (s.invalid) {
+        console.error(`✗ 表达式不可解析：${expr}（五段 cron 或 @every 30m）`);
+        removeSchedule(ws, s.id);
+        return 2;
+      }
+      console.log(`✓ 定时已建 ${s.id}（${expr}）· 下次 ${s.next_run.slice(0, 19).replace("T", " ")}`);
+      console.log("  执行：org taskd 启动守护执行器（触发即入任务队列）· org schedule list 查看");
+      return 0;
+    } catch (e) {
+      console.error(`✗ ${((e as Error).message)}`);
+      return 2;
+    }
+  }
+
+  if (verb === "rm") {
+    if (!rest[0]) { console.error("用法：org schedule rm <id>"); return 2; }
+    try {
+      const ok = removeSchedule(ws, rest[0]);
+      console.log(ok ? `✓ 已删除 ${rest[0]}` : `○ ${rest[0]} 不存在`);
+      return 0;
+    } catch (e) {
+      console.error(`✗ ${((e as Error).message)}`);
+      return 2;
+    }
+  }
+
+  if (verb === "on" || verb === "off") {
+    if (!rest[0]) { console.error(`用法：org schedule ${verb} <id>`); return 2; }
+    const s = setScheduleEnabled(ws, rest[0], verb === "on");
+    if (!s) { console.error(`✗ ${rest[0]} 不存在`); return 2; }
+    console.log(`✓ ${s.id} 已${verb === "on" ? "启用" : "停用"}${verb === "on" ? ` · 下次 ${s.next_run.slice(0, 19).replace("T", " ")}` : ""}`);
+    return 0;
+  }
+
+  if (verb === "test") {
+    const expr = rest[0];
+    if (!expr) { console.error("用法：org schedule test <expr>（预览未来 3 个触发点，UTC）"); return 2; }
+    const next = previewNext(expr, new Date(), 3);
+    if (next.length === 0) {
+      console.error(`✗ 不可解析或 366 天内无命中：${expr}`);
+      return 2;
+    }
+    console.log(`⏰ ${expr} —— 未来 ${next.length} 个触发点（UTC）：`);
+    for (const d of next) console.log(`  ${d.toISOString().slice(0, 19).replace("T", " ")}`);
+    return 0;
+  }
+
+  console.error(`✗ 未知子命令：${verb}（可用：list/add/rm/on/off/test）`);
   return 2;
 }
 
@@ -1708,6 +1830,22 @@ async function cmdProviders(a: Args): Promise<number> {
     console.log(`  ${mark} ${r.name.padEnd(12)} ${STATUS_MARK[r.status]}${r.keys > 0 ? ` · key×${r.keys}` : ""}${r.fallbacks.length > 0 ? ` · 降级→${r.fallbacks.join(",")}` : ""}`);
     console.log(`       ${r.model || "（待填模型名）"} · ${r.gateway}`);
   }
+  // v0.5.5：预算水位 + key 池健康（三端渲染之 CLI 端）
+  const wm = budgetWatermark(a.workspace);
+  if (wm.budget > 0) {
+    const bar = "█".repeat(Math.min(10, Math.round((wm.used / wm.budget) * 10))) + "░".repeat(Math.max(0, 10 - Math.min(10, Math.round((wm.used / wm.budget) * 10))));
+    console.log(`\n  预算水位 ${bar} ${wm.used}/${wm.budget}（剩 ${wm.remaining}）${wm.exceeded ? " · 已超额（路由器 429）" : ""}`);
+  }
+  const pools = poolView(a.workspace);
+  if (pools.length > 0) {
+    console.log("\n  key 池状态（跨进程共享 · 冷却中的 key 排序沉底）：");
+    for (const pv of pools) {
+      console.log(`    ${pv.lane.padEnd(12)}`);
+      for (const k of pv.keys) {
+        console.log(`      ${k.key_id.padEnd(12)} ${k.cooling ? `冷却中（${Math.max(0, Math.round((Date.parse(k.until!) - Date.now()) / 1000))}s）` : "可用"} · 连败 ${k.fails} · 上次 ${k.last_status}`);
+      }
+    }
+  }
   console.log(`\n  命令：org config preset <name> · org config test [lane] · org providers test（测全部已配置车道） · org providers ledger（调用台账）`);
   return 0;
 }
@@ -1750,6 +1888,7 @@ export async function orgMain(): Promise<number> {
     case "providers": return cmdProviders(a);
     case "task": case "tasks": return cmdTask(a);
     case "taskd": return cmdTaskd(a);
+    case "schedule": case "schedules": case "cron": return cmdSchedule(a);
     case "notify": case "notifications": return cmdNotify(a);
     case "memory": case "memories": return cmdMemory(a);
     default:
@@ -1823,6 +1962,10 @@ export async function orgMain(): Promise<number> {
       通知中心：任务完成/失败/取消自动通知 · 桌面通知三级降级
       （notify-send → osascript → powershell → 控制台）· org config set
       desktop_notify off 关闭
+  org schedule [list|add|rm|on|off|test]
+      定时任务触发器：五段 cron（*/30 9-17 * * 1-5）或 @every 30m ·
+      到期自动入任务队列（org taskd / org web 执行器挂载）·
+      misfire 策略（skip 补跑跳过 / run 补跑一次）· 触发审计落 journal
   org memory [list|add|rm] [<expert>]
       专家长期记忆：用户偏好/项目约定沉淀（runtime/memories/<expert>.md）
       —— direct 车道自动注入提示词（跨会话生效）· @文件引用（org ask

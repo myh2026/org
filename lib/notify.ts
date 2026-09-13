@@ -8,7 +8,11 @@
 //      powershell toast（Windows）→ 仅控制台；全部失败/无命令时静默
 //      返回 "unavailable"，绝不炸主流程；
 //   3. 开关：`org config set desktop_notify on|off|auto`（缺省 auto ——
-//      检测到命令才发）。通知存储不受开关影响（面板/CLI 始终可读）。
+//      检测到命令才发）。通知存储不受开关影响（面板/CLI 始终可读）；
+//   4. webhook 出站（v0.5.5）：`org config set notify_webhook_url URL` 后
+//      每条通知 fire-and-forget POST JSON（5s 超时，失败静默不炸主流程）；
+//      `notify_webhook_events` 可选事件过滤（逗号分隔，缺省全发）。
+//      桌面/存储/webhook 三通道互不影响（多重优雅降级）。
 // ============================================================================
 
 import * as fs from "node:fs";
@@ -45,7 +49,7 @@ export function notifyEvent(
   kind: NotifyKind,
   title: string,
   detail: string,
-  opts: { taskId?: string; desktop?: boolean } = {},
+  opts: { taskId?: string; desktop?: boolean; webhook?: boolean } = {},
 ): Notification {
   const n: Notification = {
     id: newId(), kind, title, detail: detail.slice(0, 400),
@@ -64,7 +68,52 @@ export function notifyEvent(
   if (opts.desktop !== false) {
     try { desktopNotify(title, detail); } catch { /* 三级降级已兜底 */ }
   }
+  // webhook 出站（v0.5.5）：fire-and-forget —— 不 await、不 throw（慢/坏
+  // endpoint 绝不拖累通知写入与业务主流程）
+  if (opts.webhook !== false) {
+    void webhookNotify(n);
+  }
   return n;
+}
+
+// ---- webhook 出站（v0.5.5） ------------------------------------------------------
+
+export interface WebhookResult {
+  status: "sent" | "off" | "filtered" | "failed";
+  code?: number;
+  error?: string;
+}
+
+/** 通知出站到 webhook（POST JSON）。导出供 org notify test 实测与测试。 */
+export async function webhookNotify(n: Notification): Promise<WebhookResult> {
+  const cfg = loadConfig();
+  const url = (cfg.notify_webhook_url ?? "").trim();
+  if (url.length === 0) return { status: "off" };
+  // 事件过滤（逗号分隔 kind；空/"*" = 全发）
+  const filter = (cfg.notify_webhook_events ?? "").trim();
+  if (filter.length > 0 && filter !== "*") {
+    const allow = filter.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+    if (allow.length > 0 && !allow.includes(n.kind)) return { status: "filtered" };
+  }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 5_000);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source: "org", event: n.kind, title: n.title, detail: n.detail,
+        ts: n.ts, taskId: n.taskId ?? null, notificationId: n.id,
+      }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) return { status: "failed", code: res.status };
+    return { status: "sent", code: res.status };
+  } catch (e) {
+    return { status: "failed", error: (e as Error).message };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** 读通知（坏文件 → 空列表不炸）。 */

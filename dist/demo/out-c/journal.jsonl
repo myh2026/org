@@ -1,21 +1,21 @@
-1|2026-09-13T06:12:56.054Z|1:decompose|kernel|open|抓取某站点近一周公告，输出结构化表格
-2|2026-09-13T06:12:56.066Z|1:decompose|kernel|decompose|抓取某站点近一周公告，输出结构化表格
-3|2026-09-13T06:12:56.099Z|1:decompose|kernel|clarify|输出字段偏好：标题、日期、部门、分类？
-4|2026-09-13T06:12:56.099Z|1:decompose|kernel|clarify|日期格式用 ISO 8601 还是保留原文？
-5|2026-09-13T06:12:56.100Z|1:decompose|kernel|answer|字段偏好：标题、日期、部门、分类
-6|2026-09-13T06:12:56.100Z|1:decompose|kernel|answer|日期用 ISO 8601，无法解析的保留原文并标注
-7|2026-09-13T06:12:56.107Z|2:route|router|route|task#1 fetch -> A:inline
-8|2026-09-13T06:12:56.110Z|3:supervise|pool|dispatch|task#1 channel=inline (kernel context)
-9|2026-09-13T06:12:56.113Z|3:supervise|supervisor|review|task#1 fetch verdict=Accept coverage=1.00
-10|2026-09-13T06:12:56.118Z|3:supervise|pool|worker-done|task#1 coverage=1.00 tokens=0
-11|2026-09-13T06:12:56.128Z|2:route|router|route|task#2 parse -> B:reuse
-12|2026-09-13T06:12:56.129Z|3:supervise|pool|dispatch|task#2 channel=reuse notice-parser
-13|2026-09-13T06:12:56.161Z|3:supervise|supervisor|review|task#2 parse verdict=Accept coverage=1.00
-14|2026-09-13T06:12:56.164Z|3:supervise|pool|worker-done|task#2 coverage=1.00 tokens=480
-15|2026-09-13T06:12:56.206Z|2:route|router|route|task#3 validate -> B:reuse
-16|2026-09-13T06:12:56.207Z|3:supervise|pool|dispatch|task#3 channel=reuse record-validator
-17|2026-09-13T06:12:56.343Z|3:supervise|supervisor|review|task#3 validate verdict=Accept coverage=1.00
-18|2026-09-13T06:12:56.344Z|3:supervise|pool|worker-done|task#3 coverage=1.00 tokens=0
-19|2026-09-13T06:12:56.349Z|4:aggregate|registry|asset|frozen notice-parser.norm_date
-20|2026-09-13T06:12:56.349Z|4:aggregate|registry|asset|memory: task memory index: 3 entries
-21|2026-09-13T06:12:56.349Z|4:aggregate|scorecard|drift|静默更新检测：alerts=0 baseline=registry/scorecards/baseline-scripted.json
+1|2026-09-13T08:34:09.534Z|1:decompose|kernel|open|抓取某站点近一周公告，输出结构化表格
+2|2026-09-13T08:34:09.540Z|1:decompose|kernel|decompose|抓取某站点近一周公告，输出结构化表格
+3|2026-09-13T08:34:09.545Z|1:decompose|kernel|clarify|输出字段偏好：标题、日期、部门、分类？
+4|2026-09-13T08:34:09.545Z|1:decompose|kernel|clarify|日期格式用 ISO 8601 还是保留原文？
+5|2026-09-13T08:34:09.546Z|1:decompose|kernel|answer|字段偏好：标题、日期、部门、分类
+6|2026-09-13T08:34:09.546Z|1:decompose|kernel|answer|日期用 ISO 8601，无法解析的保留原文并标注
+7|2026-09-13T08:34:09.549Z|2:route|router|route|task#1 fetch -> A:inline
+8|2026-09-13T08:34:09.551Z|3:supervise|pool|dispatch|task#1 channel=inline (kernel context)
+9|2026-09-13T08:34:09.553Z|3:supervise|supervisor|review|task#1 fetch verdict=Accept coverage=1.00
+10|2026-09-13T08:34:09.557Z|3:supervise|pool|worker-done|task#1 coverage=1.00 tokens=0
+11|2026-09-13T08:34:09.559Z|2:route|router|route|task#2 parse -> B:reuse
+12|2026-09-13T08:34:09.560Z|3:supervise|pool|dispatch|task#2 channel=reuse notice-parser
+13|2026-09-13T08:34:09.605Z|3:supervise|supervisor|review|task#2 parse verdict=Accept coverage=1.00
+14|2026-09-13T08:34:09.609Z|3:supervise|pool|worker-done|task#2 coverage=1.00 tokens=480
+15|2026-09-13T08:34:09.632Z|2:route|router|route|task#3 validate -> B:reuse
+16|2026-09-13T08:34:09.632Z|3:supervise|pool|dispatch|task#3 channel=reuse record-validator
+17|2026-09-13T08:34:09.817Z|3:supervise|supervisor|review|task#3 validate verdict=Accept coverage=1.00
+18|2026-09-13T08:34:09.818Z|3:supervise|pool|worker-done|task#3 coverage=1.00 tokens=0
+19|2026-09-13T08:34:09.821Z|4:aggregate|registry|asset|frozen notice-parser.norm_date
+20|2026-09-13T08:34:09.821Z|4:aggregate|registry|asset|memory: task memory index: 3 entries
+21|2026-09-13T08:34:09.821Z|4:aggregate|scorecard|drift|静默更新检测：alerts=0 baseline=registry/scorecards/baseline-scripted.json

@@ -114,7 +114,7 @@ import {
   parseLedgerRaw, readSession as libReadSession, listSessionIds,
   type LedgerTurn,
 } from "../lib/sessions.ts";
-import { prepareLlmEnv, readLedger } from "../lib/router.ts"; // 车道环境准备（v0.5.1）
+import { prepareLlmEnv, readLedger, poolView, budgetWatermark } from "../lib/router.ts"; // 车道环境准备（v0.5.1 · 池状态/预算水位 v0.5.5）
 import { loadConfig, applyPreset, setConfigValue, unsetConfigValue, setLaneValue,
          removeLane, useLane, addApiKey, autoFromEnv } from "../lib/config.ts";
 import { PROVIDER_NAMES, discoverEnvLanes, resolveModelFlag, providerRows, testLane } from "../lib/providers.ts";
@@ -122,6 +122,9 @@ import {
   submitTask, listTasks, getTask, readTaskJournal, cancelTask, pauseTask,
   resumeTask, retryTask, TaskRunner, type TaskRecord, type TaskStatus,
 } from "../lib/tasks.ts"; // 长程任务队列（v0.5.2）
+import {
+  addSchedule, listSchedules, removeSchedule, setScheduleEnabled, previewNext,
+} from "../lib/schedule.ts"; // 定时任务触发器（v0.5.5）
 import {
   readNotifications, unreadCount, markRead, clearNotifications, notifyEvent,
 } from "../lib/notify.ts"; // 通知中心（v0.5.2）
@@ -776,6 +779,52 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
           }
           return json({ ok: false, error: "未知 action（read/read-all/clear）" }, 400);
         }
+        // ---- 定时任务（v0.5.5：org schedule 的 Web 面）----
+        if (route === "GET /api/schedules") {
+          return json({ ok: true, schedules: listSchedules(ws) });
+        }
+        if (route === "GET /api/schedules/preview") {
+          const expr = url.searchParams.get("expr") ?? "";
+          if (expr.trim().length === 0) return json({ ok: false, error: "expr 必填" }, 400);
+          return json({ ok: true, next: previewNext(expr, new Date(), 3).map((d) => d.toISOString()) });
+        }
+        if (route === "POST /api/schedules") {
+          if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+            return json({ error: "dist/demo 是入库快照（只读）。请以可写工作区启动 org web。" }, 400);
+          }
+          const body = await req.json().catch(() => ({})) as Record<string, unknown>;
+          const action = String(body.action ?? "");
+          try {
+            if (action === "add") {
+              const expr = String(body.expr ?? "").trim();
+              const kind = body.kind === "ask" ? "ask" : "run";
+              const spec = kind === "run"
+                ? { task: String(body.task ?? "").trim(), model: String(body.model ?? opts.model ?? "scripted") }
+                : { expert: String(body.expert ?? "").trim(), question: String(body.question ?? "").trim(), model: String(body.model ?? opts.model ?? "scripted") };
+              const s = addSchedule(ws, expr, kind, spec, {
+                misfire: body.misfire === "run" ? "run" : "skip",
+                notify: body.notify !== false,
+              });
+              if (s.invalid) {
+                removeSchedule(ws, s.id);
+                return json({ ok: false, error: "表达式不可解析（五段 cron 或 @every 30m）" }, 400);
+              }
+              return json({ ok: true, schedule: s });
+            }
+            if (action === "rm") {
+              removeSchedule(ws, String(body.id ?? ""));
+              return json({ ok: true });
+            }
+            if (action === "toggle") {
+              const s = setScheduleEnabled(ws, String(body.id ?? ""), body.enabled === true);
+              if (!s) return json({ ok: false, error: "条目不存在" }, 404);
+              return json({ ok: true, schedule: s });
+            }
+            return json({ ok: false, error: "未知 action（add/rm/toggle）" }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
         // ---- 长期记忆（v0.5.3：org memory 的 Web 面）----
         if (route === "GET /api/memory") {
           return json({ ok: true, groups: allMemories(ws) });
@@ -820,6 +869,9 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
               },
             ])),
             ledger: readLedger(readWorkspaceOf(ws)),
+            // v0.5.5：预算水位 + key 池健康（三端渲染之 Web 端）
+            budget: budgetWatermark(readWorkspaceOf(ws)),
+            pool: poolView(readWorkspaceOf(ws)),
           });
         }
         if (route === "POST /api/config") {
@@ -1917,6 +1969,9 @@ function renderIndexHtml(): string {
   <button id="tasksBtn" class="rchip" type="button" title="长程任务中心（后台队列 · 优先级 · 暂停/恢复）">
     <span class="rc-label">☰ 任务</span>
   </button>
+  <button id="schedBtn" class="rchip" type="button" title="定时任务（cron / @every · 到期自动入队）">
+    <span class="rc-label">⏰ 定时</span>
+  </button>
   <button id="notifyBtn" class="rchip" type="button" title="通知中心（任务完成/失败/取消）">
     <span class="rc-label">🔔</span> <b id="notifyCount" hidden>0</b>
   </button>
@@ -1934,6 +1989,8 @@ function renderIndexHtml(): string {
 <div id="providersPane" role="dialog" aria-modal="true" aria-labelledby="pvTitle"></div>
 <div id="tasksScrim" aria-hidden="true"></div>
 <div id="tasksPane" role="dialog" aria-modal="true" aria-labelledby="tkTitle"></div>
+<div id="schedScrim" aria-hidden="true"></div>
+<div id="schedPane" role="dialog" aria-modal="true" aria-labelledby="tkTitle"></div>
 <div id="notifyScrim" aria-hidden="true"></div>
 <div id="notifyPane" role="dialog" aria-modal="true" aria-labelledby="ntTitle"></div>
 <div id="memoryScrim" aria-hidden="true"></div>
@@ -2644,7 +2701,7 @@ function renderApprovalPane() {
 
 // ---- 任务中心 + 通知中心（v0.5.2：org task / org notify 的 GUI 面） ----
 
-var tasksState = { tasks: [], unread: 0, runner: "none" };
+var tasksState = { tasks: [], unread: 0, runner: "none" , schedules: [] };
 var notifyState = { list: [], unread: 0 };
 var tasksTimer = null;
 
@@ -2656,7 +2713,7 @@ function openTasks() {
   renderTasksPane();
   loadTasks();
   if (tasksTimer) clearInterval(tasksTimer);
-  tasksTimer = setInterval(loadTasks, 3000); // 打开期间 3s 自动刷新
+  tasksTimer = setInterval(loadTasks, 3000); // 打开期间 3s 自动刷新（含 schedules）
 }
 
 function closeTasks() {
@@ -2672,6 +2729,109 @@ function loadTasks() {
     tasksState.runner = r.runner || "none";
     renderTasksPane();
   }).catch(function () { /* 轮询失败静默 */ });
+  loadSchedules(); // v0.5.5：定时任务快照随任务中心一起刷新
+}
+
+function loadSchedules() {
+  api("/api/schedules").then(function (r) {
+    if (!r || !r.ok) return;
+    tasksState.schedules = r.schedules || [];
+    renderSchedPane();
+  }).catch(function () { /* 静默 */ });
+}
+
+function schedRowsHtml() {
+  var list = tasksState.schedules || [];
+  if (list.length === 0) return '<div class="pvempty" style="padding:10px 14px">（无定时 —— 下方新建：cron 五段或 @every 30m）</div>';
+  var now = Date.now();
+  return list.map(function (s) {
+    var inMin = Math.round((Date.parse(s.next_run) - now) / 60000);
+    var next = !isFinite(inMin) ? "?" : inMin <= 0 ? "到期" : inMin < 90 ? inMin + " 分钟后" : Math.round(inMin / 1440) + " 天后";
+    var mark = s.invalid ? "⚠" : s.enabled ? "⏰" : "○";
+    var spec = s.kind === "run" ? "run · " + esc(String(s.spec.task || "").slice(0, 40)) : "ask · " + esc(s.spec.expert || "?");
+    var acts = '<button data-schtog="' + esc(s.id) + '" data-on="' + (s.enabled ? "1" : "0") + '">' + (s.enabled ? "停用" : "启用") + "</button>" +
+      '<button data-schrm="' + esc(s.id) + '" class="bad">删除</button>';
+    return '<div class="tkrow"><span class="st">' + mark + '</span>' +
+      '<span class="id">' + esc(s.expr) + "</span>" +
+      '<span class="meta">' + esc(s.id) + "</span>" +
+      '<span class="body">' + spec + " · 下次 " + next + " · 已触发 " + s.runs + " 次</span>" +
+      '<span class="acts">' + acts + "</span></div>";
+  }).join("");
+}
+
+function renderSchedPane() {
+  var pane = document.getElementById("schedPane");
+  if (!pane || !pane.classList.contains("on")) return;
+  pane.innerHTML =
+    '<div class="pvhead"><span class="t">⏰ 定时任务</span>' +
+    '<span class="s">org schedule 的 GUI 面（执行器挂载触发 · 到期入队）</span>' +
+    '<button onclick="closeSched()" style="background:transparent;border:1px solid var(--border2);color:var(--text);font:600 11px var(--mono);padding:4px 9px;border-radius:3px;cursor:pointer;margin-left:12px">关闭</button></div>' +
+    '<div class="tkform">' +
+    '<input type="text" id="schExpr" class="taskinput" placeholder="表达式：*/30 9-17 * * 1-5（cron）或 @every 30m" style="min-width:200px">' +
+    '<input type="text" id="schTask" class="taskinput" placeholder="团队任务描述（run 语义）">' +
+    '<button id="schPreview">预览</button>' +
+    '<button id="schAdd" class="pri">新建定时</button>' +
+    "</div>" +
+    '<div id="schPreviewOut" class="pvtest" style="color:var(--dim)"></div>' +
+    '<div class="pvsec" style="padding:0">' + schedRowsHtml() + "</div>";
+  wireSchedButtons(pane);
+}
+
+function wireSchedButtons(pane) {
+  var el;
+  el = pane.querySelector("#schAdd");
+  if (el) el.onclick = function () {
+    var expr = ((pane.querySelector("#schExpr") || {}).value || "").trim();
+    var task = ((pane.querySelector("#schTask") || {}).value || "").trim();
+    if (!expr || !task) { flashHint("表达式与任务描述必填"); return; }
+    api("/api/schedules", { method: "POST", body: JSON.stringify({ action: "add", kind: "run", expr: expr, task: task, model: state.model }) })
+      .then(function (r) {
+        if (!r || !r.ok) { flashHint((r && r.error) || "新建失败"); return; }
+        flashHint("✓ 定时已建 " + r.schedule.id + "（下次 " + String(r.schedule.next_run).slice(0, 19).replace("T", " ") + "）");
+        loadSchedules();
+      }).catch(function (e) { flashHint("新建失败：" + e); });
+  };
+  el = pane.querySelector("#schPreview");
+  if (el) el.onclick = function () {
+    var expr = ((pane.querySelector("#schExpr") || {}).value || "").trim();
+    var out = pane.querySelector("#schPreviewOut");
+    if (!expr) { flashHint("先填表达式"); return; }
+    api("/api/schedules/preview?expr=" + encodeURIComponent(expr))
+      .then(function (r) {
+        if (!r || !r.ok) { if (out) out.textContent = "✗ " + ((r && r.error) || "不可解析"); return; }
+        if (out) out.textContent = "未来触发点（UTC）：" + (r.next || []).map(function (d) { return String(d).slice(0, 16).replace("T", " "); }).join(" → ") + (r.next && r.next.length === 0 ? "（366 天内无命中）" : "");
+      });
+  };
+  Array.prototype.forEach.call(pane.querySelectorAll("button[data-schrm]"), function (b) {
+    b.onclick = function () {
+      api("/api/schedules", { method: "POST", body: JSON.stringify({ action: "rm", id: b.dataset.schrm }) })
+        .then(function (r) {
+          if (!r || !r.ok) { flashHint((r && r.error) || "删除失败"); return; }
+          flashHint("✓ 已删除定时");
+          loadSchedules();
+        });
+    };
+  });
+  Array.prototype.forEach.call(pane.querySelectorAll("button[data-schtog]"), function (b) {
+    b.onclick = function () {
+      api("/api/schedules", { method: "POST", body: JSON.stringify({ action: "toggle", id: b.dataset.schtog, enabled: b.dataset.on !== "1" }) })
+        .then(function (r) {
+          if (!r || !r.ok) { flashHint((r && r.error) || "切换失败"); return; }
+          loadSchedules();
+        });
+    };
+  });
+}
+
+function openSched() {
+  document.getElementById("schedPane").classList.add("on");
+  document.getElementById("schedScrim").classList.add("on");
+  loadSchedules();
+}
+
+function closeSched() {
+  document.getElementById("schedPane").classList.remove("on");
+  document.getElementById("schedScrim").classList.remove("on");
 }
 
 function taskRowHtml(t) {
@@ -2888,6 +3048,8 @@ document.getElementById("memoryScrim").onclick = closeMemory;
 
 document.getElementById("tasksBtn").onclick = openTasks;
 document.getElementById("tasksScrim").onclick = closeTasks;
+document.getElementById("schedBtn").onclick = openSched;
+document.getElementById("schedScrim").onclick = closeSched;
 document.getElementById("notifyBtn").onclick = openNotify;
 document.getElementById("notifyScrim").onclick = closeNotify;
 notifyBadgeRefresh();
@@ -2917,6 +3079,8 @@ function loadProviders(then) {
     providersState.default_lane = r.default_lane || "";
     providersState.presets = r.presets || [];
     providersState.ledger = r.ledger || null;
+    providersState.budget = r.budget || null;   // v0.5.5 预算水位
+    providersState.pool = r.pool || [];         // v0.5.5 key 池健康
     if (then) then();
     renderProvidersPane();
   }).catch(function (e) { flashHint("providers 读取失败：" + e); });
@@ -2953,10 +3117,37 @@ function envRowsHtml() {
 
 function ledgerHtml() {
   var l = providersState.ledger;
-  if (!l || !l.total) return "";
-  return '<div class="pvsec"><div class="st">调用台账（本地路由器 · key 轮换归因）</div>' +
-    '<div class="pvrow"><span class="meta">总 ' + l.total + '（ok ' + l.ok + ' · 失败 ' + l.failed +
-    '） · 今日 ' + l.today + '（ok ' + l.today_ok + '）</span></div></div>';
+  var wm = providersState.budget;
+  var pool = providersState.pool || [];
+  if ((!l || !l.total) && (!wm || !wm.budget) && pool.length === 0) return "";
+  var out = "";
+  if (l && l.total) {
+    out += '<div class="pvsec"><div class="st">调用台账（本地路由器 · key 轮换归因）</div>' +
+      '<div class="pvrow"><span class="meta">总 ' + l.total + '（ok ' + l.ok + ' · 失败 ' + l.failed +
+      '） · 今日 ' + l.today + '（ok ' + l.today_ok + '）</span></div></div>';
+  }
+  if (wm && wm.budget > 0) { // v0.5.5：预算水位条（三端渲染之 Web 端）
+    var pct = Math.min(100, Math.round((wm.used / wm.budget) * 100));
+    var cells = "";
+    for (var i = 0; i < 10; i++) cells += i < Math.round(pct / 10) ? "█" : "░";
+    out += '<div class="pvsec"><div class="st">今日预算水位</div>' +
+      '<div class="pvrow"><span class="meta" style="color:' + (wm.exceeded ? "var(--redb)" : pct >= 80 ? "#fbbf24" : "var(--greenb)") + '">' +
+      cells + " " + wm.used + "/" + wm.budget + "（剩 " + wm.remaining + "）" +
+      (wm.exceeded ? " · 已超额（路由器 429）" : "") + "</span></div></div>";
+  }
+  if (pool.length > 0) { // v0.5.5：key 池健康（跨进程冷却）
+    var prows = "";
+    pool.forEach(function (pv) {
+      pv.keys.forEach(function (k) {
+        prows += '<div class="pvrow"><span class="meta">' + esc(pv.lane) + " · " + esc(k.key_id) +
+          '</span><span class="meta" style="color:' + (k.cooling ? "#fbbf24" : "var(--greenb)") + '">' +
+          (k.cooling ? "冷却中" : "可用") + " · 连败 " + k.fails + " · 上次 " + esc(k.last_status) +
+          "</span></div>";
+      });
+    });
+    out += '<div class="pvsec"><div class="st">key 池状态（runtime/llm-pool.json · 跨进程共享冷却）</div>' + prows + "</div>";
+  }
+  return out;
 }
 
 function renderProvidersPane() {
