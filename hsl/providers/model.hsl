@@ -1,9 +1,13 @@
 // ============================================================================
-// org/providers/model.hsl — 模型网关：scripted（剧本）/ deepseek（真实 LLM）
+// org/providers/model.hsl — 模型网关：scripted（剧本）/ 真实 LLM（任意车道）
 // ============================================================================
 // ORG 的所有判定调用（分解 / 澄清 / 生成 / 审查 / 直连）经同一网关：
 //   - scripted 模式：确定性剧本轨道（fixture.next(track)），CI 可复现零外联
-//   - deepseek 模式：真实 LLM（$host.llm 网关）
+//   - 真实 LLM 车道：deepseek / openai / anthropic / gemini / openrouter /
+//     groq / mistral / xai / zhipu / qwen / moonshot / siliconflow / ollama …
+//     （v0.5.1：车道名不再硬编码 —— 任意非 scripted 值都走 $host.llm 网关，
+//     服务商/端点/key 由宿主配置面 org config 统一解析；实测车道归因在
+//     model_id 维度上保留）
 // 轨道名即观测面：transcript 里每个判定调用可追溯到一个轨道 / 一次真实调用。
 // N1 纪律：prompt 组装在 HSL 侧；native 只做调用与平凡类型捕获。
 // ============================================================================
@@ -16,10 +20,18 @@ import { ExpertError } from "../types/errors.hsl";
 ///   decompose / clarify / answers / mint_spec / mint_hsl / mint_fixture
 ///   review:<role> / direct:<expert> / <expert>:<node>
 export async fn ask(track: String, system: String, user: String) -> Result<String, ExpertError> {
-    let model: String = native typescript {
-        return $host.config.model || "scripted";
+    // v0.5.1：真实车道由宿主信号 ORG_LANE_KIND 决定（org 宿主侧
+    // lib/providers.ts 解析车道名/模型 id/配置后显式声明）。信号缺席时的
+    // 兼容语义：不经 org 宿主直接 `dhv run --model deepseek`（网关三件套
+    // 老形态）仍走真实车道 —— 未知模型名则按剧本执行（web 回落链测试锁定
+    // 的行为）。这让 org config 的全部 20+ 服务商预设（openai / anthropic /
+    // gemini / groq / zhipu / qwen / …）零改动接入真实车道。
+    let lane_kind: String = native typescript {
+        const kind = String($host.env.get("ORG_LANE_KIND") || "").trim();
+        if (kind === "real" || kind === "scripted") return kind;
+        return $host.config.model === "deepseek" ? "real" : "scripted";
     };
-    if model == String::from("deepseek") {
+    if lane_kind == String::from("real") {
         let raw: String = native typescript {
             // v0.4.12：429/网络瞬断的有界退避重试（1s → 3s，共 3 次）—— 限流是
             // 真实模型车道的常态（实测 z-ai 网关 429），裸错误此前直接炸穿整次

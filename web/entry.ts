@@ -114,6 +114,10 @@ import {
   parseLedgerRaw, readSession as libReadSession, listSessionIds,
   type LedgerTurn,
 } from "../lib/sessions.ts";
+import { prepareLlmEnv, readLedger } from "../lib/router.ts"; // 车道环境准备（v0.5.1）
+import { loadConfig, applyPreset, setConfigValue, unsetConfigValue, setLaneValue,
+         removeLane, useLane, addApiKey, autoFromEnv } from "../lib/config.ts";
+import { PROVIDER_NAMES, discoverEnvLanes, resolveModelFlag, providerRows, testLane } from "../lib/providers.ts";
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
 
@@ -228,6 +232,9 @@ async function askOnce(
   req: { expert: string; question: string; session: string; model: string },
 ): Promise<AskOutcome> {
   ensureWorkspace(ws);
+  // 车道环境准备（v0.5.1）：--model 车道名/裸模型 id 统一解析（key 池/
+  // 降级链/路由器）；scripted 与未知名零影响
+  await prepareLlmEnv(req.model, ws);
   const env: Record<string, string> = {
     ORG_ASK_EXPERT: req.expert,
     ORG_ASK_SESSION: req.session,
@@ -291,6 +298,8 @@ async function askStreamOnce(
   onDelta?: (channel: "reasoning" | "content" | "reset", delta: string) => void,
 ): Promise<AskOutcome> {
   ensureWorkspace(ws);
+  // 车道环境准备（v0.5.1）：同 askOnce（spawn 车道读 process.env 注入）
+  await prepareLlmEnv(req.model, ws);
   const env: Record<string, string> = {
     ORG_ASK_EXPERT: req.expert,
     ORG_ASK_SESSION: req.session,
@@ -653,6 +662,91 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
           const r = decideApproval(ws, String(body.id ?? ""), body.allow === true, body.always === true, "web");
           if (!r.ok) return json({ ok: false, error: r.error }, r.status);
           return json({ ok: true, id: String(body.id ?? ""), allow: body.allow === true, always: body.always === true });
+        }
+        // ---- 模型车道/服务商面板（v0.5.1：org providers 的 Web 面）----
+        if (route === "GET /api/providers") {
+          const cfg = loadConfig();
+          const env = discoverEnvLanes().map((d) => ({ provider: d.provider, envName: d.envName }));
+          return json({
+            ok: true,
+            presets: PROVIDER_NAMES,
+            rows: providerRows(cfg),
+            env,
+            default_lane: cfg.default_lane,
+            lanes: Object.fromEntries(Object.entries(cfg.lanes).map(([n, l]) => [
+              n,
+              {
+                model: l.model, gateway: l.gateway,
+                keys: (l.api_key ? 1 : 0) + l.api_keys.length,
+                fallbacks: l.fallbacks, provider: l.provider,
+              },
+            ])),
+            ledger: readLedger(readWorkspaceOf(ws)),
+          });
+        }
+        if (route === "POST /api/config") {
+          // 配置写入面板（与 CLI org config 同一实现，绝不双轨）
+          if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+            return json({ error: "dist/demo 是入库快照（只读）。请以可写工作区启动 org web。" }, 400);
+          }
+          const body = await req.json().catch(() => ({})) as Record<string, unknown>;
+          const action = String(body.action ?? "");
+          try {
+            switch (action) {
+              case "preset": {
+                const name = applyPreset(String(body.name ?? ""));
+                if (!name) return json({ ok: false, error: "未知预设" }, 400);
+                return json({ ok: true, applied: name });
+              }
+              case "set": {
+                const key = setConfigValue(String(body.key ?? ""), String(body.value ?? ""));
+                if (!key) return json({ ok: false, error: "未知配置项" }, 400);
+                return json({ ok: true, key });
+              }
+              case "unset": {
+                const key = unsetConfigValue(String(body.key ?? ""));
+                if (!key) return json({ ok: false, error: "未知配置项" }, 400);
+                return json({ ok: true, key });
+              }
+              case "use": {
+                const name = useLane(String(body.name ?? ""));
+                if (!name) return json({ ok: false, error: "车道不存在" }, 404);
+                return json({ ok: true, lane: name });
+              }
+              case "lane-set": {
+                const name = setLaneValue(String(body.name ?? ""), String(body.field ?? ""), String(body.value ?? ""));
+                if (!name) return json({ ok: false, error: "车道名/字段非法" }, 400);
+                return json({ ok: true, lane: name });
+              }
+              case "lane-rm": {
+                const name = removeLane(String(body.name ?? ""));
+                if (!name) return json({ ok: false, error: "车道不存在" }, 404);
+                return json({ ok: true, removed: name });
+              }
+              case "keys-add": {
+                const n = addApiKey(String(body.key ?? ""));
+                return json({ ok: true, keys: n });
+              }
+              case "keys-clear": {
+                setConfigValue("api_keys", "");
+                return json({ ok: true });
+              }
+              case "auto": {
+                const created = autoFromEnv();
+                return json({ ok: true, created });
+              }
+              default:
+                return json({ ok: false, error: "未知 action" }, 400);
+            }
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 500);
+          }
+        }
+        if (route === "POST /api/providers/test") {
+          const body = await req.json().catch(() => ({})) as { lane?: unknown };
+          const lane = body.lane ? resolveModelFlag(String(body.lane)) : resolveModelFlag("");
+          const r = await testLane(lane);
+          return json({ ok: r.ok, result: r });
         }
         if (route === "GET /api/cost") {
           const rws = readWorkspaceOf(ws);
@@ -1536,6 +1630,42 @@ function renderIndexHtml(): string {
   .apacts button.danger { border-color: rgba(239,68,68,.45); color: var(--redb); }
   .revt.nv-approval { color: #fbbf24; }
   .rchip-ap { color: #fbbf24; margin-left: 6px; }
+  /* ── 模型车道/服务商面板（v0.5.1）────────────────────── */
+  #providersScrim { display: none; position: fixed; inset: 0;
+        background: rgba(0,0,0,.58); z-index: 40; }
+  #providersScrim.on { display: block; }
+  #providersPane { display: none; position: fixed; z-index: 41;
+        left: 50%; top: 50%; transform: translate(-50%,-50%);
+        width: min(760px, calc(100vw - 28px)); max-height: min(80vh, 700px);
+        overflow: auto; background: var(--panel); border: 1px solid var(--border2);
+        border-radius: 4px; box-shadow: 0 24px 60px rgba(0,0,0,.6); }
+  #providersPane.on { display: block; }
+  .pvhead { padding: 12px 14px; border-bottom: 1px solid var(--border);
+        display: flex; align-items: baseline; gap: 10px; }
+  .pvhead .t { font: 600 12px var(--mono); color: var(--text); }
+  .pvhead .s { font: 11px var(--mono); color: var(--dim); margin-left: auto; }
+  .pvsec { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  .pvsec .st { font: 600 11px var(--mono); color: var(--muted); margin-bottom: 6px; }
+  .pvrow { display: flex; gap: 8px; align-items: center; padding: 4px 0;
+        font: 11px var(--mono); color: var(--text); flex-wrap: wrap; }
+  .pvrow .nm { min-width: 96px; font-weight: 600; }
+  .pvrow .meta { color: var(--dim); }
+  .pvrow .mark { color: var(--greenb); }
+  .pvrow .fb { color: var(--amber); }
+  .pvacts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .pvacts input[type="text"], .pvacts select {
+        background: var(--bg); border: 1px solid var(--border2); color: var(--text);
+        font: 11px var(--mono); padding: 6px 8px; border-radius: 3px; }
+  .pvacts input.pvkey { width: 240px; }
+  .pvacts button { background: transparent; border: 1px solid var(--border2);
+        color: var(--text); font: 600 11px var(--mono); padding: 6px 10px;
+        border-radius: 3px; cursor: pointer; }
+  .pvacts button:hover { background: var(--raise); }
+  .pvacts button.pri { border-color: rgba(16,185,129,.45); color: var(--greenb); }
+  .pvempty { padding: 8px 0; font: 11px var(--mono); color: var(--dim); }
+  .pvtest { margin-top: 6px; font: 11px/1.6 var(--mono); color: var(--muted); word-break: break-all; }
+  .pvtest.ok { color: var(--greenb); }
+  .pvtest.bad { color: var(--redb); }
   .rvsettled { padding: 10px 14px; font: 11px/1.7 var(--mono); color: var(--dim);
         border-bottom: 1px solid var(--border); }
 
@@ -1568,6 +1698,9 @@ function renderIndexHtml(): string {
           title="有等待放行的能力决策 —— 点击处理">
     <span class="rc-label">待批准</span> <b id="approvalCount">0</b>
   </button>
+  <button id="providersBtn" class="rchip" type="button" title="模型车道 / 服务商配置面板">
+    <span class="rc-label">⚙ 车道</span>
+  </button>
   <span class="tstats" id="topStats"></span>
 </header>
 <div id="backdrop" aria-hidden="true"></div>
@@ -1575,6 +1708,8 @@ function renderIndexHtml(): string {
 <div id="reviewPane" role="dialog" aria-modal="true" aria-labelledby="rvTitle"></div>
 <div id="approvalScrim" aria-hidden="true"></div>
 <div id="approvalPane" role="dialog" aria-modal="true" aria-labelledby="apTitle"></div>
+<div id="providersScrim" aria-hidden="true"></div>
+<div id="providersPane" role="dialog" aria-modal="true" aria-labelledby="pvTitle"></div>
 <div class="app">
   <aside>
     <button class="newbtn" id="newSession" type="button">+ 新会话</button>
@@ -2278,6 +2413,176 @@ function renderApprovalPane() {
       };
     });
 }
+
+// ---- 模型车道/服务商面板（v0.5.1：org providers / org config 的 GUI 面） ----
+
+var providersState = { rows: [], env: [], lanes: {}, default_lane: "", presets: [], ledger: null, testing: "" };
+
+function openProviders() {
+  document.getElementById("providersPane").classList.add("on");
+  document.getElementById("providersScrim").classList.add("on");
+  renderProvidersPane();
+}
+
+function closeProviders() {
+  document.getElementById("providersPane").classList.remove("on");
+  document.getElementById("providersScrim").classList.remove("on");
+}
+
+function loadProviders(then) {
+  api("/api/providers").then(function (r) {
+    if (!r || !r.ok) { flashHint((r && r.error) || "providers 读取失败"); return; }
+    providersState.rows = r.rows || [];
+    providersState.env = r.env || [];
+    providersState.lanes = r.lanes || {};
+    providersState.default_lane = r.default_lane || "";
+    providersState.presets = r.presets || [];
+    providersState.ledger = r.ledger || null;
+    if (then) then();
+    renderProvidersPane();
+  }).catch(function (e) { flashHint("providers 读取失败：" + e); });
+}
+
+function laneRowsHtml() {
+  var names = Object.keys(providersState.lanes);
+  if (names.length === 0) return '<div class="pvempty">（无命名车道 —— 下方选择服务商预设一键创建）</div>';
+  return names.map(function (n) {
+    var l = providersState.lanes[n];
+    var mark = providersState.default_lane === n ? "→ 缺省" : "";
+    return '<div class="pvrow"><span class="nm">' + esc(n) + '</span>' +
+      '<span class="meta">' + esc(l.model || "（未设模型）") + ' · key×' + l.keys +
+      (l.fallbacks && l.fallbacks.length ? ' · <span class="fb">降级→ ' + esc(l.fallbacks.join(",")) + '</span>' : "") +
+      '</span><span class="mark">' + mark + '</span>' +
+      '<span style="margin-left:auto;display:flex;gap:6px">' +
+      (providersState.default_lane === n ? "" : '<button data-pvuse="' + esc(n) + '">设为缺省</button>') +
+      '<button data-pvtest="' + esc(n) + '">测试</button>' +
+      '<button data-pvrm="' + esc(n) + '" class="danger" style="color:var(--redb)">删除</button>' +
+      '</span></div>';
+  }).join("");
+}
+
+function envRowsHtml() {
+  if (providersState.env.length === 0) return "";
+  return '<div class="pvsec"><div class="st">环境变量发现（shell 已 export 的服务商 key）</div>' +
+    providersState.env.map(function (d) {
+      return '<div class="pvrow"><span class="nm">' + esc(d.provider) + '</span>' +
+        '<span class="meta">← ' + esc(d.envName) + '</span>' +
+        '<button data-pvuse="' + esc(d.provider) + '" style="margin-left:auto">设为缺省</button></div>';
+    }).join("") +
+    '<div class="pvacts"><button id="pvAuto" class="pri">为全部发现的服务商创建车道（auto）</button></div></div>';
+}
+
+function ledgerHtml() {
+  var l = providersState.ledger;
+  if (!l || !l.total) return "";
+  return '<div class="pvsec"><div class="st">调用台账（本地路由器 · key 轮换归因）</div>' +
+    '<div class="pvrow"><span class="meta">总 ' + l.total + '（ok ' + l.ok + ' · 失败 ' + l.failed +
+    '） · 今日 ' + l.today + '（ok ' + l.today_ok + '）</span></div></div>';
+}
+
+function renderProvidersPane() {
+  var pane = document.getElementById("providersPane");
+  if (!pane.classList.contains("on")) return;
+  var opts = providersState.presets.map(function (n) { return '<option value="' + esc(n) + '">' + esc(n) + "</option>"; }).join("");
+  var rows = providersState.rows || [];
+  var configured = rows.filter(function (r) { return r.status !== "preset" || r.local || r.default; });
+  pane.innerHTML =
+    '<div class="pvhead"><span class="t" id="pvTitle">⚙ 模型车道 / 服务商</span>' +
+    '<span class="s">org config · org providers 的 GUI 面（与 CLI 同一实现）</span>' +
+    '<button onclick="closeProviders()" style="background:transparent;border:1px solid var(--border2);color:var(--text);font:600 11px var(--mono);padding:4px 9px;border-radius:3px;cursor:pointer;margin-left:12px">关闭</button></div>' +
+    '<div class="pvsec"><div class="st">命名车道（chat / run / ask 的 --model 取值 · 缺省免旗标）</div>' + laneRowsHtml() +
+    '<div class="pvtest" id="pvTestOut"></div></div>' +
+    envRowsHtml() +
+    '<div class="pvsec"><div class="st">新建 / 增强</div>' +
+    '<div class="pvacts">' +
+    '<select id="pvPreset">' + opts + "</select>" +
+    '<button id="pvApply" class="pri">应用预设（建车道 + 设缺省）</button>' +
+    '<input type="text" id="pvKeyInput" class="pvkey" placeholder="追加 api key（429 自动轮换）">' +
+    '<button id="pvKeyAdd">加入 key 池</button>' +
+    '<button id="pvKeyClear">清空池</button>' +
+    "</div>" +
+    '<div class="pvtest" style="color:var(--dim)">已注册 ' + providersState.presets.length +
+    " 家服务商（OpenAI 兼容协议 · deepseek/openai/anthropic/gemini/groq/zhipu/qwen/…）</div></div>" +
+    ledgerHtml();
+
+  var el;
+  el = document.getElementById("pvApply");
+  if (el) el.onclick = function () {
+    var name = (document.getElementById("pvPreset") || {}).value || "";
+    if (!name) return;
+    api("/api/config", { method: "POST", body: JSON.stringify({ action: "preset", name: name }) })
+      .then(function (r) {
+        if (!r || !r.ok) { flashHint((r && r.error) || "预设应用失败"); return; }
+        flashHint("✓ 预设 " + name + " 已建为车道并设缺省（key 请补配）");
+        loadProviders();
+      }).catch(function (e) { flashHint("预设应用失败：" + e); });
+  };
+  el = document.getElementById("pvKeyAdd");
+  if (el) el.onclick = function () {
+    var key = ((document.getElementById("pvKeyInput") || {}).value || "").trim();
+    if (!key) { flashHint("请先粘贴 api key"); return; }
+    api("/api/config", { method: "POST", body: JSON.stringify({ action: "keys-add", key: key }) })
+      .then(function (r) {
+        if (!r || !r.ok) { flashHint((r && r.error) || "key 追加失败"); return; }
+        flashHint("✓ key 池已有 " + r.keys + " 把（429/5xx 自动轮换）");
+        document.getElementById("pvKeyInput").value = "";
+        loadProviders();
+      }).catch(function (e) { flashHint("key 追加失败：" + e); });
+  };
+  el = document.getElementById("pvKeyClear");
+  if (el) el.onclick = function () {
+    api("/api/config", { method: "POST", body: JSON.stringify({ action: "keys-clear" }) })
+      .then(function () { flashHint("✓ key 池已清空"); loadProviders(); });
+  };
+  el = document.getElementById("pvAuto");
+  if (el) el.onclick = function () {
+    api("/api/config", { method: "POST", body: JSON.stringify({ action: "auto" }) })
+      .then(function (r) {
+        if (!r || !r.ok) { flashHint((r && r.error) || "auto 失败"); return; }
+        flashHint("✓ 已创建 " + (r.created || []).join(", ") + " 车道");
+        loadProviders();
+      });
+  };
+  Array.prototype.forEach.call(pane.querySelectorAll("button[data-pvuse]"), function (b) {
+    b.onclick = function () { configAction("use", { name: b.dataset.pvuse }, "缺省车道 → " + b.dataset.pvuse); };
+  });
+  Array.prototype.forEach.call(pane.querySelectorAll("button[data-pvrm]"), function (b) {
+    b.onclick = function () { configAction("lane-rm", { name: b.dataset.pvrm }, "已删除车道 " + b.dataset.pvrm); };
+  });
+  Array.prototype.forEach.call(pane.querySelectorAll("button[data-pvtest]"), function (b) {
+    b.onclick = function () { testProviderLane(b.dataset.pvtest); };
+  });
+}
+
+function configAction(action, body, okMsg) {
+  api("/api/config", { method: "POST", body: JSON.stringify(Object.assign({ action: action }, body)) })
+    .then(function (r) {
+      if (!r || !r.ok) { flashHint((r && r.error) || "配置写入失败"); return; }
+      flashHint("✓ " + okMsg);
+      loadProviders();
+    }).catch(function (e) { flashHint("配置写入失败：" + e); });
+}
+
+function testProviderLane(lane) {
+  var out = document.getElementById("pvTestOut");
+  if (out) { out.className = "pvtest"; out.textContent = "⏳ 正在测试车道 " + lane + "（1-token 真实请求）…"; }
+  api("/api/providers/test", { method: "POST", body: JSON.stringify({ lane: lane }) })
+    .then(function (r) {
+      var res = r && r.result;
+      if (r && r.ok) {
+        if (out) { out.className = "pvtest ok"; out.textContent = "✓ " + lane + " 连通（" + res.ms + "ms · 回复「" + (res.reply || "") + "」 · tokens " + (res.tokens == null ? "?" : res.tokens) + "）"; }
+      } else if (out) {
+        out.className = "pvtest bad";
+        out.textContent = "✗ " + lane + " 失败（" + ((res && res.error) || "未知") + "）";
+      }
+    }).catch(function (e) {
+      if (out) { out.className = "pvtest bad"; out.textContent = "✗ 测试请求失败：" + e; }
+    });
+}
+
+// 面板打开时拉数据； scrim 点击关闭
+document.getElementById("providersBtn").onclick = function () { loadProviders(openProviders); };
+document.getElementById("providersScrim").onclick = closeProviders;
 
 function openApprovals() {
   document.getElementById("approvalPane").classList.add("on");

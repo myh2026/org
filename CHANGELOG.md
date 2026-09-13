@@ -1,5 +1,91 @@
 # CHANGELOG
 
+## v0.5.1（2026-09-13）—— 所有主流 API key 模式（服务商注册表 / key 池轮换 / 降级链 / 预算）
+
+对标 codex / opencode 的多服务商配置面，把「支持所有主流 API key」从
+六预设扩到**全量注册表 + 运行时韧性层**。全部本地 mock 测试（不出网、
+毫秒级），新增 34 例锁定（tests/providers.test.ts）+ 4 例 Web 面板。
+
+### 服务商注册表（lib/provider-registry.ts · 新模块）
+
+- **21 家服务商** OpenAI 兼容端点一条打天下：海外主流（OpenAI /
+  Anthropic / Gemini / OpenRouter / Groq / Mistral / xAI / Together /
+  Fireworks / Cerebras / Perplexity / DeepInfra）+ 国内主流（DeepSeek /
+  智谱 GLM / 月之暗面 Kimi / 通义 Qwen / MiniMax / 硅基流动）+ 本地推理
+  （Ollama / LM Studio / vLLM 免 key 即用）；
+- 每家携带：网关、缺省模型、**key 的环境变量名**、附加头（如
+  anthropic-version）、获取说明；
+- **环境变量自动发现**：shell 里已 export 的 OPENAI_API_KEY /
+  DEEPSEEK_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY / ZHIPU_API_KEY
+  … 即刻可用（`org config auto` 为全部发现建车道）。
+
+### 车道解析（lib/providers.ts · 新模块）
+
+- `resolveModelFlag()`：`--model` 旗标五种输入统一归一（scripted /
+  配置车道名 / 服务商名 / 裸模型 id / 空 → 缺省车道），CLI / chat /
+  TUI / Web 四端同一实现；
+- **hsl/providers/model.hsl 车道信号化**：真实车道判定从硬编码
+  `model == "deepseek"` 改为宿主信号 `ORG_LANE_KIND`（宿主解析后显式
+  声明）。信号缺席时保留兼容语义（deepseek 走真实、未知名走剧本）——
+  任何服务商车道名零改动接入，`org web --model <lane>` 回落链行为不变；
+- **用户环境不可覆盖层**（snapshotUserEnv）：用户 shell 显式 export 的
+  DHV_LLM_* 优先于程序注入（Unix 惯例的代码级保证）；
+- 非显式车道（无 key 的服务商名猜测）不注入网关 —— 回落 z-ai SDK
+  车道，与 v0.4.x `--model deepseek` 未配 key 行为完全一致。
+
+### 本地路由器（lib/router.ts · 新模块）
+
+进程内 Bun.serve（127.0.0.1 随机端口）暴露 OpenAI 兼容端点，多重优雅
+降级的执行层：
+
+- **key 池轮换**：429 / 5xx / 网络错误 → 同车道下一把 key（round-robin
+  起点轮转，公平分摊限流）；
+- **车道降级链**：key 池全失败 / 超时 → fallback 链下一车道（**模型名
+  随之改写**），`org config set fallback "openrouter,ollama"`；
+- **预算水位**：`org config set budget_requests 200` —— 当日成功调用
+  超出即 429（每请求重读配置，改预算不用重启）；
+- **调用台账**：每次尝试落 `<ws>/runtime/llm-ledger.jsonl`（key 指纹
+  脱敏 / 状态 / 延迟 / usage），`org providers ledger` 与 Web 面板归因；
+- **SSE 流式透传**：字节级转发保持逐 token 节奏 + 注入 include_usage
+  尽力收尾帧 usage（被拒自动去 option 重试）；
+- **每请求重读车道配置**（v0.5.1 设计修正：路由器不缓存车道快照 ——
+  用户改 config.json 即刻生效，同名车道换网关不会路由到死地址）；
+- 生命周期：多 key / 降级链 / 预算任一命中才启动（单 key 直连零开销）；
+  车道切换自动重建；`ORG_ROUTER=0/1` 强制开关；启动失败静默直连。
+
+### CLI / Web 操作面
+
+- `org config` 扩展：`lane <name> set/list/rm/test` · `use <name>` ·
+  `keys add/clear` · `fallback` · `budget_requests` · `auto` ·
+  `test [lane]`（连通测试走车道全解析）；
+- `org providers [ledger]`：服务商健康面板（注册 21 家 · 命名车道 ·
+  环境变量发现 · 台账统计）；
+- **Web GUI ⚙ 车道面板**（顶栏入口）：车道表（设缺省 / 测试 / 删除）+
+  预设下拉 + key 池追加 + env 发现 + auto 一键 + 台账统计 ——
+  `GET/POST /api/providers`、`POST /api/config`、
+  `POST /api/providers/test` 三端点与 CLI 同一实现（绝不双轨）。
+
+### 配置文件 v3（向后兼容）
+
+- `~/.org/config.json` 支持 `lanes`（命名车道）+ `api_keys`（key 池）+
+  `fallbacks`（降级链）+ `budget_requests`（日预算）；
+- **v1 平面形态完全保留**：老文件不改一行照常生效；任何车道变更同步
+  镜像到平面字段（所有既有消费者零改动）；
+- 损坏文件 → 空配置不炸（既有纪律保持）。
+
+### 验证
+
+- 全量 **309/309 全绿**（16 文件 · 1311 expect；v0.5.0 基线 271 +
+  providers 34 + web 4）；
+- `org check` 35 个 HSL 模块 0 失败 · `org demo` 全叙事通过 · TUI 冒烟
+  0 失败 · vendored 新鲜度 0.2.63 ≥ 0.2.61；
+- 路由器端到端（mock 上游）：429 轮换命中序断言（sk-a→sk-b）/ 降级链
+  模型改写（m-primary→m-backup）/ 台账 tokens=7 贯通 / 预算第二次 429 /
+  SSE 尾帧 usage=9 抓取 / 幂等与车道切换重建；
+- 四场景车道信号贯通实测：scripted / 未知名（回落剧本）/ deepseek 无
+  key（回落 SDK）/ 配置车道双 key（路由器 + 网关改写 + key 池）。
+
+
 ## v0.5.0（2026-09-12）—— Web 补齐团队模式面 + agent 反悔通道 + 事件具名化
 
 对标 codex / zcode / opencode 的一次「可操作界面 + agent 应有功能」补全。

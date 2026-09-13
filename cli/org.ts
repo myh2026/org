@@ -40,7 +40,11 @@ import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来�
 import { parseJournalLine } from "../lib/events.ts"; // v0.4.17：replay 解析与事件泵同源
 import { configPath, loadConfig, setConfigValue, unsetConfigValue, applyPreset,
          effectiveValue, applyConfigToEnv, CONFIG_KEYS, PRESETS, maskSecret,
-         normalizeKey } from "../lib/config.ts"; // 用户模型/API 配置（v0.4.16）
+         normalizeKey, setLaneValue, removeLane, useLane, addApiKey, autoFromEnv,
+         type LaneConfig } from "../lib/config.ts"; // 用户模型/API 配置（v0.4.16）
+import { PROVIDERS, PROVIDER_NAMES, discoverEnvLanes, resolveModelFlag,
+         providerRows, testLane, type ProviderRow } from "../lib/providers.ts"; // 服务商注册表与车道解析（v0.5.1）
+import { prepareLlmEnv, readLedger, activeRouter, type LedgerStats } from "../lib/router.ts"; // 本地路由器（v0.5.1）
 
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
@@ -170,6 +174,8 @@ async function runHsl(entry: string, opts: {
   workspace: string; task: string; model: string; fixture: string; out: string;
   env?: Record<string, string>;
 }): Promise<{ ok: boolean; out: string }> {
+  // 车道环境准备（v0.5.1）：--model 车道名/裸模型 id → key 池/降级链/路由器
+  await prepareLlmEnv(opts.model, opts.workspace);
   const args = [
     "run", entry,
     "--workspace", opts.workspace,
@@ -1217,7 +1223,7 @@ async function cmdConfig(a: Args): Promise<number> {
       const key = normalizeKey(rest[0] ?? "");
       if (!key) { console.error(`✗ 未知配置项：${rest[0] ?? ""}（可配置项：${CONFIG_KEYS.join(", ")}）`); return 2; }
       const { value, source } = effectiveValue(key);
-      console.log(key === "api_key" ? maskSecret(value) : value);
+      console.log(key === "api_key" || key === "api_keys" ? maskSecret(value) : value);
       if (process.stderr.isTTY) console.error(`  （来源：${source}）`);
       return 0;
     }
@@ -1227,25 +1233,42 @@ async function cmdConfig(a: Args): Promise<number> {
     const LABELS: Record<string, string> = {
       gateway: "网关端点", api_key: "鉴权密钥", model: "模型名",
       thinking: "思考档位", timeout_ms: "超时(ms)", default_lane: "缺省车道",
+      api_keys: "key 池", fallbacks: "降级链", budget_requests: "日预算(次)",
     };
     for (const k of CONFIG_KEYS) {
       const { value, source } = effectiveValue(k, cfg);
-      const shown = k === "api_key" ? maskSecret(value) : value;
+      const shown = k === "api_key" || k === "api_keys" ? maskSecret(value) : value;
       const srcLabel = source === "env" ? "环境变量" : source === "file" ? "配置文件" : "缺省";
-      console.log(`  ${String(k).padEnd(13)} ${LABELS[k]}：${shown.length > 0 ? shown : "（未配置）"}   ← ${srcLabel}`);
+      console.log(`  ${String(k).padEnd(16)} ${LABELS[k] ?? k}：${shown.length > 0 ? shown : "（未配置）"}   ← ${srcLabel}`);
     }
     const preset = Object.entries(PRESETS).find(([, p]) => p.gateway === effectiveValue("gateway", cfg).value)?.[0];
     if (preset) console.log(`\n  已匹配预设：${preset}（${PRESETS[preset]!.label}）`);
-    console.log(`\n  命令：org config set <key> <value> · org config preset <name> · org config test`);
-    console.log(`  预设：${Object.keys(PRESETS).join(" · ")}`);
+    // v0.5.1：车道表 + 环境变量发现
+    const laneNames = Object.keys(cfg.lanes);
+    if (laneNames.length > 0) {
+      console.log(`\n  命名车道（${laneNames.length} 条 · org config use <name> 切换）：`);
+      for (const name of laneNames) {
+        const l = cfg.lanes[name]!;
+        const keyCount = (l.api_key ? 1 : 0) + l.api_keys.length;
+        const mark = cfg.default_lane === name ? "→" : " ";
+        console.log(`  ${mark} ${name.padEnd(12)} ${l.model || "（未设模型）"} · key×${keyCount}${l.fallbacks.length > 0 ? ` · 降级→ ${l.fallbacks.join(",")}` : ""}`);
+      }
+    }
+    const env = discoverEnvLanes();
+    if (env.length > 0) {
+      console.log(`\n  环境变量发现（${env.length} 家服务商 key 已在 shell 中）：`);
+      for (const d of env) console.log(`    ${d.provider.padEnd(12)} ← ${d.envName}`);
+    }
+    console.log(`\n  命令：org config set/unset · preset <name> · lane <name> set <field> <v> · keys add <k> · fallback "a,b" · use <name> · auto · test`);
+    console.log(`  预设：${PROVIDER_NAMES.slice(0, 8).join(" · ")} … 共 ${PROVIDER_NAMES.length} 家（org config presets 查看全部）`);
     return 0;
   }
 
   if (verb === "set" || verb === "unset") {
     if (verb === "set") {
       const key = setConfigValue(rest[0] ?? "", rest[1] ?? "");
-      if (!key) { console.error(`✗ 未知配置项：${rest[0] ?? ""}（可配置项：${CONFIG_KEYS.join(", ")}；别名 key/lane/base_url 也接受）`); return 2; }
-      const shown = key === "api_key" ? maskSecret(rest[1] ?? "") : rest[1] ?? "";
+      if (!key) { console.error(`✗ 未知配置项：${rest[0] ?? ""}（可配置项：${CONFIG_KEYS.join(", ")}；别名 key/keys/lane/base_url/fallback/budget 也接受）`); return 2; }
+      const shown = key === "api_key" || key === "api_keys" ? maskSecret(rest[1] ?? "") : rest[1] ?? "";
       console.log(`✓ ${key} = ${shown}（已写入 ${path.basename(file)}）`);
       return 0;
     }
@@ -1257,22 +1280,109 @@ async function cmdConfig(a: Args): Promise<number> {
 
   if (verb === "preset" || verb === "presets") {
     if (verb === "presets" || rest.length === 0) {
-      console.log("可用预设：\n");
+      console.log(`可用预设（${PROVIDER_NAMES.length} 家 · OpenAI 兼容协议一条打天下）：\n`);
       for (const [name, p] of Object.entries(PRESETS)) {
-        console.log(`  ${name.padEnd(11)} ${p.label}`);
-        console.log(`              ${p.gateway}${p.model ? ` · ${p.model}` : ""}`);
-        console.log(`              ${p.note}`);
+        console.log(`  ${name.padEnd(12)} ${p.label}`);
+        console.log(`               ${p.gateway}${p.model ? ` · ${p.model}` : ""}`);
+        console.log(`               ${p.note}`);
       }
       return 0;
     }
     const name = applyPreset(rest[0] ?? "");
     if (!name) { console.error(`✗ 未知预设：${rest[0]}（org config presets 查看全部）`); return 2; }
     const p = PRESETS[name]!;
-    console.log(`✓ 已应用预设 ${name} —— ${p.label}`);
+    console.log(`✓ 已应用预设 ${name} —— ${p.label}（建为命名车道并设为缺省）`);
     console.log(`  gateway = ${p.gateway}`);
     console.log(`  model   = ${p.model.length > 0 ? p.model : "（待填：org config set model <本地模型名>）"}`);
     console.log(`  ${p.note}`);
-    if (p.note.includes("必填")) console.log(`  下一步：org config set api_key <你的密钥>`);
+    if (p.note.includes("必填")) console.log(`  下一步：org config set api_key <你的密钥>（多 key：org config keys add <k>）`);
+    return 0;
+  }
+
+  // ---- v0.5.1：命名车道管理 ----
+  if (verb === "lane") {
+    const [sub, name, field, value] = rest;
+    if (!sub || sub === "list") {
+      const cfg = loadConfig();
+      const names = Object.keys(cfg.lanes);
+      if (names.length === 0) { console.log("（无命名车道 · org config preset <name> 一键创建）"); return 0; }
+      console.log("命名车道：\n");
+      for (const n of names) {
+        const l = cfg.lanes[n]!;
+        const keyCount = (l.api_key ? 1 : 0) + l.api_keys.length;
+        console.log(`  ${cfg.default_lane === n ? "→" : " "} ${n.padEnd(12)} ${l.provider ? `[${l.provider}] ` : ""}${l.model || "（未设模型）"} · ${l.gateway || "（未设网关）"} · key×${keyCount}`);
+        if (l.fallbacks.length > 0) console.log(`      降级链 → ${l.fallbacks.join(" → ")}`);
+      }
+      return 0;
+    }
+    if (sub === "set") {
+      if (!name || !field || value === undefined) {
+        console.error('用法：org config lane <name> set <field> <value>（field：gateway/api_key/model/thinking/timeout_ms/provider/api_keys/fallbacks）');
+        return 2;
+      }
+      const n = setLaneValue(name, field, Array.isArray(value) ? value.join(",") : value);
+      if (!n) { console.error(`✗ 车道名/字段非法（name：^[a-z0-9_-]+$ 且非 scripted；field 见用法）`); return 2; }
+      const shown = field.includes("key") ? maskSecret(String(value)) : String(value);
+      console.log(`✓ 车道 ${n}.${field} = ${shown}（已写入 ${path.basename(file)}）`);
+      return 0;
+    }
+    if (sub === "rm" || sub === "remove") {
+      const n = removeLane(name ?? "");
+      if (!n) { console.error(`✗ 车道不存在：${name ?? ""}`); return 2; }
+      console.log(`✓ 车道 ${n} 已删除`);
+      return 0;
+    }
+    if (sub === "test") {
+      const cfg = loadConfig();
+      const lane = (name && cfg.lanes[name]) ? resolveModelFlag(name) : resolveModelFlag("");
+      return printLaneTest(lane);
+    }
+    console.error(`✗ 未知 lane 子命令：${sub}（可用：list/set/rm/test）`);
+    return 2;
+  }
+
+  if (verb === "use") {
+    const n = useLane(rest[0] ?? "");
+    if (!n) {
+      const cfg = loadConfig();
+      console.error(`✗ 车道不存在：${rest[0] ?? ""}（现有：${Object.keys(cfg.lanes).join(", ") || "无"}）`);
+      return 2;
+    }
+    console.log(`✓ 缺省车道 → ${n}（平面配置已镜像 · chat/run/ask 免 --model）`);
+    return 0;
+  }
+
+  if (verb === "keys") {
+    const [sub, key] = rest;
+    if (sub === "add") {
+      if (!key) { console.error("用法：org config keys add <api-key>（追加到 key 池 · 429 自动轮换）"); return 2; }
+      const n = addApiKey(key);
+      console.log(`✓ key 池已有 ${n} 个 key（429/5xx 自动轮换 · 路由器台账归因）`);
+      return 0;
+    }
+    if (sub === "clear") {
+      const key0 = setConfigValue("api_keys", "");
+      if (!key0) { console.error("✗ 清空失败"); return 2; }
+      console.log("✓ key 池已清空（主 api_key 保留）");
+      return 0;
+    }
+    console.error(`✗ 未知 keys 子命令：${sub}（可用：add/clear）`);
+    return 2;
+  }
+
+  if (verb === "auto") {
+    const created = autoFromEnv();
+    if (created.length === 0) {
+      console.log("（未发现任何服务商环境变量 —— 支持的变量名：");
+      for (const [name, spec] of Object.entries(PROVIDERS)) {
+        if (spec.envKeys.length > 0) console.log(`    ${name.padEnd(12)} ${spec.envKeys.join(" | ")}`);
+      }
+      console.log("）");
+      return 0;
+    }
+    console.log(`✓ 已为 ${created.length} 家发现的服务商创建车道：${created.join(", ")}`);
+    console.log(`  缺省车道 → ${created[0]}（org config use <name> 换缺省）`);
+    console.log(`  下一步：org config test 验证连通 · org providers 查看全部车道健康`);
     return 0;
   }
 
@@ -1282,42 +1392,68 @@ async function cmdConfig(a: Args): Promise<number> {
   }
 
   if (verb === "test") {
-    // 真实连通性测试：当前生效配置发一次 1-token 请求（「配了没生效」立即暴露）
-    const { value: gateway } = effectiveValue("gateway");
-    const { value: apiKey } = effectiveValue("api_key");
-    const { value: model } = effectiveValue("model");
-    if (gateway.length === 0) { console.error("✗ 未配置网关（org config preset <name> 或 org config set gateway <url>）"); return 2; }
-    if (model.length === 0) { console.error("✗ 未配置模型名（org config set model <name>）"); return 2; }
-    console.log(`→ POST ${gateway}/chat/completions · model=${model} · 鉴权${apiKey ? "✓" : "（无 key，按匿名处理）"}`);
-    const t0 = Date.now();
-    try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 30_000);
-      const res = await fetch(`${gateway.replace(/\/+$/, "")}/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
-        body: JSON.stringify({ model, stream: false, max_tokens: 8, messages: [{ role: "user", content: "回复一个字：好" }] }),
-        signal: ctrl.signal,
-      });
-      clearTimeout(timer);
-      const ms = Date.now() - t0;
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        console.error(`✗ HTTP ${res.status}（${ms}ms）${body.slice(0, 200)}`);
-        return 1;
-      }
-      const data = await res.json() as { choices?: Array<{ message?: { content?: string } }>; usage?: { total_tokens?: number } };
-      const content = data.choices?.[0]?.message?.content ?? "";
-      console.log(`✓ 连通正常（${ms}ms · 回复「${content.trim().slice(0, 20)}」 · tokens=${data.usage?.total_tokens ?? "?"}）`);
-      return 0;
-    } catch (e) {
-      console.error(`✗ 请求失败（${Date.now() - t0}ms）：${(e as Error).message}`);
-      return 1;
-    }
+    // 真实连通性测试：当前生效车道发一次 1-token 请求（「配了没生效」立即暴露）
+    const lane = rest[0] ? resolveModelFlag(rest[0]) : resolveModelFlag("");
+    return printLaneTest(lane);
   }
 
-  console.error(`✗ 未知子命令：${verb}（可用：get/list/set/unset/preset/presets/path/test）`);
+  console.error(`✗ 未知子命令：${verb}（可用：get/list/set/unset/preset/presets/lane/use/keys/auto/path/test）`);
   return 2;
+}
+
+/** 车道连通测试的统一打印（org config test / org config lane test 共用）。 */
+async function printLaneTest(lane: import("../lib/providers.ts").ResolvedLane): Promise<number> {
+  if (lane.kind === "scripted") { console.log("✓ 剧本车道（scripted · 零外联无需测试）"); return 0; }
+  if (lane.gateway.length === 0) { console.error(`✗ 车道 ${lane.name} 未配置网关（org config preset <name>）`); return 2; }
+  if (lane.model.length === 0) { console.error(`✗ 车道 ${lane.name} 未配置模型名（org config set model <name>）`); return 2; }
+  console.log(`→ 车道 ${lane.name} · ${lane.origin}`);
+  console.log(`  POST ${lane.gateway}/chat/completions · model=${lane.model} · key 池×${lane.keys.length}`);
+  const r = await testLane(lane);
+  if (r.ok) {
+    console.log(`✓ 连通正常（${r.ms}ms · 回复「${r.reply ?? ""}」 · tokens=${r.tokens ?? "?"} · 试了 ${r.triedKeys ?? 1} 个 key）`);
+    return 0;
+  }
+  console.error(`✗ 失败（${r.ms}ms · 试了 ${r.triedKeys ?? 1} 个 key）：${r.error ?? "未知错误"}`);
+  return 1;
+}
+
+// ---- org providers：全部服务商健康面板（v0.5.1） -----------------------------
+async function cmdProviders(a: Args): Promise<number> {
+  const cfg = loadConfig();
+  const [verb] = a.rest;
+  if (verb === "ledger") {
+    const ws = a.workspace;
+    const stats = readLedger(ws);
+    console.log(`llm-ledger —— ${ws}/runtime/llm-ledger.jsonl\n`);
+    console.log(`  总调用 ${stats.total}（ok ${stats.ok} · 失败 ${stats.failed}） · 今日 ${stats.today}（ok ${stats.today_ok}）`);
+    const lanes = Object.entries(stats.byLane);
+    if (lanes.length > 0) {
+      console.log("\n  按车道：");
+      for (const [name, s] of lanes) console.log(`    ${name.padEnd(14)} ok ${s.ok} · fail ${s.failed}`);
+    }
+    if (stats.recent.length > 0) {
+      console.log("\n  最近（倒序 5 条）：");
+      for (const e of stats.recent.slice(-5).reverse()) {
+        console.log(`    ${e.ts.slice(11, 19)} ${String(e.lane).padEnd(12)} ${e.status.padEnd(5)} ${e.ms}ms ${e.key_id}`);
+      }
+    }
+    return 0;
+  }
+  const rows = providerRows(cfg);
+  const env = discoverEnvLanes();
+  console.log(`ORG providers —— ${PROVIDER_NAMES.length} 家注册 · 命名车道 ${Object.keys(cfg.lanes).length} 条 · 环境变量发现 ${env.length} 家\n`);
+  console.log(`  缺省车道：${cfg.default_lane || "（未设 · 按平面配置/环境变量/剧本回落）"}\n`);
+  const STATUS_MARK: Record<ProviderRow["status"], string> = {
+    lane: "★ 车道已配置", env: "◆ 环境变量发现", preset: "  预设可用", flat: "  平面配置",
+  };
+  for (const r of rows) {
+    if (r.status === "preset" && !r.local && !env.find((d) => d.provider === r.name) && !cfg.lanes[r.name]) continue; // 未配置的云端预设折叠（列表太长）
+    const mark = r.default ? "→" : " ";
+    console.log(`  ${mark} ${r.name.padEnd(12)} ${STATUS_MARK[r.status]}${r.keys > 0 ? ` · key×${r.keys}` : ""}${r.fallbacks.length > 0 ? ` · 降级→${r.fallbacks.join(",")}` : ""}`);
+    console.log(`       ${r.model || "（待填模型名）"} · ${r.gateway}`);
+  }
+  console.log(`\n  命令：org config preset <name> · org config test [lane] · org providers test（测全部已配置车道） · org providers ledger（调用台账）`);
+  return 0;
 }
 
 /**
@@ -1355,6 +1491,7 @@ export async function orgMain(): Promise<number> {
     case "chat": return cmdChat(a);
     case "sessions": return cmdSessions(a);
     case "config": return cmdConfig(a);
+    case "providers": return cmdProviders(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -1408,11 +1545,15 @@ export async function orgMain(): Promise<number> {
   org web [--port N] [--workspace DIR]
       Web GUI 原型（Bun.serve 零依赖，默认 4600）：专家卡 + 会话侧栏 + 对话
       视图（观测元数据 tokens/耗时/ctx 窗口计量；scripted 占位剧本秒回）
-  org config [list|get|set|unset|preset|presets|path|test]
-      用户模型/API 配置（~/.org/config.json，跨版本持久）：服务商预设
-      （deepseek/openai/openrouter/ollama/lmstudio/vllm）· 环境变量优先级
-      env > 配置文件 · org config test 真实连通性验证 · default_lane 设
-      缺省模型车道（免每次 --model）
+  org config [list|get|set|unset|preset|presets|lane/use/keys/auto|path|test]
+      用户模型/API 配置（~/.org/config.json，跨版本持久）：20 家服务商
+      预设（deepseek/openai/anthropic/gemini/openrouter/groq/mistral/xai/
+      zhipu/moonshot/dashqueue/…）· 命名车道 + key 池（429 自动轮换）+
+      降级链 + 日预算 · 环境变量自动发现（OPENAI_API_KEY 等即刻可用）·
+      org config test 真实连通性验证 · default_lane 免每次 --model
+  org providers [ledger]
+      服务商健康面板：全部注册预设 + 命名车道 + 环境变量发现状态 +
+      调用台账（key 轮换归因 · 失败统计）
 
 仓库布局：hsl/ = HSL 源码；toolchain/dhv-ts = 内嵌解释器（vendored）；
           demo-run/ = 本地构建目录（git 忽略）；dist/ = 编译产物（入库）

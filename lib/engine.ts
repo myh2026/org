@@ -26,6 +26,7 @@ import {
 } from "./events.ts";
 import { ROOT } from "./root.ts";
 import { readSession as libReadSession } from "./sessions.ts";
+import { prepareLlmEnv } from "./router.ts";
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const STOCK_FIXTURE = path.join(ROOT, "fixtures/run-notices.json");
@@ -38,7 +39,10 @@ export interface RunOptions {
   entry: "org" | "direct";        // org.hsl / pool/direct.hsl
   task: string;
   workspace: string;              // 默认 <repo>/demo-run
-  model: "scripted" | "deepseek";
+  /** 模型车道（v0.5.1 起为任意车道名/模型 id）：scripted=剧本；
+   *  其余（deepseek/openai/anthropic/gemini/… 或裸模型 id）= 真实 LLM，
+   *  服务商/端点/key 由 lib/providers.ts 统一解析。 */
+  model: string;
   fixture?: string;               // 默认 fixtures/run-notices.json
   outDir?: string;                // 默认 <workspace>/out-<ts>
   expert?: string;                // direct 模式必填
@@ -1165,6 +1169,10 @@ export function startRun(opts: RunOptions): RunHandle {
   const main = async (): Promise<void> => {
     try {
       ensureWorkspace(opts.workspace);
+      // 车道环境准备（v0.5.1）：--model 车道名/裸模型 id → 解析 → 注入
+      // DHV_LLM_* → 按需启动本地路由器（key 池轮换/降级链/预算）。
+      // scripted 与未知名零影响（幂等，测试环境零外联不变）。
+      await prepareLlmEnv(opts.model, opts.workspace);
       fs.mkdirSync(outDir, { recursive: true });
       const entryFile = opts.entry === "direct" ? DIRECT_ENTRY : HSL_ENTRY;
       // 直连剧本自动发现：导入 harness 自带占位剧本（manifest.fixture）——

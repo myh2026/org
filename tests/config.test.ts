@@ -156,7 +156,7 @@ describe("config：预设", () => {
     expect(name).toBe("deepseek");
     const cfg = loadConfig();
     expect(cfg.gateway).toBe("https://api.deepseek.com/v1");
-    expect(cfg.model).toBe("deepseek-flash");
+    expect(cfg.model).toBe("deepseek-chat"); // v0.5.1：deepseek-flash 已下线，预设改用当前 API 实际名
     expect(cfg.api_key).toBe("sk-keep");
   });
   test("未知预设返回 null", () => {
@@ -184,7 +184,7 @@ describe("config：生效归因与脱敏", () => {
     expect(envNameOf("thinking")).toBe("DHV_LLM_THINKING");
     expect(envNameOf("timeout_ms")).toBe("DHV_LLM_TIMEOUT_MS");
     expect(envNameOf("default_lane")).toBe("ORG_DEFAULT_MODEL");
-    expect(CONFIG_KEYS.length).toBe(6);
+    expect(CONFIG_KEYS.length).toBe(9); // v0.5.1：+api_keys/fallbacks/budget_requests
   });
   test("api_key 脱敏只露首尾", () => {
     expect(maskSecret("sk-848e25504f854db4")).toBe("sk-…4db4");

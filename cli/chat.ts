@@ -23,6 +23,7 @@ import {
   latestHarnessRunDir, setRetained, forkSession, revertExpert, archivedVersions,
 } from "../lib/engine.ts";
 import { ORG_VERSION } from "../lib/version.ts";
+import { resolveModelFlag } from "../lib/providers.ts"; // 车道解析（v0.5.1）
 
 const CONTEXT_WINDOW = 131072; // 与 direct.hsl / engine.ts 同源的窗口口径
 const HISTORY_FILE = "runtime/chat-history.txt";
@@ -333,14 +334,19 @@ async function handleSlash(state: ChatOpts, rl: readline.Interface, command: str
     case "model": {
       if (arg.length > 0) {
         if (arg !== "scripted" && arg !== "deepseek") {
-          console.log(amber(`? 未知模型 ${arg}（可选 scripted | deepseek）`));
-          return true;
+          // v0.5.1：接受任意车道名（配置车道/服务商预设）或裸模型 id ——
+          // 不再硬编码 deepseek。无可用网关的输入给出行动提示（拼错可诊断）。
+          const known = resolveModelFlag(arg);
+          if (!known.explicit && known.kind === "scripted") {
+            console.log(amber(`? ${arg} 无可用网关（车道名/服务商名/模型 id）—— 建议先 org config preset <name> 或 org config auto`));
+          }
         }
         state.model = arg;
         console.log(dim(`⟳ 模型 → ${arg}`));
         return true;
       }
-      console.log(`模型：${bold(state.model)}${state.model === "deepseek" ? dim("（网关 DHV_LLM_GATEWAY · 流式渲染）") : dim("（剧本 · 秒回）")}`);
+      const lane = resolveModelFlag(state.model);
+      console.log(`模型：${bold(state.model)}${lane.kind === "scripted" ? dim("（剧本 · 秒回）") : dim(`（${lane.origin}${lane.keys.length > 1 ? ` · key×${lane.keys.length}` : ""} · 流式渲染）`)}`);
       return true;
     }
     case "expert": {
@@ -583,7 +589,7 @@ async function runTurn(state: ChatOpts, question: string): Promise<void> {
     entry: "direct",
     task: question,
     workspace: state.workspace,
-    model: state.model as "scripted" | "deepseek",
+    model: state.model,
     expert: state.expert,
     session: state.session,
     // fixture 省略 → 导入剧本自动发现（scripted 零摩擦）；deepseek 不用剧本
@@ -671,7 +677,7 @@ async function runCompact(state: ChatOpts): Promise<void> {
     entry: "direct",
     task: digestQuestion,
     workspace: state.workspace,
-    model: state.model as "scripted" | "deepseek",
+    model: state.model,
     expert: state.expert,
     session: state.session,
     fixture: state.model === "scripted" ? (expertFixtureOf(state.workspace, state.expert) ?? undefined) : undefined,

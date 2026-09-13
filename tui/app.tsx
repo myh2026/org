@@ -328,14 +328,10 @@ export class App {
         return;
       }
       case "model": {
-        // 与 chat /model、Web 分段控制同语义（此前 TUI 只能在 org tui --model 时定）
+        // 与 chat /model、Web 分段控制同语义（v0.5.1：接受任意车道名/模型 id）
         const m = (arg ?? "").trim();
         if (!m) {
-          this.dispatch({ type: "notice", text: `当前模型 ${this.state.model} · 用法 :model scripted|deepseek` });
-          return;
-        }
-        if (m !== "scripted" && m !== "deepseek") {
-          this.dispatch({ type: "notice", text: `未知模型 ${m}（可选 scripted | deepseek）`, tone: "warn" });
+          this.dispatch({ type: "notice", text: `当前模型 ${this.state.model} · 用法 :model scripted|<车道名>|<模型id>` });
           return;
         }
         this.state.model = m;
@@ -534,7 +530,7 @@ export class App {
     void this.pump(startRun({
       entry: "org", task,
       workspace: this.state.workspace,
-      model: this.state.model === "deepseek" ? "deepseek" : "scripted",
+      model: this.state.model,
       // 人在终端前 → 开交互式审批（能力类决策会停下来问；超时降级为拒绝）
       approval: true,
     }), { demo: null });
@@ -550,7 +546,7 @@ export class App {
     void this.pump(startRun({
       entry: "direct", task: question,
       workspace: this.state.workspace,
-      model: this.state.model === "deepseek" ? "deepseek" : "scripted",
+      model: this.state.model,
       expert,
     }), { demo: null });
   }
@@ -583,7 +579,7 @@ export class App {
         const res = await this.pump(startRun({
           entry: "org", task,
           workspace: this.state.workspace,
-          model: this.state.model === "deepseek" ? "deepseek" : "scripted",
+          model: this.state.model,
         }), { demo: step });
         prevOk = res;
         // run A 结束 = 用户选取时点：工厂产出候选 → 保留转正（scripted 自动全选）

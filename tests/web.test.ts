@@ -913,3 +913,84 @@ describe("Web 团队模式：派单 SSE + 运行产物 + 评分卡", () => {
     expect(() => new Function(m![1]!)).not.toThrow();
   }, 120_000);
 });
+
+// ---- v0.5.1：模型车道/服务商面板（org providers / org config 的 GUI 面） ----
+
+describe("Web providers：车道/服务商面板端点（v0.5.1）", () => {
+  // 独立服务 + 独立配置文件（写入隔离，不碰用户 ~/.org/config.json）
+  const ws2 = makeWorkspace("web-providers");
+  let srv: ReturnType<typeof startWebServer>;
+  let b2: string;
+
+  beforeAll(() => {
+    process.env.ORG_CONFIG = path.join(ws2, "config.json");
+    fs.rmSync(path.join(ws2, "config.json"), { force: true });
+    srv = startWebServer({ workspace: ws2, port: 0, model: "scripted" });
+    b2 = `http://127.0.0.1:${srv.port}`;
+  });
+
+  afterAll(() => {
+    srv.stop(true);
+    delete process.env.ORG_CONFIG;
+  });
+
+  test("GET /api/providers：注册表 + 车道 + 台账快照", async () => {
+    const r = (await (await fetch(`${b2}/api/providers`)).json()) as {
+      ok: boolean; presets: string[]; rows: Array<{ name: string }>; lanes: Record<string, unknown>; ledger: unknown;
+    };
+    expect(r.ok).toBe(true);
+    expect(r.presets.length).toBeGreaterThanOrEqual(20);
+    expect(r.rows.length).toBe(r.presets.length);
+    expect(r.lanes).toBeDefined();
+    expect(r.ledger).toBeDefined();
+    for (const name of ["deepseek", "openai", "anthropic", "gemini", "zhipu", "ollama"]) {
+      expect(r.presets).toContain(name);
+    }
+  }, 30_000);
+
+  test("POST /api/config preset/use/keys-add 链：建车道 → 设缺省 → 加 key", async () => {
+    const p = (await (await fetch(`${b2}/api/config`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "preset", name: "deepseek" }),
+    })).json()) as { ok: boolean; applied: string };
+    expect(p.ok).toBe(true);
+    expect(p.applied).toBe("deepseek");
+
+    const k = (await (await fetch(`${b2}/api/config`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "keys-add", key: "sk-web-test-12345678" }),
+    })).json()) as { ok: boolean; keys: number };
+    expect(k.ok).toBe(true);
+    expect(k.keys).toBe(1);
+
+    const r = (await (await fetch(`${b2}/api/providers`)).json()) as { lanes: Record<string, { keys: number; model: string }>; default_lane: string };
+    expect(r.lanes.deepseek?.keys).toBe(1);
+    expect(r.lanes.deepseek?.model).toBe("deepseek-chat");
+    expect(r.default_lane).toBe("deepseek");
+
+    // use 不存在的车道 → 404
+    const u = await fetch(`${b2}/api/config`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "use", name: "nope" }),
+    });
+    expect(u.status).toBe(404);
+  }, 30_000);
+
+  test("POST /api/providers/test：scripted 车道即时 ok（不出网）", async () => {
+    const r = (await (await fetch(`${b2}/api/providers/test`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lane: "scripted" }),
+    })).json()) as { ok: boolean; result: { ok: boolean; lane: string } };
+    expect(r.ok).toBe(true);
+    expect(r.result.ok).toBe(true);
+    expect(r.result.lane).toBe("scripted");
+  }, 30_000);
+
+  test("GUI 单页含 providers 面板要素 + 内联脚本可解析", async () => {
+    const html = await (await fetch(`${b2}/`)).text();
+    for (const needle of ["providersBtn", "providersPane", "function openProviders(", "function renderProvidersPane(",
+                          "function testProviderLane(", "/api/providers", "data-pvtest"]) {
+      expect(html).toContain(needle);
+    }
+  }, 30_000);
+});
