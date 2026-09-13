@@ -45,6 +45,13 @@ import { configPath, loadConfig, setConfigValue, unsetConfigValue, applyPreset,
 import { PROVIDERS, PROVIDER_NAMES, discoverEnvLanes, resolveModelFlag,
          providerRows, testLane, type ProviderRow } from "../lib/providers.ts"; // 服务商注册表与车道解析（v0.5.1）
 import { prepareLlmEnv, readLedger, activeRouter, type LedgerStats } from "../lib/router.ts"; // 本地路由器（v0.5.1）
+import {
+  submitTask, listTasks, getTask, readTaskJournal, cancelTask, pauseTask,
+  resumeTask, retryTask, runNextTask, TaskRunner, type TaskStatus,
+} from "../lib/tasks.ts"; // 长程任务队列（v0.5.2）
+import {
+  notifyEvent, readNotifications, unreadCount, markRead, clearNotifications,
+} from "../lib/notify.ts"; // 通知中心（v0.5.2）
 
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
@@ -1417,6 +1424,192 @@ async function printLaneTest(lane: import("../lib/providers.ts").ResolvedLane): 
   return 1;
 }
 
+// ---- org task：长程任务队列（v0.5.2） ----------------------------------------
+
+const TASK_STATUS_MARK: Record<TaskStatus, string> = {
+  queued: "…", running: "▶", paused: "⏸", done: "✓", failed: "✗", cancelled: "⊘",
+};
+
+async function cmdTask(a: Args): Promise<number> {
+  const [verb, ...rest] = a.rest;
+  const ws = defaultWorkspace(a);
+
+  if (verb === undefined || verb === "list") {
+    const status = rest[0] as TaskStatus | undefined;
+    const tasks = listTasks(ws, status ? { status } : undefined);
+    console.log(`任务队列 · ${ws}/runtime/tasks（执行器状态见 org taskd）\n`);
+    if (tasks.length === 0) {
+      console.log("（空 —— org task submit --task \"...\" 入队）");
+      return 0;
+    }
+    for (const t of tasks) {
+      const mark = TASK_STATUS_MARK[t.status] ?? "?";
+      const time = (t.finished_at ?? t.started_at ?? t.created_at).slice(11, 19);
+      const body = t.kind === "ask" ? `ask ${t.spec.expert} · ${String(t.spec.question ?? "").slice(0, 30)}` : String(t.spec.task ?? "").slice(0, 40);
+      const extra = t.result ? ` · ${t.result.summary.slice(0, 40)}` : t.error ? ` · ${t.error.slice(0, 40)}` : "";
+      console.log(`  ${mark} ${t.id.padEnd(16)} P${t.priority} ${time} ${t.status.padEnd(9)} ${body}${extra}`);
+    }
+    const queuedN = tasks.filter((t) => t.status === "queued").length;
+    if (queuedN > 0) console.log(`\n  待执行 ${queuedN} 个 —— org taskd 启动守护执行（或 org task run-next 前台单发）`);
+    return 0;
+  }
+
+  if (verb === "submit" || verb === "ask") {
+    ensureWorkspace(a.workspace);
+    const spec = {
+      task: verb === "submit" ? a.task : undefined,
+      expert: verb === "ask" ? rest[0] : undefined,
+      question: verb === "ask" ? rest.slice(1).join(" ") : undefined,
+      session: verb === "ask" ? a.session : undefined,
+      model: a.model,
+      approval: verb === "submit",
+    };
+    try {
+      const t = submitTask(a.workspace, verb === "ask" ? "ask" : "run", spec, { priority: a.priority });
+      console.log(`✓ 已入队 ${t.id}（P${t.priority} · ${t.kind}${t.kind === "ask" ? ` ${t.spec.expert}` : ""} · 模型 ${t.spec.model}）`);
+      console.log(`  追踪：org task show ${t.id} · 执行：org taskd（守护）或 org task run-next（前台单发）`);
+      if (!a.quiet) console.log(`  产物将落 out-task-${t.id}（独立目录，与前台操作并行不冲突）`);
+      return 0;
+    } catch (e) {
+      console.error(`✗ 入队失败：${(e as Error).message}`);
+      return 2;
+    }
+  }
+
+  if (verb === "show") {
+    const id = rest[0] ?? "";
+    const t = getTask(ws, id);
+    if (!t) { console.error(`✗ 任务不存在：${id}`); return 2; }
+    console.log(`任务 ${t.id}（${t.status}）`);
+    console.log(`  类型 ${t.kind}${t.kind === "ask" ? ` · 专家 ${t.spec.expert}` : ""} · 优先级 P${t.priority} · 模型 ${t.spec.model} · 尝试 ${t.attempts + 1} 次`);
+    if (t.kind === "ask") console.log(`  问题：${t.spec.question}`);
+    else console.log(`  任务：${t.spec.task}`);
+    if (t.run_dir) console.log(`  产物：${t.run_dir}`);
+    if (t.result) console.log(`  结果：${t.result.summary}`);
+    if (t.error) console.log(`  错误：${t.error}`);
+    if (t.paused_inproc) console.log(`  ⚠ inproc 车道暂停为降级语义（本轮自然结束后停领）`);
+    const j = readTaskJournal(ws, id);
+    if (j.length > 0) {
+      console.log(`\n  审计（${j.length} 条）：`);
+      for (const line of j.slice(-10)) {
+        const [, ev, detail] = line.split("|");
+        console.log(`    ${(ev ?? "").padEnd(16)} ${detail ?? ""}`);
+      }
+    }
+    return 0;
+  }
+
+  if (verb === "cancel" || verb === "pause" || verb === "resume" || verb === "retry") {
+    const id = rest[0] ?? "";
+    const fn = verb === "cancel" ? cancelTask : verb === "pause" ? pauseTask : verb === "resume" ? resumeTask : retryTask;
+    const r = fn(ws, id);
+    if (!r.ok) { console.error(`✗ ${(r as { error?: string }).error ?? "操作失败"}`); return 2; }
+    console.log(`✓ ${verb} ${id} → ${r.status}`);
+    return 0;
+  }
+
+  if (verb === "run-next") {
+    ensureWorkspace(a.workspace);
+    const t = await runNextTask(a.workspace);
+    if (!t) { console.log("（队列空）"); return 0; }
+    console.log(`${TASK_STATUS_MARK[t.status] ?? "?"} ${t.id} → ${t.status}${t.result ? ` · ${t.result.summary.slice(0, 60)}` : ""}`);
+    return t.status === "done" ? 0 : 1;
+  }
+
+  if (verb === "logs") {
+    const id = rest[0] ?? "";
+    const t = getTask(ws, id);
+    if (!t?.run_dir) { console.error(`✗ 任务无产物目录（先执行）`); return 2; }
+    const events = path.join(t.run_dir, "events.jsonl");
+    if (!fs.existsSync(events)) { console.error(`✗ 无 events.jsonl`); return 2; }
+    const lines = fs.readFileSync(events, "utf-8").split("\n").filter((l) => l.trim().length > 0);
+    for (const line of lines.slice(-40)) {
+      try {
+        const e = JSON.parse(line) as { name: string; data?: Record<string, unknown> };
+        console.log(`  ${e.name.padEnd(24)} ${JSON.stringify(e.data ?? {}).slice(0, 90)}`);
+      } catch { console.log(`  ${line.slice(0, 100)}`); }
+    }
+    return 0;
+  }
+
+  console.error(`✗ 未知子命令：${verb}（可用：list/submit/ask/show/cancel/pause/resume/retry/run-next/logs）`);
+  return 2;
+}
+
+// ---- org taskd：守护执行器（v0.5.2） ------------------------------------------
+
+async function cmdTaskd(a: Args): Promise<number> {
+  const ws = a.workspace;
+  ensureWorkspace(ws);
+  const concurrency = Number((process.env.ORG_TASK_CONCURRENCY ?? "1").trim() || "1");
+  const runner = new TaskRunner(ws, { concurrency });
+  if (!runner.acquireLock()) {
+    console.error("✗ 已有执行器在跑（本工作区 runner lock 被持有 —— org web 或另一个 org taskd）。");
+    console.error("  若确认没有：rm runtime/tasks/.runner.lock 后重试（锁带 30s 心跳过期，死进程会自动接管）。");
+    return 2;
+  }
+  runner.start();
+  console.log(`◆ org taskd · 工作区 ${path.relative(ROOT, ws)} · 并发 ${concurrency} · 500ms 领取间隔`);
+  console.log(`  Ctrl+C 退出（排队任务保留，下次启动继续）\n`);
+  let lastCount = -1;
+  const stat = setInterval(() => {
+    const tasks = listTasks(ws);
+    const active = tasks.filter((t) => t.status === "queued" || t.status === "running").length;
+    if (active !== lastCount) {
+      lastCount = active;
+      console.log(`  [${new Date().toISOString().slice(11, 19)}] 活跃 ${active}（排队 ${tasks.filter((t) => t.status === "queued").length} · 运行 ${tasks.filter((t) => t.status === "running").length}）`);
+    }
+  }, 2000);
+  const shutdown = (): void => {
+    runner.stop();
+    runner.releaseLock();
+    clearInterval(stat);
+    console.log("\n◇ taskd 已退出（排队任务保留在磁盘）");
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  return await new Promise<number>(() => { /* 由信号处理器结束进程 */ });
+}
+
+// ---- org notify：通知中心（v0.5.2） -------------------------------------------
+
+async function cmdNotify(a: Args): Promise<number> {
+  const [verb, ...rest] = a.rest;
+  const ws = defaultWorkspace(a);
+
+  if (verb === undefined || verb === "list") {
+    const unread = readNotifications(ws, { unreadOnly: true });
+    const all = readNotifications(ws);
+    console.log(`通知中心 · ${ws}/runtime/notifications.json（未读 ${unread.length} / 共 ${all.length}）\n`);
+    const list = rest[0] === "all" ? all.slice().reverse() : unread.slice().reverse();
+    for (const n of list.slice(0, 30)) {
+      const mark = n.read ? "○" : "●";
+      console.log(`  ${mark} ${n.ts.slice(11, 19)} [${n.kind}] ${n.title}`);
+      if (n.detail) console.log(`      ${n.detail.slice(0, 80)}`);
+    }
+    if (list.length === 0) console.log("（无未读通知 —— 长程任务完成时自动产生）");
+    return 0;
+  }
+  if (verb === "read") {
+    const n = markRead(ws, rest[0] ?? "all");
+    console.log(`✓ 标记已读 ${n} 条`);
+    return 0;
+  }
+  if (verb === "clear") {
+    clearNotifications(ws);
+    console.log("✓ 已清空");
+    return 0;
+  }
+  if (verb === "test") {
+    const r = notifyEvent(ws, "custom", "测试通知", "org notify test —— 桌面通知三级降级链实测", { desktop: true });
+    console.log(`✓ 通知已写入 ${r.id}（桌面弹窗视环境而定，通知中心面板/CLI 始终可读）`);
+    return 0;
+  }
+  console.error(`✗ 未知子命令：${verb}（可用：list/read/clear/test）`);
+  return 2;
+}
+
 // ---- org providers：全部服务商健康面板（v0.5.1） -----------------------------
 async function cmdProviders(a: Args): Promise<number> {
   const cfg = loadConfig();
@@ -1492,6 +1685,9 @@ export async function orgMain(): Promise<number> {
     case "sessions": return cmdSessions(a);
     case "config": return cmdConfig(a);
     case "providers": return cmdProviders(a);
+    case "task": case "tasks": return cmdTask(a);
+    case "taskd": return cmdTaskd(a);
+    case "notify": case "notifications": return cmdNotify(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -1551,6 +1747,18 @@ export async function orgMain(): Promise<number> {
       zhipu/moonshot/dashqueue/…）· 命名车道 + key 池（429 自动轮换）+
       降级链 + 日预算 · 环境变量自动发现（OPENAI_API_KEY 等即刻可用）·
       org config test 真实连通性验证 · default_lane 免每次 --model
+  org task [list|submit|ask|show|cancel|pause|resume|retry|run-next|logs]
+      长程任务队列：后台提交（run 团队派单 / ask 直连专家）· 优先级
+      P0-P10 · 暂停/恢复（运行中 SIGSTOP/SIGCONT）· 取消/重试 · 独立
+      产物目录 out-task-<id>（与前台操作并行不冲突）
+  org taskd [--workspace DIR]
+      守护执行器：领取队列任务并发执行（并发 ORG_TASK_CONCURRENCY，缺省
+      1）· runner lock 跨进程互斥 · Ctrl+C 退出保留排队（org web 内置
+      同一执行器，二选一）
+  org notify [list|read|clear|test]
+      通知中心：任务完成/失败/取消自动通知 · 桌面通知三级降级
+      （notify-send → osascript → powershell → 控制台）· org config set
+      desktop_notify off 关闭
   org providers [ledger]
       服务商健康面板：全部注册预设 + 命名车道 + 环境变量发现状态 +
       调用台账（key 轮换归因 · 失败统计）

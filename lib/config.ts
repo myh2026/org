@@ -40,11 +40,11 @@ import { PROVIDERS } from "./provider-registry.ts";
 /** 配置键（平面字段名 —— 全部 snake_case）。 */
 export type ConfigKey =
   | "gateway" | "api_key" | "model" | "thinking" | "timeout_ms" | "default_lane"
-  | "api_keys" | "fallbacks" | "budget_requests";
+  | "api_keys" | "fallbacks" | "budget_requests" | "desktop_notify";
 
 export const CONFIG_KEYS: readonly ConfigKey[] = [
   "gateway", "api_key", "model", "thinking", "timeout_ms", "default_lane",
-  "api_keys", "fallbacks", "budget_requests",
+  "api_keys", "fallbacks", "budget_requests", "desktop_notify",
 ] as const;
 
 /** 命名车道（文件形态）。 */
@@ -73,6 +73,7 @@ export function normalizeKey(raw: string): ConfigKey | null {
   if (k === "base_url" || k === "baseurl" || k === "endpoint") return "gateway";
   if (k === "fallback" || k === "fallback_lanes") return "fallbacks";
   if (k === "budget" || k === "budget_per_day" || k === "requests_per_day") return "budget_requests";
+  if (k === "desktop" || k === "notify" || k === "notifications") return "desktop_notify";
   return null;
 }
 
@@ -88,13 +89,15 @@ export interface UserConfig {
   api_keys: string[];
   fallbacks: string[];
   budget_requests: string;
+  /** 桌面通知开关：on/off/auto（缺省 auto —— 检测到命令才发）。 */
+  desktop_notify: string;
   lanes: Record<string, LaneConfig>;
 }
 
 export function emptyConfig(): UserConfig {
   return {
     gateway: "", api_key: "", model: "", thinking: "", timeout_ms: "", default_lane: "",
-    api_keys: [], fallbacks: [], budget_requests: "", lanes: {},
+    api_keys: [], fallbacks: [], budget_requests: "", desktop_notify: "", lanes: {},
   };
 }
 

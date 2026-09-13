@@ -77,6 +77,10 @@ export interface RunHandle {
   outDir: string;
   events: AsyncIterable<EngineEvent>;
   cancel(): Promise<void>;
+  /** 暂停运行中的子进程（spawn 车道 SIGSTOP；inproc 不支持返回 false）。 */
+  pause(): Promise<boolean>;
+  /** 恢复被暂停的子进程（SIGCONT）。 */
+  resume(): Promise<boolean>;
   wait(): Promise<RunResult>;
 }
 
@@ -1261,6 +1265,27 @@ export function startRun(opts: RunOptions): RunHandle {
       canceled = true;
       if (proc) {
         try { proc.kill("SIGTERM"); } catch { /* 已退出 */ }
+      }
+    },
+    // v0.5.2：暂停/恢复运行中的 run（spawn 车道 SIGSTOP/SIGCONT —— 长程
+    // 任务队列的核心原语）。进程内车道不支持（返回 false，调用方降级为
+    // 状态级暂停）。已结束/已取消返回 false。
+    pause: async (): Promise<boolean> => {
+      if (!proc || result !== null) return false;
+      try {
+        proc.kill("SIGSTOP"); // 实测 Bun Subprocess.kill 支持自定义信号
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    resume: async (): Promise<boolean> => {
+      if (!proc || result !== null) return false;
+      try {
+        proc.kill("SIGCONT");
+        return true;
+      } catch {
+        return false;
       }
     },
     wait: async () => {

@@ -184,7 +184,7 @@ describe("config：生效归因与脱敏", () => {
     expect(envNameOf("thinking")).toBe("DHV_LLM_THINKING");
     expect(envNameOf("timeout_ms")).toBe("DHV_LLM_TIMEOUT_MS");
     expect(envNameOf("default_lane")).toBe("ORG_DEFAULT_MODEL");
-    expect(CONFIG_KEYS.length).toBe(9); // v0.5.1：+api_keys/fallbacks/budget_requests
+    expect(CONFIG_KEYS.length).toBe(10); // v0.5.1 +api_keys/fallbacks/budget_requests · v0.5.2 +desktop_notify
   });
   test("api_key 脱敏只露首尾", () => {
     expect(maskSecret("sk-848e25504f854db4")).toBe("sk-…4db4");

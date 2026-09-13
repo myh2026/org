@@ -1,5 +1,69 @@
 # CHANGELOG
 
+## v0.5.2（2026-09-13）—— 长程任务队列 + 通知中心（桌面 Agent 的后台面）
+
+「新建长程任务」的完整落地：后台/异步执行 · 队列优先级/并行 · 暂停/
+恢复/中断/继续 · 通知中心/任务提醒。CLI（org task/taskd/notify）与
+Web（任务中心面板 + 铃铛）共用同一实现（lib/tasks.ts + lib/notify.ts），
+新增 19 例锁定（tests/tasks.test.ts）。
+
+### 任务队列（lib/tasks.ts）
+
+- **文件协议**：`<ws>/runtime/tasks/<id>.json`（状态机唯一事实来源，
+  原子写）+ `<id>.journal.jsonl`（状态迁移审计）+ `.runner.lock`
+  （执行器互斥）；
+- **状态机**：queued ⇄ paused（入队级）· queued → running ⇄ paused
+  （**SIGSTOP/SIGCONT 真进程暂停**，spawn 车道）· → done/failed/
+  cancelled · 终态 retry → queued（attempts+1）；
+- **优先级 P0-P10**（0 最高），同级 FIFO（created_at + id 全序确定）；
+- **独立产物目录 out-task-<id>**：与用户前台直连（out-ask）天然隔离，
+  前后台可并行；
+- **执行器三形态**（多重优雅降级）：
+  1. `org taskd` 守护进程（500ms 领取 · 并发 ORG_TASK_CONCURRENCY 缺省
+     1 —— git 注册表写入的保守上限 · Ctrl+C 退出保留排队）；
+  2. `org web` 内嵌执行器（taskRunner:true —— Web 即守护进程，与
+     taskd 二选一，runner lock 跨进程互斥）；
+  3. `org task run-next` 前台单发（无守护时的手动模式；有活执行器时
+     拒绝执行防双跑）；
+- **跨进程契约**：任务记录携带执行 pid —— 孤儿收割只收 pid 已死的
+  任务（执行器崩溃后的断点清理），活 pid（run-next / 同进程另一执行器
+  / 他进程）绝不误杀；锁带 5s 心跳，30s 无心跳的死进程锁可接管；
+- **同进程互斥**：模块级持有者（web 内嵌与 run-next 等同进程场景）。
+
+### RunHandle.pause/resume（lib/engine.ts）
+
+spawn 车道 SIGSTOP/SIGCONT（实测验证：暂停期完成 promise 800ms 不
+settle）；inproc 车道返回 false → 任务层降级为「本轮自然结束后停领」
+并如实标注 paused_inproc。
+
+### 通知中心（lib/notify.ts）
+
+- 任务完成/失败/取消自动通知（notify 开关随任务）；
+- **桌面通知三级降级**：notify-send（Linux）→ osascript（macOS）→
+  powershell toast（Windows）→ 仅控制台；无 DISPLAY 的 CI 自动跳过；
+  `org config set desktop_notify off` 关闭；
+- 存储 `runtime/notifications.json`（原子写 · 200 条容量 · 坏文件容错）；
+- CLI：`org notify list/read/clear/test`；Web：顶栏 🔔 徽标（5s 轮询）+
+  通知面板（逐条已读 / 全部已读 / 清空）。
+
+### Web 任务中心（操作页面）
+
+顶栏 ☰ 任务入口 → 面板：提交表单（任务描述 + 优先级 P0-P10）· 任务
+表（状态徽标 ⏸▶✓✗⊘ · 优先级 · 摘要 · 动作按钮 暂停/恢复/取消/重试）·
+执行器状态行（内嵌运行中 / 无执行器提示）· 打开期间 3s 自动刷新。
+端点：GET /api/tasks · POST /api/task/submit · GET/POST /api/task/<id> ·
+GET/POST /api/notifications —— 与 CLI 同一实现。
+
+### 验证
+
+- 全量 **328/328 全绿**（17 文件 · 1394 expect）；
+- e2e：run-next 团队任务全链（done + result 摘要 + journal 审计链 +
+  通知）· P0 抢先 · Web 提交 → 内嵌执行器自动执行 → 通知 → 动作链
+  （pause→resume→cancel→retry）· SIGSTOP 暂停期不完成 → SIGCONT 收尾；
+- 排序确定性（同毫秒 id tiebreak）· 非法 id 拒绝（路径穿越）· 坏
+  通知/坏任务文件容错。
+
+
 ## v0.5.1（2026-09-13）—— 所有主流 API key 模式（服务商注册表 / key 池轮换 / 降级链 / 预算）
 
 对标 codex / opencode 的多服务商配置面，把「支持所有主流 API key」从

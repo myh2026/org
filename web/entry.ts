@@ -118,6 +118,13 @@ import { prepareLlmEnv, readLedger } from "../lib/router.ts"; // 车道环境准
 import { loadConfig, applyPreset, setConfigValue, unsetConfigValue, setLaneValue,
          removeLane, useLane, addApiKey, autoFromEnv } from "../lib/config.ts";
 import { PROVIDER_NAMES, discoverEnvLanes, resolveModelFlag, providerRows, testLane } from "../lib/providers.ts";
+import {
+  submitTask, listTasks, getTask, readTaskJournal, cancelTask, pauseTask,
+  resumeTask, retryTask, TaskRunner, type TaskRecord, type TaskStatus,
+} from "../lib/tasks.ts"; // 长程任务队列（v0.5.2）
+import {
+  readNotifications, unreadCount, markRead, clearNotifications, notifyEvent,
+} from "../lib/notify.ts"; // 通知中心（v0.5.2）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
 
@@ -582,9 +589,22 @@ function sseAsk(
 }
 
 /** 起服务（可编程入口：测试用 port 0 随机高端口 + server.stop()）。 */
-export function startWebServer(opts: { workspace: string; port: number; model: string }): Bun.Server {
+export function startWebServer(opts: { workspace: string; port: number; model: string; taskRunner?: boolean }): Bun.Server {
   const ws = opts.workspace;
-  return Bun.serve({
+  // v0.5.2：内嵌任务执行器（org web 即守护进程 —— 与 org taskd 二选一，
+  // runner lock 跨进程互斥；抢不到锁 = taskd 在跑，Web 只读任务状态）。
+  let taskRunner: TaskRunner | null = null;
+  if (opts.taskRunner) {
+    taskRunner = new TaskRunner(ws);
+    if (taskRunner.acquireLock()) {
+      taskRunner.start();
+      console.log(`◆ 任务执行器已内嵌（500ms 领取间隔 · 并发 ${process.env.ORG_TASK_CONCURRENCY ?? "1"}）`);
+    } else {
+      taskRunner = null; // taskd 持锁 —— 只读模式
+      console.log("ℹ 已有 taskd 执行器在跑（Web 面板只读任务状态）");
+    }
+  }
+  const server = Bun.serve({
     port: opts.port,
     hostname: "127.0.0.1", // 本地 GUI 原型：只听回环（演示场景够用）
     async fetch(req): Promise<Response> {
@@ -662,6 +682,85 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
           const r = decideApproval(ws, String(body.id ?? ""), body.allow === true, body.always === true, "web");
           if (!r.ok) return json({ ok: false, error: r.error }, r.status);
           return json({ ok: true, id: String(body.id ?? ""), allow: body.allow === true, always: body.always === true });
+        }
+        // ---- 任务中心 + 通知中心（v0.5.2：org task / org notify 的 Web 面）----
+        if (route === "GET /api/tasks") {
+          const status = url.searchParams.get("status");
+          const tasks = listTasks(ws, status ? { status: status as TaskStatus } : undefined);
+          const unread = unreadCount(ws);
+          return json({ ok: true, tasks, unread, runner: taskRunner ? "web" : "external/none" });
+        }
+        if (route === "POST /api/task/submit") {
+          if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+            return json({ error: "dist/demo 是入库快照（只读）。请以可写工作区启动 org web。" }, 400);
+          }
+          const body = await req.json().catch(() => ({})) as Record<string, unknown>;
+          const kind = body.kind === "ask" ? "ask" : "run";
+          const spec = {
+            task: kind === "run" ? String(body.task ?? "").trim() : undefined,
+            expert: kind === "ask" ? String(body.expert ?? "").trim() : undefined,
+            question: kind === "ask" ? String(body.question ?? "").trim() : undefined,
+            session: kind === "ask" ? (String(body.session ?? "").trim() || "task") : undefined,
+            model: String(body.model ?? opts.model ?? "scripted"),
+            approval: kind === "run",
+          };
+          const priority = Math.max(0, Math.min(10, Number(body.priority ?? 5) || 5));
+          try {
+            const t = submitTask(ws, kind, spec, { priority });
+            return json({ ok: true, task: t });
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
+        {
+          // POST /api/task/<id>（cancel/pause/resume/retry）与 GET /api/task/<id>
+          const m = url.pathname.match(/^\/api\/task\/(t-[a-z0-9-]+)$/);
+          if (m && (req.method === "POST" || req.method === "GET")) {
+            const id = m[1]!;
+            if (req.method === "GET") {
+              const t = getTask(ws, id);
+              if (!t) return json({ ok: false, error: "任务不存在" }, 404);
+              return json({ ok: true, task: t, journal: readTaskJournal(ws, id).slice(-20) });
+            }
+            if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+              return json({ error: "dist/demo 是入库快照（只读）。" }, 400);
+            }
+            const body = await req.json().catch(() => ({})) as { action?: unknown };
+            const action = String(body.action ?? "");
+            const fn = action === "cancel" ? cancelTask
+              : action === "pause" ? pauseTask
+              : action === "resume" ? resumeTask
+              : action === "retry" ? retryTask : null;
+            if (!fn) return json({ ok: false, error: "未知 action（cancel/pause/resume/retry）" }, 400);
+            const r = fn(ws, id);
+            if (!r.ok) return json({ ok: false, error: r.error }, 400);
+            return json({ ok: true, status: r.status, task: getTask(ws, id) });
+          }
+        }
+        if (route === "GET /api/notifications") {
+          const all = url.searchParams.get("all") === "1";
+          return json({
+            ok: true,
+            notifications: readNotifications(ws, { unreadOnly: !all }),
+            unread: unreadCount(ws),
+          });
+        }
+        if (route === "POST /api/notifications") {
+          const body = await req.json().catch(() => ({})) as Record<string, unknown>;
+          const action = String(body.action ?? "");
+          if (action === "read") {
+            const n = markRead(ws, String(body.id ?? "all"));
+            return json({ ok: true, marked: n });
+          }
+          if (action === "read-all") {
+            const n = markRead(ws, "all");
+            return json({ ok: true, marked: n });
+          }
+          if (action === "clear") {
+            clearNotifications(ws);
+            return json({ ok: true });
+          }
+          return json({ ok: false, error: "未知 action（read/read-all/clear）" }, 400);
         }
         // ---- 模型车道/服务商面板（v0.5.1：org providers 的 Web 面）----
         if (route === "GET /api/providers") {
@@ -1023,6 +1122,15 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
       }
     },
   });
+  if (taskRunner) {
+    // stop 联动：srv.stop() 一并停执行器 + 释放 runner lock（测试与进程退出都干净）
+    const origStop = server.stop.bind(server);
+    (server as unknown as { stop: (force?: boolean) => void }).stop = (force?: boolean) => {
+      try { taskRunner!.stop(); taskRunner!.releaseLock(); } catch { /* 已停 */ }
+      return origStop(force);
+    };
+  }
+  return server;
 }
 
 // ---- CLI 入口（org web 子命令；常驻直到 Ctrl+C） ----
@@ -1037,7 +1145,7 @@ export async function webMain(argv: string[]): Promise<number> {
   }
   let server: Bun.Server;
   try {
-    server = startWebServer({ workspace: p.workspace, port: p.port, model: p.model });
+    server = startWebServer({ workspace: p.workspace, port: p.port, model: p.model, taskRunner: true });
   } catch (err) {
     process.stderr.write(`✗ Web 服务启动失败：${(err as Error).message}\n`);
     process.stderr.write(`  （端口 ${p.port} 被占用？--port N 换一个）\n`);
@@ -1666,6 +1774,53 @@ function renderIndexHtml(): string {
   .pvtest { margin-top: 6px; font: 11px/1.6 var(--mono); color: var(--muted); word-break: break-all; }
   .pvtest.ok { color: var(--greenb); }
   .pvtest.bad { color: var(--redb); }
+  /* ── 任务中心 + 通知中心（v0.5.2）────────────────────────── */
+  #tasksScrim, #notifyScrim { display: none; position: fixed; inset: 0;
+        background: rgba(0,0,0,.58); z-index: 40; }
+  #tasksScrim.on, #notifyScrim.on { display: block; }
+  #tasksPane, #notifyPane { display: none; position: fixed; z-index: 41;
+        left: 50%; top: 50%; transform: translate(-50%,-50%);
+        width: min(760px, calc(100vw - 28px)); max-height: min(80vh, 700px);
+        overflow: auto; background: var(--panel); border: 1px solid var(--border2);
+        border-radius: 4px; box-shadow: 0 24px 60px rgba(0,0,0,.6); }
+  #tasksPane.on, #notifyPane.on { display: block; }
+  .tkrow { display: flex; gap: 8px; align-items: center; padding: 7px 14px;
+        border-bottom: 1px solid var(--border); font: 11px var(--mono);
+        flex-wrap: wrap; }
+  .tkrow .st { flex: none; width: 22px; text-align: center; }
+  .tkrow .st.queued { color: var(--dim); }
+  .tkrow .st.running { color: var(--greenb); }
+  .tkrow .st.paused { color: #fbbf24; }
+  .tkrow .st.done { color: var(--greenb); }
+  .tkrow .st.failed, .tkrow .st.cancelled { color: var(--redb); }
+  .tkrow .id { color: var(--text); }
+  .tkrow .body { color: var(--muted); flex: 1; min-width: 160px; overflow: hidden;
+        text-overflow: ellipsis; white-space: nowrap; }
+  .tkrow .acts { display: flex; gap: 5px; margin-left: auto; }
+  .tkrow .acts button { background: transparent; border: 1px solid var(--border2);
+        color: var(--text); font: 600 10px var(--mono); padding: 3px 7px;
+        border-radius: 3px; cursor: pointer; }
+  .tkrow .acts button:hover { background: var(--raise); }
+  .tkrow .acts button.warn { color: #fbbf24; border-color: rgba(251,191,36,.35); }
+  .tkrow .acts button.bad { color: var(--redb); border-color: rgba(239,68,68,.35); }
+  .tkform { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 14px;
+        border-bottom: 1px solid var(--border); }
+  .tkform input[type="text"], .tkform select, .tkform input[type="number"] {
+        background: var(--bg); border: 1px solid var(--border2); color: var(--text);
+        font: 11px var(--mono); padding: 6px 8px; border-radius: 3px; }
+  .tkform .taskinput { flex: 1; min-width: 220px; }
+  .tkform button { background: transparent; border: 1px solid rgba(16,185,129,.45);
+        color: var(--greenb); font: 600 11px var(--mono); padding: 6px 12px;
+        border-radius: 3px; cursor: pointer; }
+  .tkform button:hover { background: var(--raise); }
+  .ntrow { padding: 8px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .ntrow:hover { background: var(--panel2); }
+  .ntrow .l1 { display: flex; gap: 8px; font: 11px var(--mono); color: var(--text); }
+  .ntrow .l1 .dot { color: var(--greenb); }
+  .ntrow.read .dot { color: var(--dim); }
+  .ntrow .l1 .kind { color: var(--dim); }
+  .ntrow .l2 { margin-top: 2px; font: 11px/1.5 var(--sans); color: var(--muted); }
+  .ntrow.read .l1, .ntrow.read .l2 { opacity: .6; }
   .rvsettled { padding: 10px 14px; font: 11px/1.7 var(--mono); color: var(--dim);
         border-bottom: 1px solid var(--border); }
 
@@ -1701,6 +1856,12 @@ function renderIndexHtml(): string {
   <button id="providersBtn" class="rchip" type="button" title="模型车道 / 服务商配置面板">
     <span class="rc-label">⚙ 车道</span>
   </button>
+  <button id="tasksBtn" class="rchip" type="button" title="长程任务中心（后台队列 · 优先级 · 暂停/恢复）">
+    <span class="rc-label">☰ 任务</span>
+  </button>
+  <button id="notifyBtn" class="rchip" type="button" title="通知中心（任务完成/失败/取消）">
+    <span class="rc-label">🔔</span> <b id="notifyCount" hidden>0</b>
+  </button>
   <span class="tstats" id="topStats"></span>
 </header>
 <div id="backdrop" aria-hidden="true"></div>
@@ -1710,6 +1871,10 @@ function renderIndexHtml(): string {
 <div id="approvalPane" role="dialog" aria-modal="true" aria-labelledby="apTitle"></div>
 <div id="providersScrim" aria-hidden="true"></div>
 <div id="providersPane" role="dialog" aria-modal="true" aria-labelledby="pvTitle"></div>
+<div id="tasksScrim" aria-hidden="true"></div>
+<div id="tasksPane" role="dialog" aria-modal="true" aria-labelledby="tkTitle"></div>
+<div id="notifyScrim" aria-hidden="true"></div>
+<div id="notifyPane" role="dialog" aria-modal="true" aria-labelledby="ntTitle"></div>
 <div class="app">
   <aside>
     <button class="newbtn" id="newSession" type="button">+ 新会话</button>
@@ -2413,6 +2578,187 @@ function renderApprovalPane() {
       };
     });
 }
+
+// ---- 任务中心 + 通知中心（v0.5.2：org task / org notify 的 GUI 面） ----
+
+var tasksState = { tasks: [], unread: 0, runner: "none" };
+var notifyState = { list: [], unread: 0 };
+var tasksTimer = null;
+
+var TASK_STATUS_MARK = { queued: "…", running: "▶", paused: "⏸", done: "✓", failed: "✗", cancelled: "⊘" };
+
+function openTasks() {
+  document.getElementById("tasksPane").classList.add("on");
+  document.getElementById("tasksScrim").classList.add("on");
+  renderTasksPane();
+  loadTasks();
+  if (tasksTimer) clearInterval(tasksTimer);
+  tasksTimer = setInterval(loadTasks, 3000); // 打开期间 3s 自动刷新
+}
+
+function closeTasks() {
+  document.getElementById("tasksPane").classList.remove("on");
+  document.getElementById("tasksScrim").classList.remove("on");
+  if (tasksTimer) { clearInterval(tasksTimer); tasksTimer = null; }
+}
+
+function loadTasks() {
+  api("/api/tasks").then(function (r) {
+    if (!r || !r.ok) return;
+    tasksState.tasks = r.tasks || [];
+    tasksState.runner = r.runner || "none";
+    renderTasksPane();
+  }).catch(function () { /* 轮询失败静默 */ });
+}
+
+function taskRowHtml(t) {
+  var mark = TASK_STATUS_MARK[t.status] || "?";
+  var body = t.kind === "ask"
+    ? "ask " + esc(t.spec.expert || "?") + " · " + esc(String(t.spec.question || "").slice(0, 34))
+    : esc(String(t.spec.task || "").slice(0, 44));
+  var extra = t.result ? " · " + esc(String(t.result.summary).slice(0, 30))
+    : t.error ? ' · <span style="color:var(--redb)">' + esc(String(t.error).slice(0, 30)) + "</span>" : "";
+  var acts = "";
+  if (t.status === "queued" || t.status === "paused") acts += '<button data-tkresume="' + esc(t.id) + '">恢复</button>';
+  if (t.status === "queued" || t.status === "running" || t.status === "paused") acts += '<button data-tkpause="' + esc(t.id) + '" class="warn">暂停</button><button data-tkcancel="' + esc(t.id) + '" class="bad">取消</button>';
+  if (t.status === "failed" || t.status === "cancelled" || t.status === "done") acts += '<button data-tkretry="' + esc(t.id) + '">重试</button>';
+  var time = String(t.finished_at || t.started_at || t.created_at || "").slice(11, 19);
+  return '<div class="tkrow"><span class="st ' + esc(t.status) + '">' + mark + '</span>' +
+    '<span class="id">' + esc(t.id) + '</span><span class="meta">P' + t.priority + '</span>' +
+    '<span class="meta">' + esc(time) + '</span>' +
+    '<span class="body">' + body + extra + "</span>" +
+    '<span class="acts">' + acts + "</span></div>";
+}
+
+function renderTasksPane() {
+  var pane = document.getElementById("tasksPane");
+  if (!pane.classList.contains("on")) return;
+  var runnerNote = tasksState.runner === "web"
+    ? '<span style="color:var(--greenb)">◆ 内嵌执行器运行中</span>'
+    : tasksState.runner === "external/none"
+      ? '<span style="color:#fbbf24">◇ 无执行器（org taskd 或带 taskRunner 的 org web 才会执行；提交先入队）</span>'
+      : esc(tasksState.runner);
+  var rows = tasksState.tasks.map(taskRowHtml).join("") ||
+    '<div class="pvempty" style="padding:14px">（空 —— 下方提交第一个长程任务）</div>';
+  pane.innerHTML =
+    '<div class="pvhead"><span class="t" id="tkTitle">☰ 长程任务中心</span>' +
+    '<span class="s">' + runnerNote + '</span>' +
+    '<button onclick="closeTasks()" style="background:transparent;border:1px solid var(--border2);color:var(--text);font:600 11px var(--mono);padding:4px 9px;border-radius:3px;cursor:pointer;margin-left:12px">关闭</button></div>' +
+    '<div class="tkform">' +
+    '<input type="text" id="tkTask" class="taskinput" placeholder="团队任务（org run 语义）—— 例如：抓取近一周公告并输出表格">' +
+    '<input type="number" id="tkPriority" min="0" max="10" value="5" title="优先级 P0（最高）– P10" style="width:64px">' +
+    '<button id="tkSubmit">提交任务</button>' +
+    "</div>" +
+    '<div class="pvsec" style="padding:0">' + rows + "</div>";
+
+  var el = document.getElementById("tkSubmit");
+  if (el) el.onclick = function () {
+    var task = (document.getElementById("tkTask") || {}).value || "";
+    var priority = Number(((document.getElementById("tkPriority") || {}).value) || "5") || 5;
+    if (!task.trim()) { flashHint("任务描述必填"); return; }
+    api("/api/task/submit", { method: "POST", body: JSON.stringify({ kind: "run", task: task, priority: priority, model: state.model }) })
+      .then(function (r) {
+        if (!r || !r.ok) { flashHint((r && r.error) || "提交失败"); return; }
+        flashHint("✓ 已入队 " + r.task.id + "（执行器自动领取 · 完成时通知）");
+        document.getElementById("tkTask").value = "";
+        loadTasks();
+      }).catch(function (e) { flashHint("提交失败：" + e); });
+  };
+  wireTaskButtons(pane);
+}
+
+function wireTaskButtons(pane) {
+  Array.prototype.forEach.call(pane.querySelectorAll("button[data-tkpause]"), function (b) {
+    b.onclick = function () { taskAction(b.dataset.tkpause, "pause"); };
+  });
+  Array.prototype.forEach.call(pane.querySelectorAll("button[data-tkresume]"), function (b) {
+    b.onclick = function () { taskAction(b.dataset.tkresume, "resume"); };
+  });
+  Array.prototype.forEach.call(pane.querySelectorAll("button[data-tkcancel]"), function (b) {
+    b.onclick = function () { taskAction(b.dataset.tkcancel, "cancel"); };
+  });
+  Array.prototype.forEach.call(pane.querySelectorAll("button[data-tkretry]"), function (b) {
+    b.onclick = function () { taskAction(b.dataset.tkretry, "retry"); };
+  });
+}
+
+function taskAction(id, action) {
+  api("/api/task/" + encodeURIComponent(id), { method: "POST", body: JSON.stringify({ action: action }) })
+    .then(function (r) {
+      if (!r || !r.ok) { flashHint((r && r.error) || "操作失败"); return; }
+      flashHint("✓ " + action + " → " + r.status);
+      loadTasks();
+    }).catch(function (e) { flashHint("操作失败：" + e); });
+}
+
+// ---- 通知中心 ----
+
+var notifyTimer = null;
+
+function notifyBadgeRefresh() {
+  api("/api/notifications").then(function (r) {
+    if (!r || !r.ok) return;
+    var badge = document.getElementById("notifyCount");
+    badge.textContent = String(r.unread || 0);
+    badge.hidden = !r.unread;
+    notifyState.list = r.notifications || [];
+    notifyState.unread = r.unread || 0;
+    if (document.getElementById("notifyPane").classList.contains("on")) renderNotifyPane();
+  }).catch(function () { /* 静默 */ });
+}
+
+function openNotify() {
+  document.getElementById("notifyPane").classList.add("on");
+  document.getElementById("notifyScrim").classList.add("on");
+  renderNotifyPane();
+}
+
+function closeNotify() {
+  document.getElementById("notifyPane").classList.remove("on");
+  document.getElementById("notifyScrim").classList.remove("on");
+}
+
+function renderNotifyPane() {
+  var pane = document.getElementById("notifyPane");
+  var rows = notifyState.list.slice(0, 50).map(function (n) {
+    return '<div class="ntrow' + (n.read ? " read" : "") + '" data-nt="' + esc(n.id) + '">' +
+      '<div class="l1"><span class="dot">' + (n.read ? "○" : "●") + '</span>' +
+      "<span>" + esc(String(n.ts).slice(11, 19)) + '</span>' +
+      '<span class="kind">[' + esc(n.kind) + "]</span>" +
+      "<span>" + esc(n.title) + "</span></div>" +
+      '<div class="l2">' + esc(n.detail || "") + "</div></div>";
+  }).join("") || '<div class="pvempty" style="padding:14px">（无未读 —— 长程任务完成时自动产生）</div>';
+  pane.innerHTML =
+    '<div class="pvhead"><span class="t" id="ntTitle">🔔 通知中心</span>' +
+    '<span class="s">未读 ' + notifyState.unread + "</span>" +
+    '<button onclick="closeNotify()" style="background:transparent;border:1px solid var(--border2);color:var(--text);font:600 11px var(--mono);padding:4px 9px;border-radius:3px;cursor:pointer;margin-left:12px">关闭</button></div>' +
+    '<div style="padding:0">' + rows + "</div>" +
+    '<div class="rvfoot"><span class="sp"></span>' +
+    '<button id="ntReadAll">全部已读</button><button id="ntClear" class="bad" style="color:var(--redb)">清空</button></div>';
+  Array.prototype.forEach.call(pane.querySelectorAll(".ntrow[data-nt]"), function (node) {
+    node.onclick = function () {
+      api("/api/notifications", { method: "POST", body: JSON.stringify({ action: "read", id: node.dataset.nt }) })
+        .then(function () { notifyBadgeRefresh(); });
+    };
+  });
+  var el = document.getElementById("ntReadAll");
+  if (el) el.onclick = function () {
+    api("/api/notifications", { method: "POST", body: JSON.stringify({ action: "read-all" }) })
+      .then(function () { notifyBadgeRefresh(); });
+  };
+  el = document.getElementById("ntClear");
+  if (el) el.onclick = function () {
+    api("/api/notifications", { method: "POST", body: JSON.stringify({ action: "clear" }) })
+      .then(function () { notifyBadgeRefresh(); });
+  };
+}
+
+document.getElementById("tasksBtn").onclick = openTasks;
+document.getElementById("tasksScrim").onclick = closeTasks;
+document.getElementById("notifyBtn").onclick = openNotify;
+document.getElementById("notifyScrim").onclick = closeNotify;
+notifyBadgeRefresh();
+setInterval(notifyBadgeRefresh, 5000); // 铃铛徽标 5s 轮询
 
 // ---- 模型车道/服务商面板（v0.5.1：org providers / org config 的 GUI 面） ----
 
