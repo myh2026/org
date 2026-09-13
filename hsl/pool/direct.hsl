@@ -16,7 +16,8 @@
 import { AccessMode, CapabilityPolicy } from "../policy/capability.hsl";
 import { ExpertError } from "../types/errors.hsl";
 import { ExpertManifest, Registry } from "../registry/manifest.hsl";
-import { ask } from "../providers/model.hsl";
+import { ask, ask_conv } from "../providers/model.hsl";
+import { tool_mode, tools_prompt, parse_tool_calls, execute_tool, tool_result_message, ToolMode } from "./tools.hsl";
 import { json_escape } from "../registry/manifest.hsl";
 
 /// 直连会话（一次 org ask = 一轮问答；多轮 = 账本上的多行）。
@@ -143,17 +144,70 @@ export async fn direct(expert: String, session_id: String, question: String) -> 
 
     // 问题经模型网关（轨道 direct:<expert>；历史织入提示词 —— 会话连续性）
     let track = format!("direct:{}", expert);
+    // v0.5.3 agent 化：系统提示三段组装 —— 专家描述 + 会话史 +（可选）
+    // 工作区规则（AGENTS.md）+ 专家长期记忆 + 工具协议（ORG_TOOLS 开启时）
     let system = format!(
-        "You are the expert: {}. Answer the user directly and briefly.{}",
+        "You are the expert: {}. Answer the user directly and briefly.{}{}{}",
         m.description,
         render_history(history.clone()),
+        agents_rules(),
+        memory_block(expert.clone()),
     );
-    let answer = ask(track, system, question.clone()).await?;
+    let mode = tool_mode();
+    if mode == ToolMode::Off {
+        let answer = ask(track, system, question.clone()).await?;
+        return Ok(finish_direct(expert.clone(), session_id.clone(), question.clone(), answer, turn, m.description.clone(), history.clone()));
+    } else {
+        // 工具环（v0.5.3）：模型可调用工作区工具（读/写/执行，能力门）。
+        // 有界循环（ORG_TOOL_MAX_TURNS，缺省 6）—— 防失控；每轮轨道消耗
+        // 一条剧本（scripted）/一次真实调用（real）。
+        let system_full = format!("{}{}", system, tools_prompt(mode.clone()));
+        let max_turns = tool_max_turns();
+        let mut turns: Vec<(String, String)> = Vec::new();
+        turns.push((String::from("user"), question.clone()));
+        let mut answer = String::new();
+        let mut round: u32 = 0;
+        loop {
+            if round >= max_turns {
+                answer = format!("（工具环达到 {} 轮上限 —— 强制收束；最后一轮原始输出）\n{}", max_turns, answer);
+                break;
+            }
+            let turns_json = turns_to_json(turns.clone());
+            let raw = ask_conv(track.clone(), system_full.clone(), turns_json).await?;
+            let calls = parse_tool_calls(raw.clone());
+            if calls.len() == 0 {
+                answer = raw;
+                break;
+            }
+            turns.push((String::from("assistant"), raw.clone()));
+            let mut results: Vec<String> = Vec::new();
+            for c in calls.iter() {
+                let r = execute_tool(policy.clone(), c.clone()).await;
+                results.push(r);
+            }
+            let results_json = results_to_json(results);
+            turns.push((String::from("user"), tool_result_message(results_json)));
+            round += 1;
+        }
+        return Ok(finish_direct(expert.clone(), session_id.clone(), question.clone(), answer, turn, m.description.clone(), history.clone()));
+    }
+}
 
+/// 直连收尾（v0.5.3 抽出）：记账 → 会话账本 → 事件 → 纪要 → 组装结果。
+/// 工具环与纯问答共用同一条收尾链（治理不可绕：知情权与记账权）。
+fn finish_direct(
+    expert: String,
+    session_id: String,
+    question: String,
+    answer: String,
+    turn: u32,
+    desc: String,
+    history: Vec<TurnRecord>,
+) -> DirectSession {
     // 花销记账（独立科目：direct-ledger.jsonl；多轮累加而非覆盖）
     let tokens = estimate_tokens(question.clone(), answer.clone());
     // 上下文占用（近似口径，与 lib/engine.ts 同源：系统提示含会话史）
-    let ctx_tokens = estimate_context(m.description.clone(), history.clone(), question.clone(), answer.clone());
+    let ctx_tokens = estimate_context(desc.clone(), history.clone(), question.clone(), answer.clone());
     let ledger_line = format!(
         "{{\"expert\":\"{}\",\"session\":\"{}\",\"turn\":{},\"question\":\"{}\",\"tokens\":{},\"ctx_tokens\":{},\"accepted\":1}}\n",
         json_escape(expert), json_escape(session_id), turn, json_escape(question), tokens, ctx_tokens
@@ -203,7 +257,7 @@ export async fn direct(expert: String, session_id: String, question: String) -> 
         return true;
     };
 
-    Ok(DirectSession {
+    DirectSession {
         expert: expert,
         session: session_id,
         question: question,
@@ -211,7 +265,71 @@ export async fn direct(expert: String, session_id: String, question: String) -> 
         tokens: tokens,
         ctx_tokens: ctx_tokens,
         turn: turn,
-    })
+    }
+}
+
+/// 会话消息序列化（工具环的 turns JSON：[{"role":..,"content":..}]）。
+fn turns_to_json(turns: Vec<(String, String)>) -> String {
+    let out: String = native typescript {
+        return JSON.stringify(turns.map((t) => ({ role: t[0], content: t[1] })));
+    };
+    out
+}
+
+/// 工具结果序列化（JSON 数组字符串）。
+fn results_to_json(results: Vec<String>) -> String {
+    let out: String = native typescript {
+        return JSON.stringify(results);
+    };
+    out
+}
+
+/// 工具环轮数上限（ORG_TOOL_MAX_TURNS，缺省 6；下限 1 上限 16）。
+fn tool_max_turns() -> u32 {
+    let n: u32 = native typescript {
+        const v = Number($host.env.get("ORG_TOOL_MAX_TURNS") || "6");
+        if (!Number.isFinite(v)) return 6;
+        return Math.max(1, Math.min(16, Math.floor(v)));
+    };
+    n
+}
+
+/// 工作区规则注入（AGENTS.md / .org/rules.md —— codex 的 AGENTS.md 同形）。
+/// 文件存在即织入系统提示（≤8KB 截断可观测）；缺失返回空串（零成本）。
+fn agents_rules() -> String {
+    let out: String = native typescript {
+        const CAP = 8192;
+        for (const f of ["AGENTS.md", ".org/rules.md"]) {
+            try {
+                const content = $host.fs.read(f);
+                if (content && content.trim().length > 0) {
+                    const body = content.length > CAP ? content.slice(0, CAP) + "\n…(truncated)" : content;
+                    return "\n\n## Workspace rules (AGENTS.md — MUST follow)\n" + body;
+                }
+            } catch (e) { /* 无此文件：下一个候选 */ }
+        }
+        return "";
+    };
+    out
+}
+
+/// 专家长期记忆注入（runtime/memories/<expert>.md 尾部 40 行 —— 跨会话
+/// 的用户偏好/项目约定沉淀；org memory add 管理）。
+fn memory_block(expert: String) -> String {
+    let path = format!("runtime/memories/{}.md", expert);
+    let p = path.clone();
+    let out: String = native typescript {
+        try {
+            const content = $host.fs.read(p);
+            if (!content || content.trim().length === 0) return "";
+            const lines = content.split("\n");
+            const tail = lines.slice(-40).join("\n");
+            return "\n\n## Long-term memory for this expert (remember these)\n" + tail;
+        } catch (e) {
+            return "";
+        }
+    };
+    out
 }
 
 /// 直连寻址（v1：注册表在岗检查；池实例忙时排队是路线图项）。

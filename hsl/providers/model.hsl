@@ -20,6 +20,16 @@ import { ExpertError } from "../types/errors.hsl";
 ///   decompose / clarify / answers / mint_spec / mint_hsl / mint_fixture
 ///   review:<role> / direct:<expert> / <expert>:<node>
 export async fn ask(track: String, system: String, user: String) -> Result<String, ExpertError> {
+    // 单轮 = 恰好一条用户消息的多轮（v0.5.3 统一实现，语义零变化）。
+    let turns = format!("[{{\"role\":\"user\",\"content\":\"{}\"}}]", json_str(user));
+    ask_conv(track, system, turns).await
+}
+
+/// 多轮判定调用（v0.5.3 agent 工具环）：turns_json = JSON 数组
+/// [{"role":"user"|"assistant","content":"..."}]，与 system 组装成完整
+/// messages —— 工具环把工具结果作为后续 user 消息回灌，模型带完整上文。
+/// 轨道消耗与 ask 同规（scripted 逐条消费同轨道剧本）。
+export async fn ask_conv(track: String, system: String, turns_json: String) -> Result<String, ExpertError> {
     // v0.5.1：真实车道由宿主信号 ORG_LANE_KIND 决定（org 宿主侧
     // lib/providers.ts 解析车道名/模型 id/配置后显式声明）。信号缺席时的
     // 兼容语义：不经 org 宿主直接 `dhv run --model deepseek`（网关三件套
@@ -53,10 +63,15 @@ export async fn ask(track: String, system: String, user: String) -> Result<Strin
             const envThinking = String(process.env.DHV_LLM_THINKING || "").trim();
             const mintTrack = String(track).indexOf("mint_") === 0;
             const thinkOff = envThinking === "" && mintTrack;
+            let turns = [];
+            try { turns = JSON.parse(turns_json); } catch (e) { turns = []; }
+            if (!Array.isArray(turns) || turns.length === 0) {
+                turns = [{ role: "user", content: "" }];
+            }
             const call = (escalated) => $host.llm.complete({
                 messages: [
                     { role: "system", content: system },
-                    { role: "user", content: user },
+                    ...turns,
                 ],
                 temperature: 0.1,
                 maxTokens: 8192,
@@ -117,6 +132,15 @@ export async fn ask(track: String, system: String, user: String) -> Result<Strin
             }
         }
     }
+}
+
+/// JSON 字符串转义（双引号/反斜杠/控制符 —— turns 组装用；与
+/// registry/manifest.hsl json_escape 同构，本地实现避免循环 import）。
+fn json_str(s: String) -> String {
+    let out: String = native typescript {
+        return JSON.stringify(String(s));
+    };
+    out
 }
 
 /// 轨道余量（判定节点的可观测预算面）。

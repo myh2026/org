@@ -125,6 +125,8 @@ import {
 import {
   readNotifications, unreadCount, markRead, clearNotifications, notifyEvent,
 } from "../lib/notify.ts"; // 通知中心（v0.5.2）
+import { expandMentions } from "../lib/mentions.ts"; // @文件引用（v0.5.3）
+import { listMemories, addMemory, removeMemory, allMemories } from "../lib/memories.ts"; // 长期记忆（v0.5.3）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
 
@@ -242,10 +244,16 @@ async function askOnce(
   // 车道环境准备（v0.5.1）：--model 车道名/裸模型 id 统一解析（key 池/
   // 降级链/路由器）；scripted 与未知名零影响
   await prepareLlmEnv(req.model, ws);
+  // v0.5.3：@文件/目录引用展开（workspace 相对路径 → 围栏内容注入）
+  let question = req.question;
+  if (req.question.includes("@")) {
+    const m = expandMentions(req.question, ws);
+    if (m.expanded.length > 0) question = m.text;
+  }
   const env: Record<string, string> = {
     ORG_ASK_EXPERT: req.expert,
     ORG_ASK_SESSION: req.session,
-    ORG_ASK_QUESTION: req.question,
+    ORG_ASK_QUESTION: question,
   };
   // 剧本自动发现（与 cmdAsk 同规则）：导入 harness 自带占位剧本
   // （manifest.fixture）——不传 fixture 也能立即 scripted 问答
@@ -256,7 +264,7 @@ async function askOnce(
     [
       "run", DIRECT_ENTRY,
       "--workspace", ws,
-      "--task", `(direct) ${req.question}`,
+      "--task", `(direct) ${question}`,
       "--model", req.model,
       "--fixture", fixture,
       "--out", path.join(ws, "out-ask"),
@@ -307,10 +315,16 @@ async function askStreamOnce(
   ensureWorkspace(ws);
   // 车道环境准备（v0.5.1）：同 askOnce（spawn 车道读 process.env 注入）
   await prepareLlmEnv(req.model, ws);
+  // v0.5.3：@文件/目录引用展开（与 askOnce 同规则）
+  let question = req.question;
+  if (req.question.includes("@")) {
+    const m = expandMentions(req.question, ws);
+    if (m.expanded.length > 0) question = m.text;
+  }
   const env: Record<string, string> = {
     ORG_ASK_EXPERT: req.expert,
     ORG_ASK_SESSION: req.session,
-    ORG_ASK_QUESTION: req.question,
+    ORG_ASK_QUESTION: question,
   };
   let fixture = STOCK_FIXTURE;
   const found = expertFixtureOf(ws, req.expert);
@@ -318,7 +332,7 @@ async function askStreamOnce(
   const args = [
     "run", DIRECT_ENTRY,
     "--workspace", ws,
-    "--task", `(direct) ${req.question}`,
+    "--task", `(direct) ${question}`,
     "--model", req.model,
     "--fixture", fixture,
     "--out", path.join(ws, "out-ask"),
@@ -761,6 +775,31 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
             return json({ ok: true });
           }
           return json({ ok: false, error: "未知 action（read/read-all/clear）" }, 400);
+        }
+        // ---- 长期记忆（v0.5.3：org memory 的 Web 面）----
+        if (route === "GET /api/memory") {
+          return json({ ok: true, groups: allMemories(ws) });
+        }
+        if (route === "POST /api/memory") {
+          if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+            return json({ error: "dist/demo 是入库快照（只读）。" }, 400);
+          }
+          const body = await req.json().catch(() => ({})) as Record<string, unknown>;
+          const expert = String(body.expert ?? "").trim();
+          const action = String(body.action ?? "");
+          try {
+            if (action === "add") {
+              const n = addMemory(ws, expert, String(body.text ?? ""));
+              return json({ ok: true, count: n });
+            }
+            if (action === "rm") {
+              const n = removeMemory(ws, expert, Number(body.line ?? 0));
+              return json({ ok: true, count: n });
+            }
+            return json({ ok: false, error: "未知 action（add/rm）" }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
         }
         // ---- 模型车道/服务商面板（v0.5.1：org providers 的 Web 面）----
         if (route === "GET /api/providers") {
@@ -1821,6 +1860,25 @@ function renderIndexHtml(): string {
   .ntrow .l1 .kind { color: var(--dim); }
   .ntrow .l2 { margin-top: 2px; font: 11px/1.5 var(--sans); color: var(--muted); }
   .ntrow.read .l1, .ntrow.read .l2 { opacity: .6; }
+  /* ── 记忆面板（v0.5.3）──────────────────────────────── */
+  #memoryScrim { display: none; position: fixed; inset: 0;
+        background: rgba(0,0,0,.58); z-index: 40; }
+  #memoryScrim.on { display: block; }
+  #memoryPane { display: none; position: fixed; z-index: 41;
+        left: 50%; top: 50%; transform: translate(-50%,-50%);
+        width: min(680px, calc(100vw - 28px)); max-height: min(78vh, 660px);
+        overflow: auto; background: var(--panel); border: 1px solid var(--border2);
+        border-radius: 4px; box-shadow: 0 24px 60px rgba(0,0,0,.6); }
+  #memoryPane.on { display: block; }
+  .mmgrp { padding: 8px 14px 4px; border-bottom: 1px solid var(--border); }
+  .mmgrp .gt { font: 600 11px var(--mono); color: var(--greenb); margin-bottom: 4px; }
+  .mmrow { display: flex; gap: 8px; align-items: baseline; padding: 3px 0;
+        font: 11px/1.6 var(--sans); color: var(--text); }
+  .mmrow .ln { flex: none; font: 10px var(--mono); color: var(--dim); width: 28px; }
+  .mmrow .tx { flex: 1; min-width: 0; word-break: break-word; }
+  .mmrow button { flex: none; background: transparent; border: 1px solid rgba(239,68,68,.3);
+        color: var(--redb); font: 600 10px var(--mono); padding: 1px 6px;
+        border-radius: 3px; cursor: pointer; }
   .rvsettled { padding: 10px 14px; font: 11px/1.7 var(--mono); color: var(--dim);
         border-bottom: 1px solid var(--border); }
 
@@ -1862,6 +1920,9 @@ function renderIndexHtml(): string {
   <button id="notifyBtn" class="rchip" type="button" title="通知中心（任务完成/失败/取消）">
     <span class="rc-label">🔔</span> <b id="notifyCount" hidden>0</b>
   </button>
+  <button id="memoryBtn" class="rchip" type="button" title="专家长期记忆（偏好/约定 · 直连自动注入）">
+    <span class="rc-label">🧠 记忆</span>
+  </button>
   <span class="tstats" id="topStats"></span>
 </header>
 <div id="backdrop" aria-hidden="true"></div>
@@ -1875,6 +1936,8 @@ function renderIndexHtml(): string {
 <div id="tasksPane" role="dialog" aria-modal="true" aria-labelledby="tkTitle"></div>
 <div id="notifyScrim" aria-hidden="true"></div>
 <div id="notifyPane" role="dialog" aria-modal="true" aria-labelledby="ntTitle"></div>
+<div id="memoryScrim" aria-hidden="true"></div>
+<div id="memoryPane" role="dialog" aria-modal="true" aria-labelledby="mmTitle"></div>
 <div class="app">
   <aside>
     <button class="newbtn" id="newSession" type="button">+ 新会话</button>
@@ -2752,6 +2815,76 @@ function renderNotifyPane() {
       .then(function () { notifyBadgeRefresh(); });
   };
 }
+
+// ---- 记忆面板（v0.5.3：org memory 的 GUI 面） ----
+
+var memoryState = { groups: [] };
+
+function openMemory() {
+  document.getElementById("memoryPane").classList.add("on");
+  document.getElementById("memoryScrim").classList.add("on");
+  loadMemory();
+}
+
+function closeMemory() {
+  document.getElementById("memoryPane").classList.remove("on");
+  document.getElementById("memoryScrim").classList.remove("on");
+}
+
+function loadMemory() {
+  api("/api/memory").then(function (r) {
+    if (!r || !r.ok) return;
+    memoryState.groups = r.groups || [];
+    renderMemoryPane();
+  }).catch(function () { flashHint("记忆读取失败"); });
+}
+
+function renderMemoryPane() {
+  var pane = document.getElementById("memoryPane");
+  if (!pane.classList.contains("on")) return;
+  var rows = memoryState.groups.map(function (g) {
+    var items = g.entries.map(function (e) {
+      return '<div class="mmrow"><span class="ln">' + e.line + '</span><span class="tx">' +
+        esc(e.text) + '</span><button data-mmrm="' + esc(g.expert) + '" data-mmline="' + e.line + '">删</button></div>';
+    }).join("");
+    return '<div class="mmgrp"><div class="gt">◆ ' + esc(g.expert) + '（' + g.entries.length + ' 条 · 直连自动注入尾部 40 行）</div>' + items + "</div>";
+  }).join("") || '<div class="pvempty" style="padding:14px">（无记忆 —— 下方为当前对话专家添加第一条）</div>';
+  pane.innerHTML =
+    '<div class="pvhead"><span class="t" id="mmTitle">🧠 专家长期记忆</span>' +
+    '<span class="s">偏好/约定沉淀 · direct 车道每轮自动注入</span>' +
+    '<button onclick="closeMemory()" style="background:transparent;border:1px solid var(--border2);color:var(--text);font:600 11px var(--mono);padding:4px 9px;border-radius:3px;cursor:pointer;margin-left:12px">关闭</button></div>' +
+    '<div style="padding:0;max-height:52vh;overflow:auto">' + rows + "</div>" +
+    '<div class="tkform">' +
+    '<input type="text" id="mmExpert" placeholder="专家名（如 notice-parser）" style="width:170px" value="' + esc(state.expert || "") + '">' +
+    '<input type="text" id="mmText" class="taskinput" placeholder="记忆内容（≤500 字符 · 如：日期一律输出 ISO 8601）">' +
+    '<button id="mmAdd">记入</button>' +
+    "</div>";
+  var el = document.getElementById("mmAdd");
+  if (el) el.onclick = function () {
+    var expert = (document.getElementById("mmExpert") || {}).value || "";
+    var text = (document.getElementById("mmText") || {}).value || "";
+    if (!expert.trim() || !text.trim()) { flashHint("专家名与记忆内容必填"); return; }
+    api("/api/memory", { method: "POST", body: JSON.stringify({ action: "add", expert: expert, text: text }) })
+      .then(function (r) {
+        if (!r || !r.ok) { flashHint((r && r.error) || "写入失败"); return; }
+        flashHint("✓ 已记入（" + expert + " 共 " + r.count + " 条 · 下轮对话生效）");
+        document.getElementById("mmText").value = "";
+        loadMemory();
+      }).catch(function (e) { flashHint("写入失败：" + e); });
+  };
+  Array.prototype.forEach.call(pane.querySelectorAll("button[data-mmrm]"), function (b) {
+    b.onclick = function () {
+      api("/api/memory", { method: "POST", body: JSON.stringify({ action: "rm", expert: b.dataset.mmrm, line: Number(b.dataset.mmline) }) })
+        .then(function (r) {
+          if (!r || !r.ok) { flashHint((r && r.error) || "删除失败"); return; }
+          loadMemory();
+        });
+    };
+  });
+}
+
+document.getElementById("memoryBtn").onclick = openMemory;
+document.getElementById("memoryScrim").onclick = closeMemory;
 
 document.getElementById("tasksBtn").onclick = openTasks;
 document.getElementById("tasksScrim").onclick = closeTasks;

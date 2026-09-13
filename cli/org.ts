@@ -52,6 +52,8 @@ import {
 import {
   notifyEvent, readNotifications, unreadCount, markRead, clearNotifications,
 } from "../lib/notify.ts"; // 通知中心（v0.5.2）
+import { expandMentions } from "../lib/mentions.ts"; // @文件引用（v0.5.3）
+import { listMemories, addMemory, removeMemory, allMemories } from "../lib/memories.ts"; // 长期记忆（v0.5.3）
 
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
@@ -544,7 +546,7 @@ async function cmdAsk(a: Args): Promise<number> {
   }
   ensureWorkspace(a.workspace);
   const out = a.out || path.join(a.workspace, "out-ask");
-  const turns = a.turns.length > 0 ? a.turns : (question ? [question] : []);
+  let turns = a.turns.length > 0 ? a.turns : (question ? [question] : []);
   if (turns.length === 0) {
     console.error('用法：org ask <expert> "<question>"（问题必填）');
     return 2;
@@ -553,6 +555,14 @@ async function cmdAsk(a: Args): Promise<number> {
     ORG_ASK_EXPERT: expert,
     ORG_ASK_SESSION: a.session,
   };
+  // v0.5.3：@文件/目录引用展开（workspace 相对路径 → 围栏内容注入）
+  if (question.includes("@")) {
+    const m = expandMentions(question, a.workspace);
+    if (m.expanded.length > 0) {
+      console.log(dim(`📎 已展开引用：${m.expanded.join(", ")}${m.skipped.length > 0 ? dim(`（跳过 ${m.skipped.map((s) => `@${s.path}：${s.reason}`).join("; ")}）`) : ""}`));
+    }
+    turns = turns.map((t) => (t === question ? m.text : t));
+  }
   if (turns.length === 1) env.ORG_ASK_QUESTION = turns[0]!;
   else env.ORG_ASK_TURNS = JSON.stringify(turns);
   // 剧本自动发现：导入 harness 自带占位剧本（manifest.fixture）—— 不传
@@ -1610,6 +1620,59 @@ async function cmdNotify(a: Args): Promise<number> {
   return 2;
 }
 
+// ---- org memory：专家长期记忆（v0.5.3） ----------------------------------------
+
+async function cmdMemory(a: Args): Promise<number> {
+  const [verb, expert, ...rest] = a.rest;
+  const ws = defaultWorkspace(a);
+
+  if (verb === undefined || verb === "list") {
+    if (expert) {
+      const entries = listMemories(ws, expert);
+      console.log(`记忆 · ${expert}（${entries.length} 条 · runtime/memories/${expert}.md）\n`);
+      if (entries.length === 0) {
+        console.log("（空 —— org memory add " + expert + ' "偏好或约定"');
+      }
+      for (const e of entries) console.log(`  ${String(e.line).padStart(3)}  ${e.text}`);
+      console.log("\n  注入：direct 车道自动织入尾部 40 行（org ask / org chat 即生效）");
+      return 0;
+    }
+    const all = allMemories(ws);
+    if (all.length === 0) { console.log("（无任何专家记忆 · org memory add <expert> \"...\"）"); return 0; }
+    for (const g of all) {
+      console.log(`◆ ${g.expert}（${g.entries.length} 条）`);
+      for (const e of g.entries.slice(-5)) console.log(`    ${String(e.line).padStart(3)}  ${e.text}`);
+    }
+    return 0;
+  }
+  if (verb === "add") {
+    const text = rest.join(" ");
+    if (!expert || !text) { console.error('用法：org memory add <expert> "记忆内容（≤500 字符）"'); return 2; }
+    try {
+      const n = addMemory(a.workspace, expert, text);
+      console.log(`✓ ${expert} 已记 ${n} 条（direct 车道自动注入提示词）`);
+      return 0;
+    } catch (e) {
+      console.error(`✗ ${(e as Error).message}`);
+      return 2;
+    }
+  }
+  if (verb === "rm") {
+    const line = Number(rest[0] ?? "0");
+    if (!expert || !line) { console.error("用法：org memory rm <expert> <行号>（org memory list 查看行号）"); return 2; }
+    try {
+      const n = removeMemory(ws, expert, line);
+      console.log(`✓ 已删除（剩 ${n} 条）`);
+      return 0;
+    } catch (e) {
+      console.error(`✗ ${(e as Error).message}`);
+      return 2;
+    }
+  }
+  console.error(`✗ 未知子命令：${verb}（可用：list/add/rm）`);
+  return 2;
+}
+
 // ---- org providers：全部服务商健康面板（v0.5.1） -----------------------------
 async function cmdProviders(a: Args): Promise<number> {
   const cfg = loadConfig();
@@ -1688,6 +1751,7 @@ export async function orgMain(): Promise<number> {
     case "task": case "tasks": return cmdTask(a);
     case "taskd": return cmdTaskd(a);
     case "notify": case "notifications": return cmdNotify(a);
+    case "memory": case "memories": return cmdMemory(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -1759,6 +1823,10 @@ export async function orgMain(): Promise<number> {
       通知中心：任务完成/失败/取消自动通知 · 桌面通知三级降级
       （notify-send → osascript → powershell → 控制台）· org config set
       desktop_notify off 关闭
+  org memory [list|add|rm] [<expert>]
+      专家长期记忆：用户偏好/项目约定沉淀（runtime/memories/<expert>.md）
+      —— direct 车道自动注入提示词（跨会话生效）· @文件引用（org ask
+      "…@src/main.ts"）与 AGENTS.md 工作区规则同批生效
   org providers [ledger]
       服务商健康面板：全部注册预设 + 命名车道 + 环境变量发现状态 +
       调用台账（key 轮换归因 · 失败统计）

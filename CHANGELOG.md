@@ -1,5 +1,73 @@
 # CHANGELOG
 
+## v0.5.3（2026-09-13）—— agent 工具环 + AGENTS.md + @文件引用 + 长期记忆
+
+「org agent 成为正常 agent」的执行层落地：模型不只是回答 —— 它能**读
+文件、写文件、跑命令**（能力门控），带工作区规则与长期记忆作答。新增
+17 例锁定（tests/tools.test.ts），真实模型端到端实测闭环。
+
+### agent 工具环（hsl/pool/tools.hsl · 新模块）
+
+direct 车道的模型回复可携带 `<tool>{"name":"...","args":{...}}</tool>`
+结构化调用；HSL 侧解析 → 能力门 → $host 执行 → 结果回灌对话（有界循环
+ORG_TOOL_MAX_TURNS 缺省 6，防失控强制收束）：
+
+- **工具集**：fs_read（32KB 截断可观测）/ fs_list / fs_glob（简单
+  glob）/ fs_write / fs_edit（唯一锚点）/ shell_run（60s 超时 + 白名单）；
+- **多形态宽容解析**（实测真实模型驱动）：`{name,args}` 规范形 /
+  `{name, path}` 平铺形 / `{tool,...}` 别名形全兼容；坏 JSON 跳过不炸，
+  错误反馈携带实际解析结果（模型可自纠）；
+- **能力门（安全缺省）**：读工具 Auto；写/执行工具需 ORG_TOOLS=write
+  **且**审批队列在环（ORG_APPROVAL=1）—— 未开审批时明确拒绝并告知
+  模型原因，绝不静默放行；
+- **开关三档**（多重优雅降级）：ORG_TOOLS 未设 = 纯问答（v0.5.2 行为
+  零变化）；=1 只读工具（零风险）；=write 全量 + 能力门；
+- 事件 tool_call / tool_result / tool_denied 上总线（三端渲染：
+  TUI 系统卡 / Web notice 三色调）。
+
+### 模型网关多轮化（hsl/providers/model.hsl）
+
+`ask_conv(track, system, turns_json)`：完整 messages 组装（system +
+任意 user/assistant 序列）；`ask` 变为单轮特例（统一实现，语义零变化）。
+工具环把工具结果作为 user 消息回灌 —— 模型带完整上文自纠。
+
+### 上下文三注入（direct 车道系统提示自动组装）
+
+- **AGENTS.md**（codex 同形）：工作区规则织入（AGENTS.md /
+  .org/rules.md，8KB 截断可观测）；
+- **长期记忆**：runtime/memories/<expert>.md 尾部 40 行跨会话注入
+  （org memory add 管理；CLI/`/memory`/Web 🧠 面板三端同权）；
+- **@文件/目录引用**（lib/mentions.ts）：`org ask "…@src/main.ts"` /
+  chat / Web 的 `@相对路径` 展开为围栏内容（文件 64KB / 目录 20 文件树 +
+  8 行预览 / 总预算 96KB；越界·二进制·不存在逐项跳过并附注，绝不炸）。
+
+### CLI / Web 操作面
+
+- `org memory list/add/rm` + chat `/memory` + Web 🧠 记忆面板
+  （GET/POST /api/memory：分组列表/追加/删除）；
+- Web ask 链路 @展开（askOnce / askStreamOnce 同规则）。
+
+### 真实模型端到端实测（z-ai SDK 车道）
+
+```
+问题：请用 fs_read 工具读取 raw/notices.txt，告诉我有多少个 NOTICE 块
+事件：tool_call fs_read path=raw/notices.txt → tool_result ok 546 chars
+回答：文件里有 5 个 NOTICE 块。   （grep -c 验证 = 5 ✓）
+```
+首版实测抓到的缺陷（已修）：真实模型的工具参数平铺形态
+`{name,path}` 不被解析 → 六连「args.path 必填」空转到轮上限 ——
+多形态宽容解析后单轮闭环（719ms）。
+
+### 验证
+
+- 全量 **346/346 全绿**（18 文件 · 1460 expect）；
+- 工具环 e2e（scripted 剧本驱动）：读工具全链（真实读文件 + 事件 +
+  账本落最终答案）· 只读模式 fs_write 拒绝 · write 未开审批仍拒绝
+  （安全缺省）· 关闭档零变化 · 轮上限收束 · 坏 JSON 不炸；
+- @引用：文件/目录/越界/二进制/预算五类 + Web 账本查证；
+- 记忆：add/list/rm/防呆/坏文件容错 + Web 端点与 GUI 要素。
+
+
 ## v0.5.2（2026-09-13）—— 长程任务队列 + 通知中心（桌面 Agent 的后台面）
 
 「新建长程任务」的完整落地：后台/异步执行 · 队列优先级/并行 · 暂停/

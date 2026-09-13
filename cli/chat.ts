@@ -24,6 +24,8 @@ import {
 } from "../lib/engine.ts";
 import { ORG_VERSION } from "../lib/version.ts";
 import { resolveModelFlag } from "../lib/providers.ts"; // 车道解析（v0.5.1）
+import { expandMentions } from "../lib/mentions.ts"; // @文件引用（v0.5.3）
+import { listMemories, addMemory } from "../lib/memories.ts"; // 长期记忆（v0.5.3）
 
 const CONTEXT_WINDOW = 131072; // 与 direct.hsl / engine.ts 同源的窗口口径
 const HISTORY_FILE = "runtime/chat-history.txt";
@@ -327,10 +329,32 @@ async function handleSlash(state: ChatOpts, rl: readline.Interface, command: str
   /keep <名> /drop <名> 工具库治理：选取保留 / 取消保留
   /fork [新 id]        会话派生（账本复制即分叉，原会话不变）
   /undo [版本]         版本回退（归档源还原为在岗源，可逆）
+  /memory             查看/追加专家长期记忆（每轮自动注入）
   /clear               清屏
   /exit /quit /q       退出（Ctrl+D 同）
   !<cmd>               shell 逃逸（用户发起 · 结果直接可见）`);
       return true;
+    case "memory": {
+      if (arg.length > 0) {
+        // /memory add <内容> —— 追加到当前专家记忆
+        const sep = arg.indexOf(" ");
+        if (arg.startsWith("add") && sep > 0) {
+          const text = arg.slice(sep + 1).trim();
+          try {
+            const n = addMemory(state.workspace, state.expert, text);
+            console.log(dim(`✓ 已记（${state.expert} 共 ${n} 条 · 下轮起注入提示词）`));
+          } catch (e) {
+            console.log(amber(`✗ ${(e as Error).message}`));
+          }
+          return true;
+        }
+      }
+      const entries = listMemories(state.workspace, state.expert);
+      console.log(`记忆 · ${state.expert}（${entries.length} 条 · 尾部 40 行每轮注入）：`);
+      for (const e of entries.slice(-10)) console.log(`  ${String(e.line).padStart(3)}  ${e.text}`);
+      console.log(dim('  /memory add <内容> 追加 · org memory rm 删除'));
+      return true;
+    }
     case "model": {
       if (arg.length > 0) {
         if (arg !== "scripted" && arg !== "deepseek") {
@@ -583,8 +607,17 @@ async function handleSlash(state: ChatOpts, rl: readline.Interface, command: str
 
 // ---------- 一轮对话（直连池全治理 + 流式渲染） ----------
 
-async function runTurn(state: ChatOpts, question: string): Promise<void> {
+async function runTurn(state: ChatOpts, questionRaw: string): Promise<void> {
   const t0 = Date.now();
+  // v0.5.3：@文件/目录引用展开（workspace 相对路径 → 围栏内容注入）
+  let question = questionRaw;
+  if (questionRaw.includes("@")) {
+    const m = expandMentions(questionRaw, state.workspace);
+    if (m.expanded.length > 0) {
+      console.log(dim(`📎 已展开引用：${m.expanded.join(", ")}${m.skipped.length > 0 ? dim(` · 跳过 ${m.skipped.map((s) => `@${s.path}：${s.reason}`).join("; ")}`) : ""}`));
+      question = m.text;
+    }
+  }
   const handle = startRun({
     entry: "direct",
     task: question,

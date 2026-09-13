@@ -279,6 +279,10 @@ export function classifyRunEvent(ev:
         const n = parseDrift(detail);
         return { t: "drift", alerts: n ?? 0, detail };
       }
+      // ---- v0.5.3：agent 工具环（观测面 notice 三色调）----
+      if (action === "tool_call") return { t: "notice", tone: "info", text: `🛠 调用 ${detail}` };
+      if (action === "tool_result") return { t: "notice", tone: detail.includes("ok") ? "ok" : "err", text: `🛠 结果 ${detail}` };
+      if (action === "tool_denied") return { t: "notice", tone: "warn", text: `🛠 拒绝 ${detail}` };
       return { t: "other", name: "journal", action, detail };
     }
     // 合成终态（引擎桥注入，不在磁盘产物里）：与 done 帧同源，渲染层不需要它

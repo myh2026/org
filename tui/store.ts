@@ -578,6 +578,14 @@ function applyJournal(state: TuiState, action: string, detail: string): TuiState
       }
       return appendCard(state, { t: "system", tone: "ok", text: detail });
     }
+    case "tool_call":
+    case "tool_result": {
+      // v0.5.3 agent 工具环：调用与结果（观测面一行卡）
+      return appendCard(state, { t: "system", tone: action === "tool_call" ? "info" : "ok", text: `🛠 ${detail}` });
+    }
+    case "tool_denied": {
+      return appendCard(state, { t: "system", tone: "warn", text: `🛠 拒绝 ${detail}` });
+    }
     case "direct_open": {
       const ctx = state.runCtx ?? newRunCtx(state.model);
       let next = state;

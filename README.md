@@ -5,8 +5,8 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.5.2_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
-[![Tests](https://img.shields.io/badge/tests-328%2F328_passing-brightgreen.svg)](#-测试与验证状态)
+[![Status](https://img.shields.io/badge/status-v0.5.3_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Tests](https://img.shields.io/badge/tests-346%2F346_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.63-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
 [![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-三平台单二进制分发)
@@ -19,7 +19,9 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **v0.5.2 当前状态**：可运行实现，**328/328 机制级测试全绿**（17 文件 · 1394 expect）。近两版落地**所有主流 API key 模式**（v0.5.1：21 家服务商注册表 + 环境变量自动发现 + key 池 429 轮换 + 车道降级链 + 日预算 + 本地路由器 + Web ⚙ 车道面板）与**长程任务队列 + 通知中心**（v0.5.2：org task/taskd/notify · 优先级 P0-P10 · 运行中 SIGSTOP/SIGCONT 真暂停/恢复 · 孤儿收割 pid 对账 · 桌面通知三级降级 · Web 任务中心面板）。模型车道信号化：hsl/providers/model.hsl 不再硬编码 deepseek —— 任意服务商车道名零改动接入。
+> **v0.5.3 当前状态**：可运行实现，**346/346 机制级测试全绿**（18 文件 · 1460 expect）。本版落地**agent 工具环**（direct 车道模型可调用 fs_read/fs_write/fs_edit/shell_run —— 能力门 + 审批在环 + 有界循环；真实模型端到端实测：读文件→正确回答）与**上下文三注入**（AGENTS.md 工作区规则 · 专家长期记忆 org memory · @文件/目录引用）。工具环三档开关：未设=纯问答（零变化）/ 1=只读 / write=全量+能力门。
+
+> **v0.5.2 历史状态**：可运行实现，**328/328 机制级测试全绿**（17 文件 · 1394 expect）。近两版落地**所有主流 API key 模式**（v0.5.1：21 家服务商注册表 + 环境变量自动发现 + key 池 429 轮换 + 车道降级链 + 日预算 + 本地路由器 + Web ⚙ 车道面板）与**长程任务队列 + 通知中心**（v0.5.2：org task/taskd/notify · 优先级 P0-P10 · 运行中 SIGSTOP/SIGCONT 真暂停/恢复 · 孤儿收割 pid 对账 · 桌面通知三级降级 · Web 任务中心面板）。模型车道信号化：hsl/providers/model.hsl 不再硬编码 deepseek —— 任意服务商车道名零改动接入。
 
 > **v0.5.0 历史状态**：可运行实现，**266/266 机制级测试全绿**（14 文件 · 1069 expect）。本版对标 codex / zcode / opencode 补全两块：**Web GUI 补齐团队模式派单面**（`POST /api/run-stream` SSE + 运行卡片叙事 + 运行列表回放 + 评分卡面板 —— 此前 Web 只能直连单专家，旗舰监督回路在 Web 上完全不可见）与**agent 反悔通道**（`org session fork` 会话派生 · `org revert` 版本回退，回退本身可逆）；另把 11 类此前落 `unknown` 被三端静默丢弃的事件（审计 / 能力拒绝 / 金丝雀回滚 / 固化降级 / 静默更新告警 / 补丁回滚失败 / panic / llm_stream_done 用量…）具名化。解析契约单一化：新增 `lib/runCards.ts`，分类在服务端做，浏览器只渲染。（上版 v0.4.17 落地 `org review` 运行范围复核与四个实测缺陷修复。）
 

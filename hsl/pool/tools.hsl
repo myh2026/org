@@ -1,0 +1,348 @@
+// ============================================================================
+// org/pool/tools.hsl — agent 工具环（v0.5.3）：模型可调用的工作区工具
+// ============================================================================
+// 「org agent 成为正常 agent」的执行层：direct 车道的模型回复可携带
+// <tool>{"name":"...","args":{...}}</tool> 结构化调用，HSL 侧解析 → 能力
+// 门 → $host 执行 → 结果回灌对话（有界循环）。
+//
+// 开关（多重优雅降级）：
+//   ORG_TOOLS=0/未设  → 工具环关闭（纯问答，v0.5.2 行为零变化）
+//   ORG_TOOLS=1       → 只读工具（fs_read / fs_list / fs_glob）—— 零风险
+//   ORG_TOOLS=write   → 全量工具（写/执行）—— 写动作走能力门：
+//                       ORG_APPROVAL=1 → 审批队列（人在环）；未开审批 →
+//                       拒绝并告知模型原因（安全缺省，绝不静默放行）
+//
+// 工具集（与 $host ABI 同源，全部过路径监狱/首词白名单）：
+//   fs_read   {path}                     读文件（≤32KB 截断可观测）
+//   fs_list   {dir, depth?}              目录清单
+//   fs_glob   {pattern}                  简单 glob（* 与 **，走 fs_list 树）
+//   fs_write  {path, content}            写文件（能力门）
+//   fs_edit   {path, old, new}           唯一锚点编辑（能力门）
+//   shell_run {cmd}                      命令执行（能力门 + --allow 白名单）
+//
+// 事件（观测面，三端消费）：
+//   journal tool_call   <tool> <args 摘要>
+//   journal tool_result <tool> ok=<n> chars / denied=<原因>
+//   journal tool_denied <tool> <原因>
+// ============================================================================
+
+import { CapabilityPolicy, AccessMode } from "../policy/capability.hsl";
+import { request_approval, ApprovalOutcome } from "../policy/approval.hsl";
+
+/// 工具调用（模型输出解析后的结构）。
+#[derive(Debug, Clone)]
+export struct ToolCall {
+    name: String,
+    args_json: String,
+}
+
+/// 工具环开关状态。
+#[derive(Debug, Clone, PartialEq)]
+export enum ToolMode {
+    Off,
+    ReadOnly,
+    Full,
+}
+
+/// 解析 ORG_TOOLS 环境变量（未设/0 → Off；1/read → ReadOnly；write/full → Full）。
+export fn tool_mode() -> ToolMode {
+    let raw: String = native typescript {
+        return String($host.env.get("ORG_TOOLS") || "").trim().toLowerCase();
+    };
+    if raw == String::from("1") || raw == String::from("read") || raw == String::from("readonly") {
+        return ToolMode::ReadOnly;
+    }
+    if raw == String::from("write") || raw == String::from("full") || raw == String::from("all") {
+        return ToolMode::Full;
+    }
+    ToolMode::Off
+}
+
+/// 工具环系统提示（注入 direct 车道的 system 尾部；Off 模式返回空串）。
+export fn tools_prompt(mode: ToolMode) -> String {
+    if mode == ToolMode::Off {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n\n## Tools\nYou can use workspace tools. To call one, output EXACTLY this format on its own line (you may call multiple tools in one reply, one per line):\n<tool>{\"name\":\"TOOL_NAME\",\"args\":{...}}</tool>\n",
+    );
+    out.push_str("- fs_read {\"path\":\"relative/path\"} — read a file (workspace-relative)\n");
+    out.push_str("- fs_list {\"dir\":\"relative/dir\",\"depth\":3} — list directory\n");
+    out.push_str("- fs_glob {\"pattern\":\"src/**/*.hsl\"} — glob match files\n");
+    if mode == ToolMode::Full {
+        out.push_str("- fs_write {\"path\":\"...\",\"content\":\"...\"} — write a file (may require approval)\n");
+        out.push_str("- fs_edit {\"path\":\"...\",\"old\":\"exact unique text\",\"new\":\"replacement\"} — precise edit (may require approval)\n");
+        out.push_str("- shell_run {\"cmd\":\"git status\"} — run an allowlisted command (may require approval)\n");
+    }
+    out.push_str("After a tool call you will receive a <tool_result> message; use it and continue. When you have the final answer, reply WITHOUT any <tool> tags.\n");
+    out
+}
+
+/// 解析模型回复中的工具调用（<tool>JSON</tool>；坏 JSON 跳过不炸整轮）。
+export fn parse_tool_calls(raw: String) -> Vec<ToolCall> {
+    let out: Vec<ToolCall> = native typescript {
+        const calls = [];
+        const re = /<tool>\s*([\s\S]*?)\s*<\/tool>/g;
+        let m;
+        while ((m = re.exec(String(raw))) !== null) {
+            try {
+                const o = JSON.parse(m[1]);
+                if (o && typeof o === "object") {
+                    // 多形态宽容（实测真实模型的参数形态多样）：
+                    //   {name, args:{...}}  规范形态
+                    //   {name, path:...}    参数平铺
+                    //   {tool:"...", ...}   tool 键别名
+                    const name = String(o.name ?? o.tool ?? "");
+                    if (!name) continue;
+                    let args = {};
+                    if (o.args && typeof o.args === "object" && !Array.isArray(o.args)) {
+                        args = o.args;
+                    } else {
+                        for (const k of Object.keys(o)) {
+                            if (k === "name" || k === "tool") continue;
+                            args[k] = o[k];
+                        }
+                    }
+                    // $host.make：构造带 __struct 标记的合法 HSL 值（#L-22 官方
+                    // 通道 —— clone()/方法派发在 HSL 侧可用）
+                    calls.push($host.make("ToolCall", { name: name, args_json: JSON.stringify(args) }));
+                }
+            } catch (e) {
+                // 坏 JSON：跳过（模型下轮会被结果消息纠正）
+            }
+        }
+        return calls;
+    };
+    out
+}
+
+/// 工具结果回灌消息（对话里的 user 消息形态）。
+export fn tool_result_message(results_json: String) -> String {
+    format!("<tool_result>{}</tool_result>\n继续。根据以上工具结果作答；如仍需工具，继续用 <tool> 格式调用；已有最终答案则直接回答（不要带 <tool> 标记）。", results_json)
+}
+
+/// 执行一次工具调用（能力门 + $host 执行 + 事件上总线）。
+/// 返回 JSON 结果字符串（执行体与错误都以 JSON 回灌 —— 模型可自纠）。
+export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String {
+    let args: String = call.args_json.clone();
+    let name = call.name.clone();
+
+    // 能力门（读 = Auto；写/执行 = Confirm → 审批队列或明确拒绝）
+    let gate_cap = match name.as_str() {
+        "fs_read" | "fs_list" | "fs_glob" => String::from("file_read"),
+        "fs_write" | "fs_edit" => String::from("file_write"),
+        "shell_run" => String::from("process_spawn"),
+        _ => String::from("file_read"),
+    };
+    if name != String::from("fs_read") && name != String::from("fs_list") && name != String::from("fs_glob") {
+        let approved = gate_write(policy, gate_cap, name.clone(), args.clone()).await;
+        if approved == String::from("denied") {
+            emit_tool(String::from("tool_denied"), format!("{} {}", name, "capability denied"));
+            return json_ok(name.clone(), false, String::from("DENIED: 此工具需要能力授权（file_write/process_spawn）。请改用只读工具，或让用户以 ORG_APPROVAL=1 启动并在面板放行。"));
+        }
+        if approved == String::from("off") {
+            emit_tool(String::from("tool_denied"), format!("{} {}", name, "tools read-only"));
+            return json_ok(name.clone(), false, String::from("DENIED: 工具环为只读模式（ORG_TOOLS=write 开启写工具）。"));
+        }
+    }
+
+    emit_tool(String::from("tool_call"), format!("{} {}", name, preview_args(args.clone())));
+
+    let result: String = match name.as_str() {
+        "fs_read" => tool_fs_read(args.clone()),
+        "fs_list" => tool_fs_list(args.clone()),
+        "fs_glob" => tool_fs_glob(args.clone()),
+        "fs_write" => tool_fs_write(args.clone()),
+        "fs_edit" => tool_fs_edit(args.clone()),
+        "shell_run" => tool_shell_run(args.clone()),
+        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/fs_write/fs_edit/shell_run）", name)),
+    };
+    emit_tool(String::from("tool_result"), result_summary(result.clone()));
+    result
+}
+
+// ---- 能力门 -------------------------------------------------------------------
+
+/// 写类工具的门：审批队列（人在环）优先；未开审批 → 明确拒绝。
+/// 返回 "granted" / "denied" / "off"（只读模式）。
+async fn gate_write(policy: CapabilityPolicy, capability: String, tool: String, args: String) -> String {
+    // 只读模式直接拦截（工具清单都没给，模型一般不会调；调了也给明确反馈）
+    let mode = tool_mode();
+    if mode != ToolMode::Full {
+        return String::from("off");
+    }
+    // 审批队列开启：走文件协议（org web / taskd / CLI approvals 都能放行）
+    let approval_enabled: bool = native typescript {
+        const v = String($host.env.get("ORG_APPROVAL") || "").trim().toLowerCase();
+        return v === "1" || v === "on" || v === "queue";
+    };
+    if approval_enabled {
+        let decision = request_approval(capability.clone(), format!("tool:{}", tool), preview_args(args.clone())).await;
+        let outcome = match decision {
+            ApprovalOutcome::Allowed => String::from("granted"),
+            ApprovalOutcome::Denied => String::from("denied"),
+            ApprovalOutcome::NotQueued => String::from("denied"),
+        };
+        return outcome;
+    }
+    // 未开审批：用户不在环 —— 拒绝（安全缺省；direct 模式 v0.4.x 的「confirm
+    // 就地放行」仅覆盖 llm_call，写文件/执行命令不能静默放行）
+    let _ = policy.decide(capability.clone(), AccessMode::Direct);
+    String::from("denied")
+}
+
+// ---- 工具执行体（$host ABI 直通；全部带界与容错） -----------------------------
+
+fn tool_fs_read(args: String) -> String {
+    native typescript {
+        const CAP = 32768;
+        try {
+            const a = JSON.parse(args);
+            const path = String(a.path ?? a.file ?? a.filename ?? "");
+            if (!path) return JSON.stringify({ tool: "fs_read", ok: false, error: "args.path 必填（收到的 args：" + JSON.stringify(a).slice(0, 200) + "）" });
+            const content = $host.fs.read(path);
+            if (content.length > CAP) {
+                return JSON.stringify({ tool: "fs_read", ok: true, truncated: true, chars: content.length, content: content.slice(0, CAP) + "\\n…(truncated)" });
+            }
+            return JSON.stringify({ tool: "fs_read", ok: true, chars: content.length, content });
+        } catch (e) {
+            return JSON.stringify({ tool: "fs_read", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_fs_list(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const dir = String(a.dir || ".");
+            const depth = Math.max(1, Math.min(8, Number(a.depth ?? 3) || 3));
+            const out = $host.fs.list(dir, depth);
+            const lines = String(out).split("\\n").slice(0, 400).join("\\n");
+            return JSON.stringify({ tool: "fs_list", ok: true, dir, entries: lines });
+        } catch (e) {
+            return JSON.stringify({ tool: "fs_list", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_fs_glob(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const pattern = String(a.pattern || "");
+            if (!pattern) return JSON.stringify({ tool: "fs_glob", ok: false, error: "args.pattern 必填" });
+            // 简单 glob：** → 任意层级，* → 单段。全树枚举（fs.list depth 8）后匹配
+            const all = String($host.fs.list(".", 8)).split("\\n").filter((l) => l.length > 0);
+            const rx = new RegExp("^" + pattern
+                .replace(/[.+^${}()|[\\]]/g, "\\\\$&")
+                .replace(/\\*\\*/g, "::DBL::")
+                .replace(/\\*/g, "[^/]*")
+                .replace(/::DBL::/g, ".*") + "$");
+            const hits = all.filter((p) => rx.test(p)).slice(0, 200);
+            return JSON.stringify({ tool: "fs_glob", ok: true, matched: hits.length, files: hits.join("\\n") });
+        } catch (e) {
+            return JSON.stringify({ tool: "fs_glob", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_fs_write(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const path = String(a.path || "");
+            const content = String(a.content ?? "");
+            if (!path) return JSON.stringify({ tool: "fs_write", ok: false, error: "args.path 必填" });
+            const n = $host.fs.write(path, content);
+            return JSON.stringify({ tool: "fs_write", ok: true, bytes: n, path });
+        } catch (e) {
+            return JSON.stringify({ tool: "fs_write", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_fs_edit(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const path = String(a.path || "");
+            const old = String(a.old ?? "");
+            const nw = String(a.new ?? "");
+            if (!path || !old) return JSON.stringify({ tool: "fs_edit", ok: false, error: "args.path/args.old 必填" });
+            const r = $host.fs.edit(path, old, nw);
+            if (r && r.ok) return JSON.stringify({ tool: "fs_edit", ok: true, path });
+            return JSON.stringify({ tool: "fs_edit", ok: false, error: String(r && r.error || "edit 失败（old 锚点须唯一命中）") });
+        } catch (e) {
+            return JSON.stringify({ tool: "fs_edit", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_shell_run(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const cmd = String(a.cmd || "");
+            if (!cmd) return JSON.stringify({ tool: "shell_run", ok: false, error: "args.cmd 必填" });
+            const r = $host.shell.run(cmd, { timeoutMs: 60000 });
+            const out = String(r.stdout || "").slice(0, 16384);
+            const err = String(r.stderr || "").slice(0, 2048);
+            return JSON.stringify({ tool: "shell_run", ok: r.ok, code: r.code, stdout: out, stderr: err });
+        } catch (e) {
+            return JSON.stringify({ tool: "shell_run", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+// ---- 观测与辅助 ----------------------------------------------------------------
+
+/// 事件上总线（journal 通道，三端消费）。
+fn emit_tool(name: String, detail: String) {
+    let n = name.clone();
+    let d = detail.clone();
+    let _ = native typescript {
+        $host.events.emit("journal", { name: n, detail: d.slice(0, 300) });
+        return true;
+    };
+}
+
+fn json_ok(tool: String, ok: bool, payload: String) -> String {
+    native typescript {
+        return JSON.stringify({ tool: tool, ok: ok, content: payload });
+    }
+}
+
+/// args 摘要（观测面脱敏：不整段落 content）。
+fn preview_args(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const parts = [];
+            for (const k of Object.keys(a)) {
+                let v = String(a[k]);
+                if (v.length > 60) v = v.slice(0, 57) + "…";
+                parts.push(k + "=" + v);
+            }
+            return parts.join(" ").slice(0, 200);
+        } catch (e) {
+            return String(args).slice(0, 120);
+        }
+    }
+}
+
+fn result_summary(result: String) -> String {
+    native typescript {
+        try {
+            const o = JSON.parse(result);
+            const tool = String(o.tool || "?");
+            if (o.ok === true) {
+                const size = o.content != null ? String(o.content).length : o.entries != null ? String(o.entries).length : o.files != null ? String(o.files).length : 0;
+                return tool + " ok " + size + " chars";
+            }
+            return tool + " error " + String(o.error || "").slice(0, 120);
+        } catch (e) {
+            return "result " + String(result).slice(0, 100);
+        }
+    }
+}
