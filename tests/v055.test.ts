@@ -22,7 +22,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { TEST_RUN, makeWorkspace } from "./helpers";
+import { TEST_RUN } from "./helpers";
 import {
   parseExpr, nextAfter, previewNext,
   addSchedule, listSchedules, removeSchedule, setScheduleEnabled, dueSchedules,
@@ -36,6 +36,16 @@ import { TaskRunner, listTasks } from "../lib/tasks.ts";
 import { setConfigValue, loadConfig } from "../lib/config.ts";
 
 const WS = path.join(TEST_RUN, "v055-ws");
+
+/**
+ * 一次性工作区（demo-ws 模板）—— 与 tasks.test.ts 同模式。
+ * 不用 helpers.makeWorkspace（其签名收相对短名；传绝对路径会在 Windows
+ * 上拼出「盘符嵌路径」非法形态 → rmSync EINVAL —— CI 实测教训）。
+ */
+function setupWs(): void {
+  fs.rmSync(WS, { recursive: true, force: true });
+  fs.cpSync(path.join(process.cwd(), "demo-ws"), WS, { recursive: true });
+}
 
 // ---- 基础设施：临时配置 + 环境卫生（与 providers.test.ts 同模式） --------------
 
@@ -268,7 +278,7 @@ describe("schedule：到期领取", () => {
 
 describe("schedule：TaskRunner 挂载（执行器 = 定时能力）", () => {
   test("过期 schedule → runner.start() 立即领取 → 任务入队", async () => {
-    makeWorkspace(WS); // demo 工作区（scripted 车道可执行）
+    setupWs(); // demo 工作区（scripted 车道可执行）
     const s = addSchedule(WS, "@every 1h", "run", { task: "定时巡检：读取注册表并汇报", model: "scripted" });
     forcePast(WS, s.id, 90_000);
     const runner = new TaskRunner(WS, { concurrency: 1 });
@@ -353,7 +363,7 @@ describe("notify：webhook 出站", () => {
       fetch: async () => Response.json({ ok: true }),
     });
     setConfigValue("notify_webhook_url", `http://127.0.0.1:${server.port}/hook`);
-    makeWorkspace(WS);
+    setupWs();
     const t0 = Date.now();
     notifyEvent(WS, "custom", "标题", "详情", { desktop: false });
     expect(Date.now() - t0).toBeLessThan(500); // 未 await 出站，毫秒级返回
@@ -367,7 +377,7 @@ describe("notify：webhook 出站", () => {
 
 describe("router：key 池状态落盘（跨进程冷却）", () => {
   test("429 进冷却（60s 档）+ poolView 渲染", () => {
-    makeWorkspace(WS);
+    setupWs();
     recordKeyFailure(WS, "deepseek", "k1(sk-…x1)", "429");
     const pool = readPool(WS);
     expect(pool.deepseek?.["k1(sk-…x1)"]?.fails).toBe(1);
@@ -379,7 +389,7 @@ describe("router：key 池状态落盘（跨进程冷却）", () => {
   });
 
   test("4xx 不冷却（只记状态）；timeout 进冷却", () => {
-    makeWorkspace(WS);
+    setupWs();
     recordKeyFailure(WS, "deepseek", "k1(sk-…x1)", "401");
     let pool = readPool(WS);
     expect(pool.deepseek?.["k1(sk-…x1)"]?.fails).toBe(0);
@@ -391,7 +401,7 @@ describe("router：key 池状态落盘（跨进程冷却）", () => {
   });
 
   test("连续失败档位放大（60s → 120s → 封顶 300s）", () => {
-    makeWorkspace(WS);
+    setupWs();
     for (let i = 1; i <= 6; i++) {
       recordKeyFailure(WS, "deepseek", "k1(sk-…x1)", "429");
       const s = readPool(WS).deepseek?.["k1(sk-…x1)"];
@@ -403,7 +413,7 @@ describe("router：key 池状态落盘（跨进程冷却）", () => {
   });
 
   test("成功清零 + 空池零写盘", () => {
-    makeWorkspace(WS);
+    setupWs();
     recordKeyFailure(WS, "deepseek", "k1(sk-…x1)", "429");
     const before = readPool(WS);
     expect(before.deepseek?.["k1(sk-…x1)"]?.fails).toBe(1);
@@ -415,7 +425,7 @@ describe("router：key 池状态落盘（跨进程冷却）", () => {
   });
 
   test("坏池文件宽容（空对象不炸）", () => {
-    makeWorkspace(WS);
+    setupWs();
     const file = path.join(WS, "runtime", "llm-pool.json");
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, "not-json{", "utf-8");
@@ -428,14 +438,14 @@ describe("router：key 池状态落盘（跨进程冷却）", () => {
 
 describe("router：预算水位（三端统一口径）", () => {
   test("未配置 → budget=0（不渲染）", () => {
-    makeWorkspace(WS);
+    setupWs();
     const wm = budgetWatermark(WS);
     expect(wm.budget).toBe(0);
     expect(wm.exceeded).toBe(false);
   });
 
   test("配置 + 当日台账 → used/remaining/exceeded", () => {
-    makeWorkspace(WS);
+    setupWs();
     setConfigValue("budget_requests", "3");
     const today = new Date().toISOString().slice(0, 10);
     const ledger = path.join(WS, "runtime", "llm-ledger.jsonl");

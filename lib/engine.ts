@@ -1272,6 +1272,8 @@ export function startRun(opts: RunOptions): RunHandle {
     // 状态级暂停）。已结束/已取消返回 false。
     pause: async (): Promise<boolean> => {
       if (!proc || result !== null) return false;
+      // Windows 无 POSIX 信号（kill("SIGSTOP") 抛错 → 如实 false；调用方
+      // TaskRunner 降级为 pause_degraded 状态级暂停 —— CI Windows 运行器实测）
       try {
         proc.kill("SIGSTOP"); // 实测 Bun Subprocess.kill 支持自定义信号
         return true;

@@ -314,12 +314,24 @@ describe("Web 任务中心（taskRunner:true 内嵌执行器）", () => {
 describe("engine：RunHandle.pause/resume（spawn 车道 SIGSTOP/SIGCONT）", () => {
   test("运行中 SIGSTOP → 暂停期不完成 → SIGCONT → 完成", async () => {
     if (process.env.ORG_FORCE_INPROC === "1") return; // inproc 车道不支持（降级语义已文档化）
+    if (process.platform === "win32") return; // Windows 无 POSIX 信号（pause 如实返回 false · TaskRunner 的 pause_degraded 状态级暂停已文档化 —— CI Windows 运行器实测）
     const handle = startRun({
       entry: "org", task: "抓取近一周公告，输出结构化表格", workspace: WS, model: "scripted",
     });
     const donePromise = handle.wait();
-    // 300ms 后暂停（scripted 全链 2-4s，必然还在跑）
-    await new Promise((r) => setTimeout(r, 300));
+    // 80ms 后暂停（scripted 全链 Linux 2-4s；80ms 连 macOS M 系列的
+    // spawn 冷启动都未过 —— 300ms 档在 M 芯片上曾跑完整个 run）
+    await new Promise((r) => setTimeout(r, 80));
+    // 平台速度防御（CI macOS 实测）：pause 前任务已完成 → 本用例的
+    // 「暂停窗口」前提不成立，如实跳过（Linux verify 全量覆盖此路径）
+    const preDone = await Promise.race([
+      donePromise.then(() => true),
+      new Promise<boolean>((r) => setTimeout(() => r(false), 5)),
+    ]);
+    if (preDone) {
+      console.log("○ spawn 任务在暂停点前已完成（平台过快）—— 暂停窗口断言跳过");
+      return;
+    }
     expect(await handle.pause()).toBe(true);
     // 暂停期间 800ms：完成 promise 不应 settle（SIGSTOP 实证）
     const settledDuringPause = await Promise.race([
