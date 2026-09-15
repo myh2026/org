@@ -61,11 +61,15 @@ import { classifyRunEvent } from "../lib/runCards.ts";
 import { listApprovals, decideApproval } from "../lib/approvals.ts";
 import { readCostTimeline, latestHarnessRunDir } from "../lib/engine.ts";
 import { AskGate, QueueCancelledError } from "./gate.ts";
+import { transcribeAudio, synthesizeSpeech, voiceStatus, VOICES } from "../lib/voice.ts"; // v0.5.12 语音入口（ASR/TTS）
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14 漂移治理：此前本文件落后两版）
 
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const STOCK_FIXTURE = path.join(ROOT, "fixtures/run-notices.json");
 const DEFAULT_PORT = 4600; // 3000/3030/5000 被本机其他服务占用，绝不复用
+
+/** v0.5.12：语音服务探测缓存（60s —— 面板状态行不发探测风暴）。 */
+const voiceStatusCache = new Map<number, { at: number; value: { sdk: boolean; voices: number; error?: string } }>();
 
 // ---- 参数解析 ----
 
@@ -1161,6 +1165,56 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
             stats: { total: okN + failN, ok: okN, failed: failN, reuse_hits: reuseHits, tokens_total: tokens },
           });
         }
+        if (route === "GET /api/voice-status") {
+          // v0.5.12：语音服务健康探测（GUI 🎙 面板状态行 + 🎤 按钮降级依据）。
+          // 60s 内存缓存（探测不打 SDK——零调用实现：仅试 create 实例化）。
+          const hit = voiceStatusCache.get(0);
+          if (hit && Date.now() - hit.at < 60_000) {
+            return json(hit.value);
+          }
+          const value = await voiceStatus();
+          voiceStatusCache.set(0, { at: Date.now(), value });
+          return json(value);
+        }
+        if (route === "POST /api/asr") {
+          // v0.5.12：语音转写（🎤 录音 → base64 → 文本）。body {audio_base64}。
+          // 降级：SDK 凭据缺席 → 503 {ok:false, error}（GUI 提示条，不炸）。
+          const body = await req.json().catch(() => ({})) as { audio_base64?: unknown };
+          const b64 = String(body.audio_base64 ?? "").replace(/^data:[^,]*,/, "");
+          if (!b64) return json({ ok: false, error: "audio_base64 必填（录音数据）" }, 400);
+          const buf = Buffer.from(b64, "base64");
+          const out = await transcribeAudio(buf);
+          if (!out.ok) {
+            const status = /凭据|401|SDK/.test(out.error ?? "") ? 503 : 400;
+            return json({ ok: false, error: out.error }, status);
+          }
+          return json({ ok: true, text: out.text, chars: out.chars });
+        }
+        if (route === "POST /api/tts") {
+          // v0.5.12：文本合成（🔊 朗读回复）。body {text, voice?, speed?} →
+          // audio/wav 二进制；SDK 凭据缺席 → 503 JSON（错误可显示）。
+          const body = await req.json().catch(() => ({})) as { text?: unknown; voice?: unknown; speed?: unknown };
+          const text = String(body.text ?? "");
+          if (!text.trim()) return json({ ok: false, error: "text 必填（要朗读的文本）" }, 400);
+          if (text.length > 8192) return json({ ok: false, error: `文本过长（${text.length} > 8192 上限）` }, 400);
+          const out = await synthesizeSpeech(text, {
+            voice: body.voice === undefined ? undefined : String(body.voice),
+            speed: body.speed === undefined ? undefined : Number(body.speed),
+          });
+          if (!out.ok || !out.wav) {
+            const status = /凭据|401|SDK/.test(out.error ?? "") ? 503 : 400;
+            return json({ ok: false, error: out.error }, status);
+          }
+          return new Response(new Uint8Array(out.wav), {
+            headers: {
+              "Content-Type": "audio/wav",
+              "Cache-Control": "no-store",
+              "Content-Disposition": 'inline; filename="speech.wav"',
+              "X-Voice-Chunks": String(out.chunks ?? 1),
+              "X-Voice-Truncated": out.truncated ? "1" : "0",
+            },
+          });
+        }
         if (route === "GET /api/run") {
           const name = url.searchParams.get("dir") ?? "";
           // run 目录名形如 out-a / out-20260912-101500；SAFE_NAME 覆盖（含 - 与数字）
@@ -1864,11 +1918,11 @@ function renderIndexHtml(): string {
   /* ── 输入坞 ───────────────────────────────────────────── */
   .composer { flex: none; border-top: 1px solid var(--border);
               background: var(--panel); padding: 10px 12px; }
-  .cbox { max-width: 860px; margin: 0 auto; display: flex; align-items: flex-start;
-           border: 1px solid var(--border); border-radius: 4px;
-           background: var(--bg); transition: border-color .15s; }
+  .cbox { max-width: 860px; margin: 0 auto; display: flex; align-items: center; gap: 6px;
+        border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+        background: var(--bg); transition: border-color .15s; }
   .cbox:focus-within { border-color: var(--border2); }
-  .cbox .ps { flex: none; padding: 7px 0 0 12px; font: 14px var(--mono);
+  .cbox .ps { flex: none; font: 14px var(--mono);
            color: var(--green); user-select: none; }
   #question { flex: 1; min-width: 0; background: transparent; border: none;
            outline: none; resize: none; font: 14px/1.6 var(--sans);
@@ -2277,6 +2331,69 @@ function renderIndexHtml(): string {
         font: 10px/1.7 var(--mono); color: var(--dim); }
   .spwfoot b { color: var(--muted); font-weight: 600; }
 
+  /* v0.5.12：语音入口（🎤 录音转写 + 🔊 朗读 + 🎙 设置面板） */
+  #voicePane { display: none; position: fixed; top: 10vh; left: 50%; transform: translateX(-50%);
+        width: min(560px, 94vw); max-height: 80vh; z-index: 40;
+        background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+        box-shadow: 0 18px 60px rgba(0,0,0,.45); flex-direction: column; }
+  #voicePane.on { display: flex; }
+  #voicePane .schhead { padding: 12px 14px; display: flex; align-items: center;
+        border-bottom: 1px solid var(--border); }
+  #voicePane .schhead .tt { font: 600 13px/1.4 var(--mono); color: var(--fg); }
+  .vobody { flex: 1; overflow-y: auto; padding: 14px; }
+  .vosec { margin-bottom: 14px; }
+  .vosec .st { font: 600 11px/1.6 var(--mono); color: var(--muted); margin-bottom: 6px; }
+  /* 声音网格（7 声音卡片：名字 + 描述 + 选中态） */
+  .vogrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+  .vocard { padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px;
+        cursor: pointer; transition: border-color .12s, background .12s; }
+  .vocard:hover { border-color: var(--muted); background: rgba(255,255,255,.025); }
+  .vocard.on { border-color: var(--greenb); background: rgba(16,185,129,.07); }
+  .vocard .nm { font: 600 11px/1.5 var(--mono); color: var(--fg); }
+  .vocard .ds { margin-top: 1px; font: 10px/1.6 var(--mono); color: var(--dim); }
+  .vocard.on .ds { color: var(--greenb); }
+  /* 语速滑条（0.5-2.0 —— 数值实时显示） */
+  .vospeed { display: flex; align-items: center; gap: 10px; }
+  .vospeed input[type="range"] { flex: 1; accent-color: var(--greenb); height: 4px; }
+  .vospeed .val { flex: none; min-width: 62px; text-align: center; font: 600 11px/1.4 var(--mono);
+        color: var(--greenb); padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; }
+  /* 状态行 + 试听按钮 */
+  .vostatus { display: flex; align-items: center; gap: 8px; padding: 9px 12px;
+        border: 1px solid var(--border); border-radius: 7px; font: 10.5px/1.6 var(--mono); }
+  .vostatus .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+  .vostatus .dot.ok { background: var(--greenb); box-shadow: 0 0 6px rgba(16,185,129,.45); }
+  .vostatus .dot.err { background: #f59e0b; }
+  .vostatus .tx { flex: 1; color: var(--muted); word-break: break-all; }
+  .vostatus button { flex: none; padding: 3px 12px; border: 1px solid var(--border); background: transparent;
+        color: var(--muted); font: 10.5px var(--mono); cursor: pointer; border-radius: 4px; }
+  .vostatus button:hover { color: var(--fg); border-color: var(--muted); }
+  .vofoot { flex: none; padding: 8px 14px; border-top: 1px solid var(--border);
+        font: 10px/1.7 var(--mono); color: var(--dim); }
+  .vofoot b { color: var(--muted); font-weight: 600; }
+  /* 🎤 录音钮（composer 内，录制中红点脉冲） */
+  #micBtn { flex: none; width: 30px; height: 30px; display: inline-flex; align-items: center;
+        justify-content: center; border: 1px solid var(--border); background: transparent;
+        color: var(--muted); border-radius: 6px; cursor: pointer; font-size: 13px;
+        transition: border-color .12s, color .12s; }
+  #micBtn:hover { color: var(--fg); border-color: var(--muted); }
+  #micBtn.rec { color: #ef4444; border-color: rgba(239,68,68,.55);
+        animation: micpulse 1.1s ease-in-out infinite; }
+  @keyframes micpulse { 0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,.35) } 50% { box-shadow: 0 0 0 6px rgba(239,68,68,0) } }
+  #micBtn:disabled { opacity: .4; cursor: not-allowed; }
+  /* 🔊 朗读钮（t-bot 操作行；合成/播放中态） */
+  .saybtn { flex: none; padding: 1px 8px; border: 1px solid var(--border); background: transparent;
+        color: var(--dim); font: 10px/1.6 var(--mono); cursor: pointer; border-radius: 4px;
+        transition: border-color .12s, color .12s; }
+  .saybtn:hover { color: var(--greenb); border-color: rgba(16,185,129,.4); }
+  .saybtn.busy { color: var(--muted); cursor: wait; }
+  .saybtn.playing { color: var(--greenb); border-color: var(--greenb);
+        animation: saywave 1s ease-in-out infinite; }
+  @keyframes saywave { 0%,100% { opacity: .55 } 50% { opacity: 1 } }
+  /* 转写中浮条（录音结束后 ASR 进行时） */
+  .mictx { display: flex; align-items: center; gap: 8px; padding: 4px 12px;
+        font: 10px/1.6 var(--mono); color: var(--muted); }
+  .mictx .sp { color: var(--greenb); }
+
   /* 移动端：侧栏改抽屉（≤720px，issue #13 —— 不再 display:none 直接消失） */
   #backdrop { display: none; position: fixed; inset: 34px 0 0 0;
            background: rgba(0,0,0,.5); z-index: 25; }
@@ -2329,6 +2446,9 @@ function renderIndexHtml(): string {
   </button>
   <button id="spawnBtn" class="rchip" type="button" title="派生池（v0.5.11）— 子生孙递归派生登记 · 预算继承（随深度衰减）· 池化复用（相似 goal 零成本）">
     <span class="rc-label">🌳 派生</span>
+  </button>
+  <button id="voiceBtn" class="rchip" type="button" title="语音（v0.5.12）— 🎤 录音转写（ASR）· 🔊 回复朗读（TTS · 7 声音 · 语速 0.5-2.0）；凭据缺席时自动降级为文本交互">
+    <span class="rc-label">🎙 语音</span>
   </button>
   <span class="tstats" id="topStats"></span>
 </header>
@@ -2409,6 +2529,35 @@ function renderIndexHtml(): string {
   </div>
   <div class="spwfoot"><b>预算继承</b>：ORG_SPAWN_BUDGET（缺省 100 份）× ORG_SPAWN_DECAY（缺省 0.5）→ 子预算 = floor(父预算 × 衰减率)，随深度指数衰减；深度帽 ORG_SPAWN_MAX（缺省 2）仍是最外层安全线。 <b>池化复用</b>：相似 goal（词面重合 ≥0.6）命中即零成本复用，reuse:false 强制新派生。旧版本派生自动兼容显示（legacy）。</div>
 </div>
+<div id="voiceScrim" aria-hidden="true"></div>
+<div id="voicePane" role="dialog" aria-modal="true" aria-labelledby="voTitle">
+  <div class="schhead">
+    <div class="tt" id="voTitle">🎙 语音 — 转写 · 朗读 · 声音设置</div>
+    <button class="schclose" type="button" onclick="closeVoice()" title="关闭（Esc）" aria-label="关闭语音面板">✕</button>
+  </div>
+  <div class="vobody">
+    <div class="vosec">
+      <div class="st">服务状态</div>
+      <div class="vostatus">
+        <span class="dot" id="voDot"></span>
+        <span class="tx" id="voStatusTx">探测中…</span>
+        <button type="button" id="voProbe" title="重新探测语音服务">重新探测</button>
+      </div>
+    </div>
+    <div class="vosec">
+      <div class="st">朗读声音（TTS）</div>
+      <div class="vogrid" id="voGrid"></div>
+    </div>
+    <div class="vosec">
+      <div class="st">语速</div>
+      <div class="vospeed">
+        <input id="voSpeed" type="range" min="0.5" max="2" step="0.05" value="1" aria-label="朗读语速">
+        <span class="val" id="voSpeedVal">×1.00</span>
+      </div>
+    </div>
+  </div>
+  <div class="vofoot"><b>🎤 录音转写</b>：输入框左侧麦克风按钮 → 说话 → 再点结束 → 转写文本进输入框（ASR）。<b>🔊 朗读</b>：每条回复操作行的喇叭按钮（TTS · 超长自动分段拼接 · 4K 字截断诚实标注）。同文本同参数命中缓存（零重复计费）。</div>
+</div>
 <div class="app">
   <aside>
     <button class="newbtn" id="newSession" type="button">+ 新会话</button>
@@ -2434,10 +2583,12 @@ function renderIndexHtml(): string {
     </div>
     <div class="composer">
       <div class="cbox">
+        <button id="micBtn" type="button" title="语音输入（v0.5.12）— 点击开始录音，再点结束并转写进输入框（ASR）" aria-label="语音输入">🎤</button>
         <span class="ps" aria-hidden="true">❯</span>
         <textarea id="question" rows="1"
           placeholder="输入问题，enter 发送 · shift+enter 换行 · esc 停止"></textarea>
       </div>
+      <div class="mictx" id="micTx" hidden><span class="sp">⠋</span><span id="micTxText">转写中…</span></div>
       <div class="crow">
         <div class="seg" id="modeSeg" role="radiogroup" aria-label="派单模式">
           <button type="button" data-mode="team" class="on">团队</button>
@@ -3849,6 +4000,223 @@ function refreshSpawns() {
 document.getElementById("spawnBtn").onclick = openSpawns;
 document.getElementById("spawnScrim").onclick = closeSpawns;
 
+// ---- 语音入口（v0.5.12：🎤 录音转写 ASR + 🔊 朗读 TTS + 🎙 设置面板） ----
+var VOICE_META = ${JSON.stringify(VOICES)}; // 服务端注入声音清单（单一来源）
+var voiceCfg = {
+  voice: (function () { try { return localStorage.getItem("org.voice") || "tongtong"; } catch (e) { return "tongtong"; } })(),
+  speed: (function () { var s = Number(localStorage.getItem("org.voiceSpeed")); return Number.isFinite(s) && s >= 0.5 && s <= 2 ? s : 1; })()
+};
+var micRec = null;          // MediaRecorder 实例（录音中）
+var micChunks = [];         // 录音分片
+var micStream = null;       // MediaStream（停止后关轨道）
+var sayAudio = null;        // 当前朗读的 Audio（点击 ⏹ 停止）
+var sayBtnActive = null;    // 播放中的朗读钮
+
+function openVoice() {
+  document.getElementById("voicePane").classList.add("on");
+  document.getElementById("voiceScrim").classList.add("on");
+  renderVoiceGrid();
+  refreshVoiceStatus();
+}
+function closeVoice() {
+  document.getElementById("voicePane").classList.remove("on");
+  document.getElementById("voiceScrim").classList.remove("on");
+}
+function renderVoiceGrid() {
+  var grid = document.getElementById("voGrid");
+  if (!grid) return;
+  var h = "";
+  Object.keys(VOICE_META).forEach(function (k) {
+    h += '<div class="vocard' + (k === voiceCfg.voice ? " on" : "") + '" data-voice="' + esc(k) + '" title="' + esc(VOICE_META[k]) + '">' +
+         '<div class="nm">' + esc(k) + '</div><div class="ds">' + esc(VOICE_META[k]) + '</div></div>';
+  });
+  grid.innerHTML = h;
+  Array.prototype.forEach.call(grid.querySelectorAll(".vocard"), function (card) {
+    card.onclick = function () {
+      voiceCfg.voice = card.getAttribute("data-voice");
+      try { localStorage.setItem("org.voice", voiceCfg.voice); } catch (e) { /* 隐私模式 */ }
+      renderVoiceGrid();
+      flashHint("朗读声音已切换：" + VOICE_META[voiceCfg.voice]);
+    };
+  });
+}
+function refreshVoiceStatus() {
+  var dot = document.getElementById("voDot");
+  var tx = document.getElementById("voStatusTx");
+  if (!dot || !tx) return;
+  tx.textContent = "探测中…";
+  fetch("/api/voice-status").then(function (r) { return r.json(); }).then(function (j) {
+    var ok = !!(j && j.sdk);
+    dot.className = "dot " + (ok ? "ok" : "err");
+    tx.textContent = ok
+      ? "语音 SDK 就绪（" + (j.voices || 7) + " 种声音 · 凭据在首次调用时校验）"
+      : String((j && j.error) || "语音服务未配置（凭据缺席）—— 文本交互不受影响");
+  }).catch(function () {
+    dot.className = "dot err";
+    tx.textContent = "语音服务探测失败（服务不可达）";
+  });
+}
+(function () {
+  var slider = document.getElementById("voSpeed");
+  var sval = document.getElementById("voSpeedVal");
+  if (slider) {
+    slider.value = String(voiceCfg.speed);
+    if (sval) sval.textContent = "×" + Number(voiceCfg.speed).toFixed(2);
+    slider.oninput = function () {
+      voiceCfg.speed = Number(slider.value) || 1;
+      if (sval) sval.textContent = "×" + voiceCfg.speed.toFixed(2);
+      try { localStorage.setItem("org.voiceSpeed", String(voiceCfg.speed)); } catch (e) { /* 忽略 */ }
+    };
+  }
+  var probe = document.getElementById("voProbe");
+  if (probe) probe.onclick = refreshVoiceStatus;
+})();
+document.getElementById("voiceBtn").onclick = openVoice;
+document.getElementById("voiceScrim").onclick = closeVoice;
+
+// ---- 🔊 朗读（TTS：mact-say 按钮 → /api/tts → 播放；缓存命中即时） ----
+function stopSpeaking() {
+  if (sayAudio) { try { sayAudio.pause(); } catch (e) { /* 忽略 */ } sayAudio = null; }
+  if (sayBtnActive) {
+    sayBtnActive.classList.remove("playing", "busy");
+    sayBtnActive.textContent = "🔊";
+    sayBtnActive = null;
+  }
+}
+function speakText(text, btn) {
+  if (!text) { flashHint("无可朗读内容（空回复）"); return; }
+  if (sayBtnActive === btn) { stopSpeaking(); return; } // 再点 = 停止
+  stopSpeaking();
+  // 复位辅助：busy 态可能未被 stopSpeaking 覆盖（sayBtnActive 尚未赋值就失败）
+  function resetBtn() {
+    btn.classList.remove("busy", "playing");
+    btn.textContent = "🔊";
+  }
+  btn.classList.add("busy");
+  btn.textContent = "…";
+  fetch("/api/tts", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: text.slice(0, 4096), voice: voiceCfg.voice, speed: voiceCfg.speed })
+  }).then(function (r) {
+    if (!r.ok) {
+      return r.json().catch(function () { return { error: "合成失败（HTTP " + r.status + "）" }; })
+        .then(function (j) { throw new Error(j.error || "合成失败"); });
+    }
+    var truncated = r.headers.get("X-Voice-Truncated") === "1";
+    var chunks = Number(r.headers.get("X-Voice-Chunks") || 1);
+    return r.blob().then(function (blob) { return { blob: blob, truncated: truncated, chunks: chunks }; });
+  }).then(function (o) {
+    var url = URL.createObjectURL(o.blob);
+    sayAudio = new Audio(url);
+    sayBtnActive = btn;
+    btn.classList.remove("busy");
+    btn.classList.add("playing");
+    btn.textContent = "⏹";
+    sayAudio.onended = function () { URL.revokeObjectURL(url); stopSpeaking(); };
+    sayAudio.onerror = function () { URL.revokeObjectURL(url); stopSpeaking(); flashHint("朗读播放失败"); };
+    sayAudio.play().catch(function () {
+      URL.revokeObjectURL(url);
+      stopSpeaking();
+      flashHint("浏览器阻止了自动播放 —— 再点一次 🔊");
+    });
+    if (o.truncated) flashHint("已朗读前 4096 字（更长内容诚实截断）");
+    else if (o.chunks > 1) flashHint("分段合成 " + o.chunks + " 段已拼接");
+  }).catch(function (e) {
+    resetBtn(); // busy 态复位（降级路径按钮不可卡死）
+    flashHint("朗读失败：" + (e && e.message ? e.message : e));
+  });
+}
+
+// ---- 🎤 录音转写（MediaRecorder → base64 → /api/asr → 输入框） ----
+(function () {
+  var btn = document.getElementById("micBtn");
+  if (!btn) return;
+  if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)) {
+    btn.hidden = true; // 浏览器不支持录音：降级隐藏（不打扰文本交互）
+    return;
+  }
+  function micSetTx(text, spin) {
+    var bar = document.getElementById("micTx");
+    var tx = document.getElementById("micTxText");
+    if (!bar || !tx) return;
+    if (!text) { bar.hidden = true; return; }
+    bar.hidden = false;
+    tx.textContent = text;
+    bar.querySelector(".sp").textContent = spin ? SPIN[0] : "";
+  }
+  var spinTimer = null;
+  function micSpin(on) {
+    if (spinTimer) { clearInterval(spinTimer); spinTimer = null; }
+    if (!on) return;
+    var i = 0;
+    spinTimer = setInterval(function () {
+      var el = document.querySelector("#micTx .sp");
+      if (el) el.textContent = SPIN[(i++) % SPIN.length];
+    }, 120);
+  }
+  btn.onclick = function () {
+    if (micRec && micRec.state === "recording") {
+      try { micRec.stop(); } catch (e) { /* 忽略 */ }
+      return;
+    }
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      micStream = stream;
+      micChunks = [];
+      micRec = new MediaRecorder(stream);
+      micRec.ondataavailable = function (ev) { if (ev.data && ev.data.size > 0) micChunks.push(ev.data); };
+      micRec.onstop = function () {
+        btn.classList.remove("rec");
+        btn.textContent = "🎤";
+        if (micStream) { micStream.getTracks().forEach(function (t) { t.stop(); }); micStream = null; }
+        var blob = new Blob(micChunks, { type: (micRec && micRec.mimeType) || "audio/webm" });
+        micChunks = [];
+        if (blob.size < 1200) { // 极小 = 没说话（webm 头就 ~几百字节）
+          micSetTx("", false);
+          flashHint("录音太短（未录到语音）");
+          return;
+        }
+        micSetTx("转写中…（" + Math.round(blob.size / 1024) + "KB）", true);
+        micSpin(true);
+        var fr = new FileReader();
+        fr.onload = function () {
+          var b64 = String(fr.result).replace(/^data:[^,]*,/, "");
+          fetch("/api/asr", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ audio_base64: b64 })
+          }).then(function (r) { return r.json(); }).then(function (j) {
+            micSpin(false);
+            micSetTx("", false);
+            if (j && j.ok && j.text) {
+              var q = document.getElementById("question");
+              var cur = q.value.trim();
+              q.value = cur ? cur + " " + j.text : j.text;
+              q.focus();
+              q.dispatchEvent(new Event("input", { bubbles: true }));
+              flashHint("已转写 " + j.chars + " 字（回车发送）");
+            } else {
+              flashHint("转写失败：" + ((j && j.error) || "未知错误"));
+            }
+          }).catch(function (e) {
+            micSpin(false);
+            micSetTx("", false);
+            flashHint("转写失败：" + e);
+          });
+        };
+        fr.onerror = function () { micSpin(false); micSetTx("", false); flashHint("录音读取失败"); };
+        fr.readAsDataURL(blob);
+      };
+      micRec.start();
+      btn.classList.add("rec");
+      btn.textContent = "⏺";
+      flashHint("录音中 —— 再点 🎤 结束并转写");
+    }).catch(function (e) {
+      flashHint("麦克风不可用：" + (e && e.message ? e.message : "权限拒绝"));
+    });
+  };
+})();
+
 // ---- Esc 关闭当前面板（v0.5.9：所有 dialog/scrim 类面板统一口径） ----
 // 顺序：最后打开的先关（栈式）。输入框内 Esc 已有既有语义（停止运行）的
 // 不受影响 —— 这里只处理「有面板打开」的情形。
@@ -3858,6 +4226,7 @@ document.addEventListener("keydown", function (ev) {
     { pane: "searchPane", close: closeSearch },
     { pane: "audioPane", close: closeTimbre },
     { pane: "spawnPane", close: closeSpawns },
+    { pane: "voicePane", close: closeVoice },
     { pane: "tasksPane", close: closeTasks },
     { pane: "schedPane", close: closeSched },
     { pane: "notifyPane", close: closeNotify },
@@ -4407,11 +4776,12 @@ function turnHtml(t, isLast) {
     mactsHtml(isLast) + '</div>';
 }
 
-/** 消息级操作行（hover 浮现）：复制（每轮）+ 重发（仅末轮；账本为事实源，
- * 重发 = 追加新轮次，不篡改历史）。 */
+/** 消息级操作行（hover 浮现）：复制（每轮）+ 朗读（每轮，v0.5.12）+ 重发
+ * （仅末轮；账本为事实源，重发 = 追加新轮次，不篡改历史）。 */
 function mactsHtml(isLast) {
   return '<div class="macts">' +
     '<button class="mact mact-copy" type="button" title="复制本轮回答">复制</button>' +
+    '<button class="mact mact-say" type="button" title="朗读本轮回答（TTS · 当前声音/语速）">🔊</button>' +
     (isLast ? '<button class="mact mact-rs" type="button" title="重发此问（账本为事实源，追加新轮次）">重发</button>' : "") +
     "</div>";
 }
@@ -4811,6 +5181,13 @@ document.getElementById("chat").addEventListener("click", function (e) {
   var rs = e.target.closest(".mact-rs");
   if (rs && !state.running) {
     ask(state.lastQuestion, false);
+    return;
+  }
+  var sy = e.target.closest(".mact-say");
+  if (sy) {
+    var blk3 = sy.closest(".t-bot");
+    var body3 = blk3 ? blk3.querySelector(".body") : null;
+    if (body3) speakText((body3.innerText || "").trim(), sy);
     return;
   }
   var rt = e.target.closest(".retry");

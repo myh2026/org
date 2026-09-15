@@ -1,5 +1,59 @@
 # CHANGELOG
 
+## v0.5.12（2026-09-16）—— 语音入口：ASR 转写 + TTS 朗读（capabilities #15 🟡→✅）
+
+worklog 风险清单 #1（重点方向①剩余）落地：语音输入/输出。`lib/voice.ts`
+封装 z-ai SDK 的 audio.asr / audio.tts（后端专用），Web GUI 三入口（🎤 录音
+转写 / 🔊 回复朗读 / 🎙 设置面板）+ CLI 两命令（org speak / org voice）。
+**多重优雅降级**贯穿：SDK 凭据缺席 → 明确提示（文本交互不受影响）；本沙箱
+实测 401 路径完整，部署环境配好凭据即全功能。测试 512/512 全绿（+21 例）。
+
+### lib/voice.ts（执行层）
+
+- `transcribeAudio`：音频 Buffer → base64 → ASR `{text}`；空音频/超 15MB/
+  空转写 → 明确错误；401 → remedy 文案（部署提示）；
+- `synthesizeSpeech`：句子边界分段（段上限 1000，SDK 硬限 1024）→ 逐段
+  **PCM 合成** → 拼接 → **自封 WAV 头**（24kHz PCM16 单声道，与
+  lib/audio.ts 同构手法 —— 不依赖 SDK wav 内部格式，行为确定可测）；
+  超过 4096 字诚实截断（truncated 标注）；**LRU 缓存**（32 条 / 8MB，
+  text+voice+speed 键 → 零重复计费）；
+- 7 声音白名单（tongtong/chuichui/xiaochen/jam/kazi/douji/luodo）+
+  语速 clamp [0.5, 2.0]；`DHV_VOICE_DISABLE_SDK=1` 零外联开关（对齐
+  DHV_LLM_DISABLE_SDK 惯例）；`setZaiFactory` 测试注入口（全 mock 零外联）。
+
+### Web GUI（web/entry.ts）
+
+- `POST /api/asr`（body `{audio_base64}`，dataURL 前缀容忍）→ `{ok,text}`；
+  `POST /api/tts`（body `{text,voice,speed}`）→ audio/wav 二进制 +
+  `X-Voice-Chunks`/`X-Voice-Truncated` 头；`GET /api/voice-status`（60s
+  缓存）——凭据缺席 503 JSON（GUI 显示提示条）；
+- **🎤 录音转写**：composer 左侧麦克风钮 → MediaRecorder（webm）→ base64
+  → /api/asr → 转写文本进输入框（追加不覆盖）；录制中红点脉冲动画 +
+  转写中 spinner 浮条；浏览器不支持 → 按钮降级隐藏；
+- **🔊 朗读**：每轮回复操作行的喇叭钮（复制旁）→ /api/tts → Audio 播放
+  （⏹ 可停、播完自动复位、截断/分段 toast 提示）；
+- **🎙 语音面板**：顶栏 rchip → 声音网格（7 卡片选中态）+ 语速滑条
+  （×0.50-×2.00 实时显示）+ 服务状态行（探测/重新探测）+ 用法注解；
+  选择记忆 localStorage（跨会话保持）；Esc 栈式关闭。
+
+### CLI（cli/org.ts）
+
+- `org speak "文本" [--voice v] [--speed s] [--out file.wav]`：TTS 落盘
+  （摘要行：KB · 声音 · 语速 · 段数 · 截断标注）；
+- `org voice`：服务状态探测 + 声音清单（未就绪退出码 3）。
+
+### 测试（tests/voice.test.ts · 21 例全 mock）
+
+- 纯函数 5：分段（句子/逗号/硬切边界、空白归一、无损重组）+ 声音/语速
+  归一；
+- 模块层 9：单段 WAV 封头（RIFF/24kHz/单声道/PCM16 全参数断言）+ 多段
+  PCM 连续拼接 + 超长截断 + 缓存命中（零重复调用）+ 401 降级文案 +
+  ASR 成功/空结果/超限 + 禁用开关 + 状态探测；
+- Web 端点 5：voice-status / tts 200+头 / asr 200+dataURL / 双 503 降级 /
+  GUI 要素（面板/按钮/注入的声音清单/内联脚本自洽）；
+- CLI 2：零外联开关路径（任何环境一致的确定降级；mock 不跨进程——
+  成功路径已在模块层覆盖）。
+
 ## v0.5.11（2026-09-16）—— 子生孙递归派生深化：预算继承 + 池化重档 + 派生池面板
 
 v0.5.6 的 agent_spawn 只有深度治理（ORG_SPAWN_MAX），**无预算语义**

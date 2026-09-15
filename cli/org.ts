@@ -37,6 +37,7 @@ import { readCostTimeline, renderCostTimeline, latestScorecardDir } from "../lib
 import { stockAffinityOf, rescueExpertOf, writeOutOfDomainRun, SEMANTIC_FLOOR } from "../lib/engine.ts"; // v0.5.10 语义地板（B-19）
 import { scanAndRenderArtifacts } from "../lib/audio.ts"; // v0.5.6 音频产物通道（CLI 车道）
 import { semanticSearch } from "../lib/search.ts"; // v0.5.8 语义检索（capabilities #19/#22）
+import { synthesizeSpeech, voiceStatus, VOICES } from "../lib/voice.ts"; // v0.5.12 语音入口（ASR/TTS）
 import { listApprovals, decideApproval, clearGranted } from "../lib/approvals.ts";
 import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
@@ -1871,6 +1872,53 @@ async function cmdSearch(a: Args): Promise<number> {
   return 0;
 }
 
+// ---- org speak / org voice：语音入口 CLI 面（v0.5.12） --------------------------
+
+/** org speak "文本" [--voice v] [--speed s] [--out file.wav]
+ *  文本 → TTS WAV 落盘（7 声音 · 语速 0.5-2.0 · 超长分段拼接 · 4K 截断诚实标注）。 */
+async function cmdSpeak(a: Args): Promise<number> {
+  const text = a.rest.join(" ").trim();
+  if (!text) {
+    console.error('用法：org speak "要朗读的文本" [--voice tongtong|chuichui|xiaochen|jam|kazi|douji|luodo] [--speed 0.5-2.0] [--out file.wav]');
+    console.error('  文本合成语音（z-ai SDK TTS）→ WAV 落盘（缺省 out-speech.wav）');
+    console.error('  超长自动分段拼接（段上限 1000 字）；总长 4096 截断诚实标注');
+    return 2;
+  }
+  const voice = process.env.ORG_VOICE || a.rest.find((r) => r.startsWith("--voice="))?.split("=")[1];
+  const speedArg = a.rest.find((r) => r.startsWith("--speed="))?.split("=")[1];
+  const out = a.out || path.join(DEFAULT_WORKSPACE, "out-speech.wav");
+  const o = await synthesizeSpeech(text, {
+    voice: voice === undefined ? undefined : String(voice),
+    speed: speedArg === undefined ? undefined : Number(speedArg),
+  });
+  if (!o.ok || !o.wav) {
+    console.error(`✗ 合成失败：${o.error}`);
+    console.error("  提示：语音需要 z-ai SDK 凭据（部署环境配置后即可用）；DHV_VOICE_DISABLE_SDK=1 可显式关闭");
+    return 1;
+  }
+  fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
+  fs.writeFileSync(out, o.wav);
+  console.log(`🔊 已合成 ${out}（${(o.wav.length / 1024).toFixed(0)}KB · ${o.voice} ×${o.speed?.toFixed(2)} · ${o.chunks} 段${o.truncated ? ` · 截断 ${o.totalChars}→4096 字` : ""}）`);
+  return 0;
+}
+
+/** org voice —— 语音服务状态探测 + 声音清单。 */
+async function cmdVoice(_a: Args): Promise<number> {
+  const st = await voiceStatus();
+  if (st.sdk) {
+    console.log(`🎙 语音服务在线（${st.voices} 种声音）：`);
+  } else {
+    console.log(`🎙 语音服务未就绪：${st.error}`);
+    console.error("  部署环境配置 z-ai SDK 凭据后，🎤 转写（org web）与 🔊 朗读即刻可用");
+  }
+  for (const [k, v] of Object.entries(VOICES)) {
+    console.log(`  ${k.padEnd(10)} ${v}`);
+  }
+  console.log("\n  合成：org speak \"文本\" --voice jam --speed 1.3 --out out.wav");
+  console.log("  Web：org web → 🎙 语音面板（🎤 录音转写 · 🔊 回复朗读 · 声音/语速设置）");
+  return st.sdk ? 0 : 3;
+}
+
 // ---- org memory：专家长期记忆（v0.5.3） ----------------------------------------
 
 async function cmdMemory(a: Args): Promise<number> {
@@ -2021,6 +2069,8 @@ export async function orgMain(): Promise<number> {
     case "notify": case "notifications": return cmdNotify(a);
     case "memory": case "memories": return cmdMemory(a);
     case "search": return cmdSearch(a);
+    case "speak": return cmdSpeak(a);
+    case "voice": return cmdVoice(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -2105,6 +2155,10 @@ export async function orgMain(): Promise<number> {
       语义检索（BM25 · 中英混合分词）：raw/ registry/ work/ factory/
       语料的相关性排序 + 命中摘要 —— RAG 注入用 @?查询词（org ask
       "…@?审计制度…" 检索命中自动织入上下文）
+  org speak "文本" [--voice v] [--speed s] [--out file.wav]
+      文本合成语音（TTS · 7 声音 · 语速 0.5-2.0 · 超长分段拼接）落盘 WAV
+  org voice
+      语音服务状态探测 + 声音清单（🎤 转写 / 🔊 朗读需要 SDK 凭据）
   org providers [ledger]
       服务商健康面板：全部注册预设 + 命名车道 + 环境变量发现状态 +
       调用台账（key 轮换归因 · 失败统计）

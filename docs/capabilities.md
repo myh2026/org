@@ -47,7 +47,7 @@
 | 12 | 任务队列、优先级与并行执行 | ✅ | TaskRunner（P0-P10 优先级 · 并发 ORG_TASK_CONCURRENCY · 跨进程 runner lock） |
 | 13 | 暂停、恢复、中断与继续 | ✅ | 运行中 **SIGSTOP/SIGCONT 真进程暂停**（RunHandle.pause/resume 实测）· cancel（SIGTERM）· retry（attempts 计数）· 孤儿收割断点续跑 |
 | 14 | 通知中心/任务提醒 | ✅ | v0.5.2 通知中心（存储 + 未读徽标 + CLI/Web 双端）+ 桌面通知三级降级 |
-| 15 | 移动端/语音入口 | 🟡 | Web GUI 移动端自适应（≤720px 抽屉布局）；语音未做（路线图：ASR 接 TTS 车道即可复用现有车道架构） |
+| 15 | 移动端/语音入口 | ✅ | 移动端自适应（≤720px 抽屉布局）；**语音入口（v0.5.12）**：`lib/voice.ts`（z-ai SDK ASR/TTS 封装 + 多重优雅降级）—— Web 🎤 录音转写（MediaRecorder → `POST /api/asr` → 转写进输入框）· 🔊 回复朗读（`POST /api/tts` → 24kHz WAV，7 声音 × 语速 0.5-2.0，超长句子边界分段 PCM 拼接，4K 截断诚实标注，LRU 缓存零重复计费）· 🎙 语音面板（声音网格/语速滑条/服务状态探测/localStorage 记忆）；CLI `org speak`（TTS 落盘）/`org voice`（状态+清单）；凭据缺席 → 明确降级提示（文本交互不受影响）；`DHV_VOICE_DISABLE_SDK=1` 零外联开关 |
 
 ## 二、上下文与知识（16–30）
 
