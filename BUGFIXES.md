@@ -353,3 +353,33 @@
   与 chat.ts 完全对齐。副作用是 CLI 的纯函数（`parseSelection`）从此可单测。
 - **教训**：**「可被导入的入口文件」需要一条明确约定并被全仓遵守**；修了一处（chat.ts）
   就要全仓 grep 同类入口（`process.exit(` 顶层调用）确认没有遗漏。
+
+## B-17（ORG 修复，v0.5.7）TaskRunner 先行 mkdir 制造空壳工作区：ensureWorkspace 存在性检查被骗过，Web GUI 首问必炸 Err
+
+- **现象**：agent-browser 驱动 Web GUI 实测：全新克隆后 `org web` 起服务，首个团队
+  模式提问（任意域外问题，如「请创作一首古典风格的卡农」）以「结束（Err）」收场；
+  run.json `ok=false`，error=`minted 专家执行失败：payload 不含任何记录（无法验收）`。
+- **根因链**（两层）：
+  1. `org web` 启动即内嵌任务执行器，`TaskRunner.acquireLock` 先行
+     `mkdirSync <ws>/runtime/tasks` —— 默认工作区以「只含 runtime/ 的空壳」存在；
+  2. 首个 ask 的 `ensureWorkspace` 用 `fs.existsSync(ws)` 判存在 → 空壳骗过检查
+     直接 return，demo-ws 模板从未复制：工作区缺 `raw/` 物料与 `registry` 模板；
+  3. parse 子任务路由 C:generate 现场铸专家（注册表无 parse 专家可复用）→
+     minted record-validator 对空载荷跑自身闸门 → 拒绝 → 此路径 `return Err`
+     硬失败炸穿整次 run（监督回路没机会接管）。
+- **修复**（双管齐下，tests/degrade.test.ts 3 例钉死）：
+  1. **标记物判据**（`lib/engine.ts` + `cli/org.ts` 双份同构）：`registry/` · `raw/`
+     · `.git` 任一在 = 已初始化（或用户自带数据，尊重不动）；全缺 = 空壳 → 补
+     模板。cpSync 合并语义：已有 runtime/（任务队列）不受影响；幂等。
+  2. **嵌套专家执行多重优雅降级**（`hsl/org.hsl` 三路 dispatch：Reuse /
+     Generate / WarmHandoff）：执行失败从硬 Err 降级为失败报告（coverage 0 +
+     `reuse-run-failed` / `mint-run-failed` / `handoff-run-failed` 标注 +
+     remedy 提示）交监督回路有界处理（Revise → 返工 ≤ DEFAULT_MAX_REVISES →
+     强制收货 accepted with flags），aggregate 摘要诚实可见。
+- **判定规则**：「目录存在」≠「工作区已初始化」—— 初始化判据必须锚定语义标记物
+  （能承载路由决策的 registry、能承载载荷的 raw、或 git 事实），而不是文件系统的
+  存在性副作用。凡「后台组件会 mkdir 的路径」+「按存在性短路初始化」的组合都要
+  按此规则复查（scheduler 的 runtime/schedules 同理，已被标记物判据一并覆盖）。
+- **教训**：QA 要用真实入口（浏览器驱动 GUI）打全链路——本 bug 的三层链
+  （后台组件副作用 → 初始化短路 → 硬失败传播）任何单层单测都发现不了；
+  降级设计要覆盖「铸出来的专家自己跑挂」这最后一公里，不能只给铸造失败降级。

@@ -571,6 +571,16 @@ function ensureWorkspace(ws: string): void {
     console.log(`ℹ 初始化工作区（模板 demo-ws → ${path.relative(ROOT, ws)}）`);
     fs.cpSync(path.join(ROOT, "demo-ws"), ws, { recursive: true });
     gitInit(ws);
+    return;
+  }
+  // v0.5.7 空壳工作区修复（与 lib/engine.ts 同构）：runtime/ 空壳不等于
+  // 已初始化 —— 标记物（registry/ · raw/ · .git）全缺时补模板。
+  const initialized = ["registry", "raw", ".git"]
+    .some((m) => fs.existsSync(path.join(ws, m)));
+  if (!initialized) {
+    console.log(`ℹ 补全空壳工作区（模板 demo-ws → ${path.relative(ROOT, ws)}）`);
+    fs.cpSync(path.join(ROOT, "demo-ws"), ws, { recursive: true });
+    gitInit(ws);
   }
 }
 

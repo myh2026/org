@@ -18,7 +18,7 @@
 
 ## v0.5.6 增补（2026-09-15）
 
-> v0.5.6 在 v0.5.4 底稿之上新增三项（+42 测试，全量 431/431）：
+> v0.5.7 增补：嵌套执行多重优雅降级（空壳工作区修复 + 三路 dispatch 降级，+3 测试，全量 434/434，见「增补」表）；v0.5.6 在 v0.5.4 底稿之上新增三项（+42 测试，全量 431/431）：
 
 | 增补 | 状态 | 实现位置 / 说明 |
 |:--|:--|:--|
@@ -26,6 +26,7 @@
 | **#129 多 Agent 协作 → 递归派生（子生孙）** | ✅（升级） | 工具环 `agent_spawn {goal, mode, expert}`：direct 车道 agent 派生完整子组织（org run 团队任务 / org ask 直连专家）；子组织工厂铸造的专家即「孙」。深度治理 `ORG_SPAWN_DEPTH`/`ORG_SPAWN_MAX`（缺省 2，0=关闭）——理论上子子孙孙无穷尽，深度帽是安全线；拒绝先于执行。 |
 | **作品集 10 项目矩阵**（验收口径落地） | ✅ | `tests/portfolio.test.ts`：三条执行车道（A 内联 / B 复用静态 / B 复用导入 harness）× 10 类使命（公告/音乐/诗歌/变更日志/纪要/周报/风险/术语表/数据字典/发布说明）全部 scripted 进 CI。 |
 | 静态专家 `bard`（诗歌创作） | ✅ | 轨道 `poetry` · poem.md 工件 · 降级内置示例诗；真实车道实测写诗闭环。 |
+| **嵌套执行多重优雅降级**（v0.5.7 · QA 实测双修） | ✅ | 空壳工作区修复：TaskRunner 先行 mkdir 骗过 ensureWorkspace → 标记物判据（registry/raw/.git 全缺即补模板，幂等且保留 runtime/ 队列）；嵌套专家执行失败（Reuse/Generate/WarmHandoff 三路）从硬 Err 降级为失败报告（coverage 0 + `*-run-failed` 标注 + remedy 提示）交监督回路有界处理（Revise → 返工 ≤2 → 强制收货），摘要诚实可见。`tests/degrade.test.ts` 3 例钉进 CI。 |
 | 图灵完备实证（issue #34） | ✅ | `fixtures/turing/`（Rule 110 / BB(3) / Brainfuck）× 四语言对拍（解释器 + python ruff + rustc + g++）11/11；vendored dhv-ts 0.2.65→0.2.66；ruff 语料 3→6。 |
 
 ## 一、交互与入口（1–15）

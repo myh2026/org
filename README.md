@@ -5,7 +5,7 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.5.6_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Status](https://img.shields.io/badge/status-v0.5.7_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
 [![Tests](https://img.shields.io/badge/tests-431%2F431_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.66-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
@@ -19,7 +19,9 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **v0.5.6 当前状态**：可运行实现，**431/431 机制级测试全绿**（24 文件 · 1783 expect）。本版双补全「产物与组织」：**音频产物通道**（notes.json 乐谱工件 → 引擎收尾渲染同名 WAV，古典音乐的交付物是可播放音频不是乐谱；composer 专家 + audio_compose 工具 + Web `<audio>` 播放器，DeepSeek 真实车道实测闭环）· **子生孙递归派生**（agent_spawn 工具：direct 车道 agent 派生完整子组织，ORG_SPAWN_DEPTH/MAX 深度治理，理论上子子孙孙无穷尽而安全线有界）· **作品集 10 项目矩阵**（三条执行车道 × 10 类使命进 CI）· 图灵完备实证合入（issue #34 三程序四语言对拍 11/11）。
+> **v0.5.7 当前状态**：可运行实现，**434/434 机制级测试全绿**（25 文件 · 1799 expect）。本版专注 QA 实测双修：**空壳工作区修复**（TaskRunner 先行 mkdir 骗过 ensureWorkspace 存在性检查 → 模板从未复制 → Web GUI 首问必炸 Err；标记物判据 registry/raw/.git 全缺即补模板）· **嵌套专家执行多重优雅降级**（Reuse/Generate/WarmHandoff 三路 dispatch 失败不再硬 Err 炸穿 run —— 失败报告交监督回路有界处理：Revise → 返工 → 强制收货，摘要诚实可见）。
+>
+> **v0.5.6 历史状态**：可运行实现，431/431 机制级测试全绿（24 文件 · 1783 expect）。本版双补全「产物与组织」：**音频产物通道**（notes.json 乐谱工件 → 引擎收尾渲染同名 WAV，古典音乐的交付物是可播放音频不是乐谱；composer 专家 + audio_compose 工具 + Web `<audio>` 播放器，DeepSeek 真实车道实测闭环）· **子生孙递归派生**（agent_spawn 工具：direct 车道 agent 派生完整子组织，ORG_SPAWN_DEPTH/MAX 深度治理，理论上子子孙孙无穷尽而安全线有界）· **作品集 10 项目矩阵**（三条执行车道 × 10 类使命进 CI）· 图灵完备实证合入（issue #34 三程序四语言对拍 11/11）。
 >
 > **v0.5.5 历史状态**：可运行实现，389/389 机制级测试全绿（20 文件 · 1600 expect）。本版集中消化 issue #32 遗留清单：**定时任务触发器**（org schedule：五段 cron / @every · 到期自动入队 · misfire 策略 · taskd/web 执行器挂载）· **通知 webhook 出站**（notify_webhook_url · 三通道互不影响）· **key 池状态落盘跨进程共享**（429 冷却 60s→0s 档位 · 沉底排序）· **预算水位三端渲染**（CLI/chat/Web 统一口径）· **chat REPL 指挥台化**（/tools /lane /tasks /sched /notify）。
 

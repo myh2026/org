@@ -637,7 +637,25 @@ async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
                 redundancy_check(registry.clone(), subtask.clone(), full.clone(), journal).await?;
                 let out = run_expert(m.name.clone(), full.clone(), String::from("work-out"));
                 if out.ok == false {
-                    return Err(OrgError::factory(format!("专家执行失败：\n{}", out.output)));
+                    // v0.5.7 优雅降级（同 mint-run-failed）：复用磁盘专家执行
+                    // 失败不炸整次 run —— 失败报告交监督回路有界处理
+                    // （Revise/Reject 重派 → 强制收货时可见，不静默丢弃）。
+                    let brief = truncate_note(out.output.clone(), 300);
+                    journal.log(String::from("pool"), String::from("reuse-run-failed"),
+                        format!("task#{} 复用专家 {} 执行失败（降级为失败报告）：{}",
+                            subtask.id, m.name, brief));
+                    return Ok(StatusReport {
+                        task_id: spec.task_id,
+                        deliverable: String::from("(reuse run failed)"),
+                        coverage: 0.0,
+                        notes: vec![
+                            format!("reuse-run-failed: {}", brief),
+                            format!("remedy: 复用专家 {} 执行失败；建议 Reject 重派排除后改走 Generate 现场生成", m.name),
+                        ],
+                        tokens_used: 0,
+                        node_trace: Vec::new(),
+                        model_calls: 0,
+                    });
                 }
                 let report = read_report_artifact(full.task_id);
                 Ok(report)
@@ -704,7 +722,28 @@ async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
             full.payload = prepare_payload(subtask.clone());
             let out = run_expert(minted.name.clone(), full.clone(), String::from("work-out"));
             if out.ok == false {
-                return Err(OrgError::factory(format!("minted 专家执行失败：\n{}", out.output)));
+                // v0.5.7 优雅降级（与 v0.4.12 mint-failed 同构）：minted 专家
+                // 自身闸门拒绝（如载荷与职责域不匹配 →「payload 不含任何记录」）
+                // 不再硬 Err 炸穿整次 run —— 转失败报告（coverage 0 + 标注）
+                // 交监督回路：客观覆盖线 Revise → 有界返工；耗尽后强制收货时
+                // 失败标注随报告与 aggregate 摘要可见。QA 实测：空壳工作区
+                // （模板未初始化）下 Web GUI 首问必炸 Err，即此路径。
+                let brief = truncate_note(out.output.clone(), 300);
+                journal.log(String::from("factory"), String::from("mint-run-failed"),
+                    format!("task#{} minted 专家 {} 执行失败（降级为失败报告）：{}",
+                        subtask.id, minted.name, brief));
+                return Ok(StatusReport {
+                    task_id: spec.task_id,
+                    deliverable: String::from("(minted run failed)"),
+                    coverage: 0.0,
+                    notes: vec![
+                        format!("minted-run-failed: {}", brief),
+                        format!("remedy: minted 专家 {} 自身闸门拒绝（载荷与其职责域不匹配时属预期）；建议重派改走其它路由或补齐工作区物料", minted.name),
+                    ],
+                    tokens_used: 0,
+                    node_trace: Vec::new(),
+                    model_calls: 0,
+                });
             }
             // 工厂验收证据归因（fixture 通过率：客观档）
             let report = read_report_artifact(full.task_id);
@@ -722,7 +761,25 @@ async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
                         full.payload = prepare_payload(subtask.clone());
                         let out = run_expert(m.name.clone(), full.clone(), String::from("work-out"));
                         if out.ok == false {
-                            return Err(OrgError::factory(format!("暖移交执行失败：\n{}", out.output)));
+                            // v0.5.7 优雅降级（同 mint-run-failed）：暖移交磁盘
+                            // 专家执行失败不炸整次 run —— 失败报告交监督回路
+                            // 有界处理（Revise/Reject 重派 → 强制收货时可见）。
+                            let brief = truncate_note(out.output.clone(), 300);
+                            journal.log(String::from("pool"), String::from("handoff-run-failed"),
+                                format!("task#{} 暖移交专家 {} 执行失败（降级为失败报告）：{}",
+                                    subtask.id, m.name, brief));
+                            return Ok(StatusReport {
+                                task_id: spec.task_id,
+                                deliverable: String::from("(handoff run failed)"),
+                                coverage: 0.0,
+                                notes: vec![
+                                    format!("handoff-run-failed: {}", brief),
+                                    format!("remedy: 暖移交专家 {} 执行失败；建议 Reject 重派排除后改走 Generate 现场生成", m.name),
+                                ],
+                                tokens_used: 0,
+                                node_trace: Vec::new(),
+                                model_calls: 0,
+                            });
                         }
                         Ok(read_report_artifact(full.task_id))
                     } else {
@@ -874,6 +931,18 @@ async fn review(spec: TaskSpec, report: StatusReport, subtask: SubTask) -> Resul
     } else {
         Ok(Verdict::Accept)
     }
+}
+
+/// 失败摘要截断（v0.5.7）：嵌套执行的 out.output 可能携带完整 stderr 与
+/// 工件诊断（多行）—— 灌进 StatusReport.notes 前压到单行有界长度，报告
+/// 与 aggregate 摘要保持可读；截断以 … 收尾提示不完整。
+fn truncate_note(s: String, max: u32) -> String {
+    let out = native typescript {
+        const one = String(s).replace(/\s+/g, " ").trim();
+        const n = Math.floor(Number(max));
+        return one.length > n ? one.slice(0, n) + "…" : one;
+    };
+    out
 }
 
 /// worker 自报 remedy 提示（类型化报告强制摘要的收益：意见即数据）。

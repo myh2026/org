@@ -189,7 +189,22 @@ export function gitInit(ws: string): void {
 
 export function ensureWorkspace(ws: string): void {
   assertWorkspaceNotTemplate(ws);
-  if (fs.existsSync(ws)) return;
+  if (fs.existsSync(ws)) {
+    // v0.5.7 空壳工作区修复：任务执行器 / 调度器会在首个 ask 之前
+    // mkdirSync <ws>/runtime/{tasks,schedules}（acquireLock / 首次写入），
+    // 一个只含 runtime/ 的空壳目录就能骗过原先的存在性检查 —— 模板
+    // 从未复制，工作区缺 raw/ 与 registry 模板（QA 实测：org web 首问
+    // 路由 C:generate 铸专家 → 空载荷闸门拒绝 → run 硬 Err）。
+    // 标记物判据：registry/ · raw/ · .git 任一在 = 已初始化（或用户自带
+    // 数据，尊重不动）；全缺 = 空壳 → 补模板。cpSync 合并语义：已有
+    // runtime/ 不受影响（模板不含该目录）。
+    const initialized = ["registry", "raw", ".git"]
+      .some((m) => fs.existsSync(path.join(ws, m)));
+    if (initialized) return;
+    fs.cpSync(WS_TEMPLATE, ws, { recursive: true });
+    gitInit(ws);
+    return;
+  }
   fs.cpSync(WS_TEMPLATE, ws, { recursive: true });
   gitInit(ws);
 }

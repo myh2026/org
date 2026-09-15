@@ -1,5 +1,47 @@
 # CHANGELOG
 
+## v0.5.7（2026-09-15）—— 空壳工作区修复 + 嵌套专家执行多重优雅降级
+
+agent-browser 驱动 Web GUI 的 QA 实测揪出两个连环真 bug，本版双修 +
+回归钉进 CI：434/434 机制级测试全绿（25 文件 · 1799 expect，+3 例）。
+
+### 空壳工作区修复（ensureWorkspace 标记物判据）
+
+- **根因**：`org web` 启动即内嵌任务执行器，`TaskRunner.acquireLock`
+  先行 `mkdirSync <ws>/runtime/tasks` —— 默认工作区以「只含 runtime/
+  的空壳」存在，骗过 `ensureWorkspace` 的存在性检查（`fs.existsSync` →
+  直接 return），demo-ws 模板从未复制：工作区缺 `raw/` 物料与
+  `registry` 模板，首个 ask 的 parse 子任务被迫路由 C:generate 现场
+  铸专家 → 空载荷过不了 minted 专家自身闸门 → 硬 Err 炸穿整次 run
+  （GUI 显示「结束（Err）」）；
+- **修复**：标记物判据（`registry/` · `raw/` · `.git` 任一在 = 已初始
+  化或用户自带数据，尊重不动；全缺 = 空壳 → 补模板）。`cpSync` 合并
+  语义：已有 `runtime/`（任务队列）不受影响；`lib/engine.ts` 与
+  `cli/org.ts` 双份同构修复；幂等（已初始化工作区零触碰）。
+
+### 嵌套专家执行多重优雅降级（Reuse/Generate/WarmHandoff 三路）
+
+- **炸半径**：v0.4.12 只给「工厂 mint 失败」加了降级，但**铸出来的专家
+  自己跑挂**（自身闸门拒绝/嵌套解释器非零退出）时三路 dispatch 一律
+  `return Err` 硬失败 —— 监督回路根本没机会接管；
+- **修复**：三路（`reuse-run-failed` / `mint-run-failed` /
+  `handoff-run-failed`）统一降级为失败报告（coverage 0 + 标注 +
+  remedy 提示）交监督回路有界处理：客观覆盖线 Revise → 有界返工
+  （DEFAULT_MAX_REVISES=2）→ 耗尽强制收货（accepted with flags）→
+  aggregate 摘要诚实可见（`(minted run failed)` / `(factory failed)`
+  交付物不编造）→ run ok=true；
+- `truncate_note` 助手：嵌套执行的 stderr 诊断压到单行 300 字符再灌
+  notes，报告与摘要保持可读。
+
+### 测试（tests/degrade.test.ts · 3 例）
+
+- T1 空壳修复单元：runtime/ 空壳 → 补模板且保留 runtime/ · 幂等；
+- T2 GUI 复现端到端：空壳工作区首问 → parse 走 B:reuse（不再铸专家）
+  → run ok=true（QA 场景全绿）；
+- T3 mint 降级全链：域外使命 + 空注册表 + 无物料 → mint-run-failed
+  降级 → 有界返工（revise #N ≤ 2）→ 强制收货 → run ok=true + 事件
+  留痕诚实。
+
 ## v0.5.6（2026-09-15）—— 音频产物通道（开袋即食）+ 子生孙递归派生 + 作品集 10 项目矩阵
 
 「org agent 成为正常 agent」的产物与组织双补全：古典音乐的交付物从此是
