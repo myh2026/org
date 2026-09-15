@@ -130,6 +130,7 @@ import {
 } from "../lib/notify.ts"; // 通知中心（v0.5.2）
 import { expandMentions } from "../lib/mentions.ts"; // @文件引用（v0.5.3）
 import { listMemories, addMemory, removeMemory, allMemories } from "../lib/memories.ts"; // 长期记忆（v0.5.3）
+import { semanticSearch } from "../lib/search.ts"; // 语义检索（v0.5.8 · capabilities #19/#22）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
 
@@ -831,6 +832,17 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
         // ---- 长期记忆（v0.5.3：org memory 的 Web 面）----
         if (route === "GET /api/memory") {
           return json({ ok: true, groups: allMemories(ws) });
+        }
+        // ---- 语义检索（v0.5.8：org search 的 Web 面 · capabilities #19/#22）----
+        if (route === "GET /api/search") {
+          const q = String(url.searchParams.get("q") ?? "").trim();
+          const k = Math.max(1, Math.min(20, Math.floor(Number(url.searchParams.get("k") ?? "5") || 5)));
+          if (!q) return json({ ok: false, error: "q 必填" }, 400);
+          try {
+            return json(semanticSearch(ws, q, k));
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 500);
+          }
         }
         if (route === "POST /api/memory") {
           if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
@@ -1961,6 +1973,52 @@ function renderIndexHtml(): string {
   .rvsettled { padding: 10px 14px; font: 11px/1.7 var(--mono); color: var(--dim);
         border-bottom: 1px solid var(--border); }
 
+  /* ── 语义检索面板（v0.5.8 · BM25 + RAG）────────────────── */
+  #searchScrim { display: none; position: fixed; inset: 0;
+        background: rgba(0,0,0,.58); z-index: 40; }
+  #searchScrim.on { display: block; }
+  #searchPane { display: none; position: fixed; z-index: 41;
+        left: 50%; top: 50%; transform: translate(-50%,-50%);
+        width: min(720px, calc(100vw - 28px)); max-height: min(78vh, 660px);
+        display: none; flex-direction: column;
+        background: var(--panel); border: 1px solid var(--border2);
+        border-radius: 4px; box-shadow: 0 24px 60px rgba(0,0,0,.6); }
+  #searchPane.on { display: flex; }
+  .schhead { flex: none; padding: 12px 14px 10px; border-bottom: 1px solid var(--border); }
+  .schhead .tt { font: 600 12px var(--sans); color: var(--text); }
+  .schbar { display: flex; gap: 8px; margin-top: 8px; }
+  .schbar input { flex: 1; background: var(--raise); border: 1px solid var(--border2);
+        color: var(--text); font: 12px var(--mono); padding: 7px 10px;
+        border-radius: 3px; outline: none; }
+  .schbar input:focus { border-color: var(--green); }
+  .schbar select { flex: none; background: var(--raise); border: 1px solid var(--border2);
+        color: var(--muted); font: 11px var(--mono); padding: 7px 6px;
+        border-radius: 3px; outline: none; cursor: pointer; }
+  .schmeta { margin-top: 6px; font: 10px/1.5 var(--mono); color: var(--dim);
+        display: flex; gap: 10px; flex-wrap: wrap; }
+  .schmeta .corp { color: var(--muted); }
+  .schbody { flex: 1; min-height: 120px; overflow-y: auto; }
+  .schrow { padding: 8px 14px; border-bottom: 1px solid var(--border);
+        cursor: pointer; transition: background .1s; }
+  .schrow:hover { background: var(--raise); }
+  .schrow .top { display: flex; gap: 8px; align-items: baseline; }
+  .schrow .sc { flex: none; font: 600 10px var(--mono); padding: 1px 6px;
+        border-radius: 3px; min-width: 44px; text-align: center; }
+  .schrow .sc.hi { color: #34d399; background: rgba(16,185,129,.12); }
+  .schrow .sc.md { color: #fbbf24; background: rgba(217,119,6,.12); }
+  .schrow .sc.lo { color: var(--muted); background: var(--raise); }
+  .schrow .pth { font: 11px var(--mono); color: var(--text);
+        word-break: break-all; }
+  .schrow:hover .pth { color: var(--greenb); }
+  .schrow .snip { margin: 4px 0 0 52px; font: 10px/1.6 var(--mono);
+        color: var(--muted); word-break: break-word; }
+  .schrow .snip b { color: var(--greenb); font-weight: 600; }
+  .schempty { padding: 28px 14px; text-align: center;
+        font: 11px/1.8 var(--mono); color: var(--dim); }
+  .schfoot { flex: none; padding: 8px 14px; border-top: 1px solid var(--border);
+        font: 10px/1.6 var(--mono); color: var(--dim); }
+  .schfoot b { color: var(--muted); font-weight: 600; }
+
   /* 移动端：侧栏改抽屉（≤720px，issue #13 —— 不再 display:none 直接消失） */
   #backdrop { display: none; position: fixed; inset: 34px 0 0 0;
            background: rgba(0,0,0,.5); z-index: 25; }
@@ -2005,6 +2063,9 @@ function renderIndexHtml(): string {
   <button id="memoryBtn" class="rchip" type="button" title="专家长期记忆（偏好/约定 · 直连自动注入）">
     <span class="rc-label">🧠 记忆</span>
   </button>
+  <button id="searchBtn" class="rchip" type="button" title="语义检索（BM25 · 中英混合）—— 检索工作区语料，点击命中可插入 @引用">
+    <span class="rc-label">🔍 检索</span>
+  </button>
   <span class="tstats" id="topStats"></span>
 </header>
 <div id="backdrop" aria-hidden="true"></div>
@@ -2022,6 +2083,26 @@ function renderIndexHtml(): string {
 <div id="notifyPane" role="dialog" aria-modal="true" aria-labelledby="ntTitle"></div>
 <div id="memoryScrim" aria-hidden="true"></div>
 <div id="memoryPane" role="dialog" aria-modal="true" aria-labelledby="mmTitle"></div>
+<div id="searchScrim" aria-hidden="true"></div>
+<div id="searchPane" role="dialog" aria-modal="true" aria-labelledby="schTitle">
+  <div class="schhead">
+    <div class="tt" id="schTitle">🔍 语义检索 — 工作区语料 BM25</div>
+    <div class="schbar">
+      <input id="schQuery" type="text" placeholder="查询词（中英混合 · 回车检索 · 如「审计 制度」「date format」）" autocomplete="off" aria-label="检索查询">
+      <select id="schK" aria-label="命中数">
+        <option value="3">top 3</option>
+        <option value="5" selected>top 5</option>
+        <option value="10">top 10</option>
+      </select>
+    </div>
+    <div class="schmeta" id="schMeta" hidden></div>
+  </div>
+  <div class="schbody" id="schBody">
+    <div class="schempty">输入查询词检索 raw/ registry/ work/ factory/ 语料 ——
+点击命中路径可把 <b>@路径</b> 插入问题输入框（检索→引用闭环）。</div>
+  </div>
+  <div class="schfoot">RAG 注入：问题里写 <b>@?查询词</b> —— 检索命中自动织入模型上下文（org ask / 直连车道）· 语料降级：超限/二进制文件跳过不连坐</div>
+</div>
 <div class="app">
   <aside>
     <button class="newbtn" id="newSession" type="button">+ 新会话</button>
@@ -3105,6 +3186,112 @@ function renderMemoryPane() {
 
 document.getElementById("memoryBtn").onclick = openMemory;
 document.getElementById("memoryScrim").onclick = closeMemory;
+
+// ---- 语义检索面板（v0.5.8：org search 的 GUI 面 · BM25 + RAG） ----
+
+var schTimer = null;
+var schSeq = 0;
+
+function openSearch() {
+  document.getElementById("searchPane").classList.add("on");
+  document.getElementById("searchScrim").classList.add("on");
+  var inp = document.getElementById("schQuery");
+  if (inp) { inp.focus(); inp.select(); }
+}
+
+function closeSearch() {
+  document.getElementById("searchPane").classList.remove("on");
+  document.getElementById("searchScrim").classList.remove("on");
+}
+
+/** 命中词高亮（esc 后替换 —— XSS 安全：先全量转义再做受控 <b>）。 */
+function schHighlight(snippet, terms) {
+  var s = esc(snippet || "");
+  for (var i = 0; i < terms.length; i++) {
+    var t = esc(terms[i]);
+    if (t.length > 0) {
+      s = s.split(t).join("<b>" + t + "</b>");
+    }
+  }
+  return s;
+}
+
+function schScoreClass(score) {
+  return score >= 3 ? "hi" : score >= 1.5 ? "md" : "lo";
+}
+
+function runSearch() {
+  var q = (document.getElementById("schQuery") || { value: "" }).value || "";
+  var k = Number((document.getElementById("schK") || { value: "5" }).value || "5");
+  var body = document.getElementById("schBody");
+  var meta = document.getElementById("schMeta");
+  if (!body) return;
+  q = q.trim();
+  if (!q) {
+    meta.hidden = true;
+    body.innerHTML = '<div class="schempty">输入查询词检索 raw/ registry/ work/ factory/ 语料 ——<br>点击命中路径可把 <b>@路径</b> 插入问题输入框（检索→引用闭环）。</div>';
+    return;
+  }
+  var mySeq = ++schSeq;
+  body.innerHTML = '<div class="schempty">检索中…</div>';
+  api("/api/search?q=" + encodeURIComponent(q) + "&k=" + k).then(function (r) {
+    if (mySeq !== schSeq) return; // 过期响应丢弃（防抖竞态）
+    if (!r || !r.ok) {
+      body.innerHTML = '<div class="schempty">✗ ' + esc((r && r.error) || "检索失败") + "</div>";
+      meta.hidden = true;
+      return;
+    }
+    meta.hidden = false;
+    meta.innerHTML = "<span>" + r.hits.length + " 命中 / " + r.total_docs + " 文档 · " + r.took_ms + "ms</span>" +
+      '<span class="corp">语料 ' + esc((r.stats && r.stats.corpusDirs || []).join(" · ") || "（空）") + "</span>";
+    if (r.hits.length === 0) {
+      body.innerHTML = '<div class="schempty">（无命中 —— 换个说法？中英混合均可，如「审计 制度」「date format」）</div>';
+      return;
+    }
+    body.innerHTML = r.hits.map(function (h) {
+      return '<div class="schrow" data-schpath="' + esc(h.path) + '" title="点击插入 @' + esc(h.path) + ' 到问题输入框">' +
+        '<div class="top"><span class="sc ' + schScoreClass(h.score) + '">' + h.score.toFixed(2) + "</span>" +
+        '<span class="pth">' + esc(h.path) + "</span></div>" +
+        '<div class="snip">' + schHighlight(h.snippet, h.terms || []) + "</div></div>";
+    }).join("");
+    Array.prototype.forEach.call(body.querySelectorAll(".schrow"), function (row) {
+      row.onclick = function () {
+        var p = row.dataset.schpath || "";
+        var q2 = document.getElementById("question");
+        if (q2 && p) {
+          q2.value = (q2.value.trim() + " @" + p).trim() + " ";
+          q2.focus();
+          flashHint("已插入 @" + p + "（关闭面板后直接提问）");
+        }
+      };
+    });
+  }).catch(function (e) {
+    if (mySeq !== schSeq) return;
+    body.innerHTML = '<div class="schempty">✗ 检索失败：' + esc(String(e)) + "</div>";
+  });
+}
+
+document.getElementById("searchBtn").onclick = function () {
+  openSearch();
+  if ((document.getElementById("schQuery") || { value: "" }).value.trim()) runSearch();
+};
+document.getElementById("searchScrim").onclick = closeSearch;
+(function () {
+  var inp = document.getElementById("schQuery");
+  if (!inp) return;
+  inp.oninput = function () {
+    if (schTimer) clearTimeout(schTimer);
+    schTimer = setTimeout(runSearch, 300); // 防抖 300ms
+  };
+  inp.onkeydown = function (ev) {
+    if (ev.key === "Enter") {
+      if (schTimer) clearTimeout(schTimer);
+      runSearch();
+    }
+  };
+  var kSel = document.getElementById("schK");
+  if (kSel) kSel.onchange = runSearch;
+})();
 
 document.getElementById("tasksBtn").onclick = openTasks;
 document.getElementById("tasksScrim").onclick = closeTasks;

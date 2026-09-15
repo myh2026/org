@@ -35,6 +35,7 @@ import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          forkSession, revertExpert, archivedVersions, renameSession, deleteSession } from "../lib/engine.ts";
 import { readCostTimeline, renderCostTimeline, latestScorecardDir } from "../lib/engine.ts";
 import { scanAndRenderArtifacts } from "../lib/audio.ts"; // v0.5.6 音频产物通道（CLI 车道）
+import { semanticSearch } from "../lib/search.ts"; // v0.5.8 语义检索（capabilities #19/#22）
 import { listApprovals, decideApproval, clearGranted } from "../lib/approvals.ts";
 import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
@@ -122,6 +123,7 @@ interface Args {
   toVersion: string;      // org revert --to <x.y.z>
   approval: boolean;      // org run --approval（开交互式审批队列）
   spawnDepth: number;     // v0.5.6：递归派生深度（agent_spawn 工具注入；内部旗标）
+  k: number;              // v0.5.8：org search --k（top-N 命中数）
   rest: string[];
 }
 
@@ -153,6 +155,7 @@ function parseArgs(argv: string[]): Args {
     toVersion: "",
     approval: false,
     spawnDepth: 0,
+    k: 5,
     rest: [],
   };
   let i = 1;
@@ -172,6 +175,7 @@ function parseArgs(argv: string[]): Args {
     else if (v === "--to") a.toVersion = argv[++i] ?? "";
     else if (v === "--approval") a.approval = true;
     else if (v === "--spawn-depth") a.spawnDepth = Math.max(0, Number(argv[++i] ?? "0") || 0);
+    else if (v === "--k") a.k = Math.max(1, Math.floor(Number(argv[++i] ?? "5") || 5));
     else if (v === "--continue" || v === "-c") a.continue = true;
     else if (v === "--name") a.name = (argv[++i] ?? "").toLowerCase();
     else if (v === "--description" || v === "--desc") a.description = argv[++i] ?? "";
@@ -1786,6 +1790,39 @@ async function cmdSchedule(a: Args): Promise<number> {
   return 2;
 }
 
+// ---- org search：语义检索（v0.5.8 · capabilities #19/#22） ---------------------
+
+async function cmdSearch(a: Args): Promise<number> {
+  const query = a.rest.join(" ").trim();
+  if (!query) {
+    console.error('用法：org search <查询词> [--k N] [--workspace DIR]');
+    console.error('  BM25 词频语义检索（中英混合分词）· 语料：raw/ registry/ work/ factory/');
+    console.error('  RAG 注入：问题中写 @?查询词 即把检索命中织入模型上下文');
+    return 2;
+  }
+  const k = Number(a.k ?? 5);
+  const ws = defaultWorkspace(a);
+  ensureWorkspace(ws);
+  const sr = semanticSearch(ws, query, Number.isFinite(k) && k > 0 ? k : 5);
+  const corpus = sr.stats.corpusDirs.join(" · ") || "（无语料目录）";
+  console.log(`🔍 "${query}" · ${sr.hits.length} 命中 · ${sr.took_ms}ms · ${sr.total_docs} 文档（${corpus}）`);
+  if (sr.stats.skippedOversize + sr.stats.skippedBinary + sr.stats.skippedTotalCap > 0) {
+    console.log(`  语料降级：超限 ${sr.stats.skippedOversize} · 二进制 ${sr.stats.skippedBinary} · 总量帽 ${sr.stats.skippedTotalCap}（跳过不连坐）`);
+  }
+  if (sr.hits.length === 0) {
+    console.log("\n（无命中 —— 换个说法？中英混合查询均可，如「审计 制度」「date format」）");
+    return 0;
+  }
+  console.log("");
+  for (const h of sr.hits) {
+    console.log(`  ${h.score.toFixed(2).padStart(5)}  ${h.path}`);
+    if (h.snippet) console.log(`         ${h.snippet.slice(0, 160)}`);
+  }
+  console.log(`\n  引用命中：org ask <expert> "… @${sr.hits[0]!.path} …"`);
+  console.log(`  RAG 注入：org ask <expert> "… @?${query} …"（检索命中自动织入上下文）`);
+  return 0;
+}
+
 // ---- org memory：专家长期记忆（v0.5.3） ----------------------------------------
 
 async function cmdMemory(a: Args): Promise<number> {
@@ -1935,6 +1972,7 @@ export async function orgMain(): Promise<number> {
     case "schedule": case "schedules": case "cron": return cmdSchedule(a);
     case "notify": case "notifications": return cmdNotify(a);
     case "memory": case "memories": return cmdMemory(a);
+    case "search": return cmdSearch(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -2014,6 +2052,10 @@ export async function orgMain(): Promise<number> {
       专家长期记忆：用户偏好/项目约定沉淀（runtime/memories/<expert>.md）
       —— direct 车道自动注入提示词（跨会话生效）· @文件引用（org ask
       "…@src/main.ts"）与 AGENTS.md 工作区规则同批生效
+  org search <查询词> [--k N]
+      语义检索（BM25 · 中英混合分词）：raw/ registry/ work/ factory/
+      语料的相关性排序 + 命中摘要 —— RAG 注入用 @?查询词（org ask
+      "…@?审计制度…" 检索命中自动织入上下文）
   org providers [ledger]
       服务商健康面板：全部注册预设 + 命名车道 + 环境变量发现状态 +
       调用台账（key 轮换归因 · 失败统计）

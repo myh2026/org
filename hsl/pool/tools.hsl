@@ -79,6 +79,7 @@ export fn tools_prompt(mode: ToolMode) -> String {
     out.push_str("- fs_read {\"path\":\"relative/path\"} — read a file (workspace-relative)\n");
     out.push_str("- fs_list {\"dir\":\"relative/dir\",\"depth\":3} — list directory\n");
     out.push_str("- fs_glob {\"pattern\":\"src/**/*.hsl\"} — glob match files\n");
+    out.push_str("- semantic_search {\"query\":\"审计 制度\",\"k\":5} — BM25 semantic search over workspace corpus (raw/ registry/ work/ factory/); returns ranked hits with snippets. Prefer this over fs_glob+fs_read loops when you need relevant context by meaning.\n");
     if mode == ToolMode::Full {
         out.push_str("- fs_write {\"path\":\"...\",\"content\":\"...\"} — write a file (may require approval)\n");
         out.push_str("- fs_edit {\"path\":\"...\",\"old\":\"exact unique text\",\"new\":\"replacement\"} — precise edit (may require approval)\n");
@@ -180,13 +181,14 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         }
     }
     let gate_cap = match name.as_str() {
-        "fs_read" | "fs_list" | "fs_glob" => String::from("file_read"),
+        "fs_read" | "fs_list" | "fs_glob" | "semantic_search" => String::from("file_read"),
         "fs_write" | "fs_edit" => String::from("file_write"),
         "shell_run" => String::from("process_spawn"),
         "agent_spawn" | "audio_compose" => String::from("agent_spawn"),
         _ => String::from("file_read"),
     };
     if name != String::from("fs_read") && name != String::from("fs_list") && name != String::from("fs_glob")
+        && name != String::from("semantic_search")
         && name != String::from("agent_spawn") && name != String::from("audio_compose") {
         let approved = gate_write(policy, gate_cap, name.clone(), args.clone()).await;
         if approved == String::from("denied") {
@@ -205,12 +207,13 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "fs_read" => tool_fs_read(args.clone()),
         "fs_list" => tool_fs_list(args.clone()),
         "fs_glob" => tool_fs_glob(args.clone()),
+        "semantic_search" => tool_semantic_search(args.clone()),
         "fs_write" => tool_fs_write(args.clone()),
         "fs_edit" => tool_fs_edit(args.clone()),
         "shell_run" => tool_shell_run(args.clone()),
         "agent_spawn" => tool_agent_spawn(args.clone()).await,
         "audio_compose" => tool_audio_compose(args.clone()),
-        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/fs_write/fs_edit/shell_run/agent_spawn/audio_compose）", name)),
+        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/fs_write/fs_edit/shell_run/agent_spawn/audio_compose）", name)),
     };
     emit_tool(String::from("tool_result"), result_summary(result.clone()));
     result
@@ -247,6 +250,111 @@ async fn gate_write(policy: CapabilityPolicy, capability: String, tool: String, 
 }
 
 // ---- 工具执行体（$host ABI 直通；全部带界与容错） -----------------------------
+
+/// v0.5.8 语义检索（capabilities #19/#22）：lib/search.ts 的 ABI 内同构
+/// 实现（HSL 无法 import TS —— 分词/BM25 公式与 lib 侧一致，
+/// tests/search.test.ts 行为对拍保证排序等价；「一源多投射 + 行为级
+/// 对拍」与 HSL 代码生成器同一治理手法）。只读工具（ReadOnly 模式可用）。
+fn tool_semantic_search(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const query = String(a.query ?? a.q ?? "");
+            const k = Math.max(1, Math.min(20, Math.floor(Number(a.k ?? 5) || 5)));
+            if (!query.trim()) return JSON.stringify({ tool: "semantic_search", ok: false, error: "args.query 必填" });
+
+            // ---- 与 lib/search.ts 同构：分词（西文词元 + CJK bigram）----
+            const tokenize = (text) => {
+                const tokens = [];
+                const lower = String(text).toLowerCase();
+                for (const m of lower.match(/[a-z0-9_]+/g) || []) tokens.push(m);
+                for (const seg of lower.match(/[\u3400-\u9fff]+/g) || []) {
+                    if (seg.length === 1) { tokens.push(seg); continue; }
+                    for (let i = 0; i < seg.length - 1; i++) tokens.push(seg.slice(i, i + 2));
+                    tokens.push(seg.slice(seg.length - 1));
+                }
+                return tokens;
+            };
+
+            // ---- 语料枚举（CORPUS_DIRS 同款：raw/ registry/ work/ factory/）----
+            const CORPUS = ["raw/", "registry/", "work/", "factory/"];
+            const MAX_FILES = 512;
+            const MAX_CHARS = 256 * 1024;
+            const all = String($host.fs.list(".", 8)).split("\n").filter((p) => p.length > 0);
+            const files = all.filter((p) => CORPUS.some((c) => p.startsWith(c))).slice(0, MAX_FILES);
+
+            // ---- 索引（逐文件隔离：读失败跳过不连坐）----
+            const docs = [];
+            let totalTokens = 0;
+            for (const p of files) {
+                let text;
+                try { text = String($host.fs.read(p)); } catch (e) { continue; }
+                if (text.length > MAX_CHARS) text = text.slice(0, MAX_CHARS);
+                if (text.indexOf("\u0000") >= 0) continue; // 二进制嗅探
+                const tokens = tokenize(text);
+                const tf = new Map();
+                for (const t of tokens) tf.set(t, (tf.get(t) || 0) + 1);
+                totalTokens += tokens.length;
+                // raw 仅存头部（64KB：短语检测 16KB + snippet 定位窗 —— 内存面
+                // 512 文件 × 64KB 有界；全文场景用 fs_read 按需读回）
+                docs.push({ path: p, len: tokens.length, tf: tf, raw: text.slice(0, 65536) });
+            }
+            const avgdl = docs.length > 0 ? totalTokens / docs.length : 0;
+
+            // ---- BM25（Lucene IDF 防负 · k1=1.5 · b=0.75，与 lib 同参）+ 短语加成 ----
+            const K1 = 1.5, B = 0.75;
+            const df = new Map();
+            for (const d of docs) for (const t of d.tf.keys()) df.set(t, (df.get(t) || 0) + 1);
+            const qTokens = [...new Set(tokenize(query))];
+            const cjkSegs = (String(query).match(/[\u3400-\u9fff]+/g) || []).filter((s) => s.length >= 2);
+            const hits = [];
+            for (const d of docs) {
+                let score = 0;
+                const matched = [];
+                for (const t of qTokens) {
+                    const f = d.tf.get(t);
+                    if (!f) continue;
+                    matched.push(t);
+                    const dfv = df.get(t) || 0;
+                    const idf = Math.log(1 + (docs.length - dfv + 0.5) / (dfv + 0.5));
+                    score += idf * (f * (K1 + 1)) / (f + K1 * (1 - B + B * (d.len / (avgdl || 1))));
+                }
+                // 短语加成（与 lib/search.ts 同参对拍：原文命中查询段 +3.0）
+                const head = d.raw.slice(0, 16384);
+                for (const seg of cjkSegs) {
+                    if (head.indexOf(seg) >= 0) {
+                        score += 3.0;
+                        if (matched.indexOf(seg) < 0) matched.push(seg);
+                    }
+                }
+                if (matched.length > 0 && score > 0) {
+                    let at = -1;
+                    for (const t of matched) {
+                        const i = d.raw.indexOf(t);
+                        if (i >= 0 && (at < 0 || i < at)) at = i;
+                    }
+                    let snippet = "";
+                    if (at >= 0) {
+                        const from = Math.max(0, at - 80), to = Math.min(d.raw.length, at + 80);
+                        snippet = (from > 0 ? "…" : "") + d.raw.slice(from, to).replace(/\s+/g, " ") + (to < d.raw.length ? "…" : "");
+                    } else {
+                        snippet = d.raw.slice(0, 120).replace(/\s+/g, " ");
+                    }
+                    hits.push({ path: d.path, score: Math.round(score * 100) / 100, terms: matched, snippet: snippet.slice(0, 200) });
+                }
+            }
+            hits.sort((x, y) => y.score - x.score || (x.path < y.path ? -1 : 1));
+            hits.length = Math.min(hits.length, k);
+            return JSON.stringify({
+                tool: "semantic_search", ok: true,
+                query: query, total_docs: docs.length, hits: hits,
+                hint: "用 fs_read 读回命中文件获取全文；RAG 注入（用户侧）写 @?查询词",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "semantic_search", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
 
 fn tool_fs_read(args: String) -> String {
     native typescript {
@@ -541,6 +649,9 @@ fn result_summary(result: String) -> String {
                 // v0.5.6：agent_spawn / audio_compose 的观测摘要（深度/音符数等结构化字段）
                 if (tool === "agent_spawn") return tool + " ok depth=" + String(o.depth ?? "?") + " ws=" + String((o.workspace || "?").split("/").pop());
                 if (tool === "audio_compose") return tool + " ok notes=" + String(o.notes ?? "?") + " wav=" + String(o.wav ?? "?");
+                // v0.5.8：语义检索的观测摘要（hits 数 + top-1 路径 —— tests/
+                // search.test.ts 以此对拍 HSL 版与 lib 版的排序一致性）
+                if (tool === "semantic_search") return tool + " ok hits=" + String((o.hits || []).length) + " docs=" + String(o.total_docs ?? "?") + " top=" + String((o.hits && o.hits[0] && o.hits[0].path) || "-");
                 return tool + " ok " + size + " chars";
             }
             return tool + " error " + String(o.error || "").slice(0, 120);

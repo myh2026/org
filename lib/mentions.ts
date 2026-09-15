@@ -1,21 +1,28 @@
 // ============================================================================
-// lib/mentions.ts — @文件/目录引用（v0.5.3）
+// lib/mentions.ts — @文件/目录引用 + @?语义检索注入（v0.5.3 · v0.5.8）
 // ----------------------------------------------------------------------------
 // codex / claude-code 的 @path 提及同形：用户问题里的 `@相对路径` 在进入
 // 模型前展开为带围栏的文件内容（精确指定上下文，减少幻觉）。
 //
+// v0.5.8 RAG 注入：`@?查询词` —— 语义检索（lib/search.ts BM25）top-k
+// 命中展开为围栏摘要块（检索增强生成的检索半环；用户不必知道文件名，
+// 「@? 审计制度」即可把相关文档带进上下文）。
+//
 // 展开规则：
 //   - 识别 `@路径`（路径不含空白；支持目录 —— 展开为树 + 各文件摘要）
+//   - 识别 `@?查询词`（到下一个空白；BM25 top-5 → 路径 + 命中摘要围栏）
 //   - 文件 ≤64KB 全文；超出截断并标注
 //   - 目录：列出至多 20 个文件，每个附前 8 行预览
 //   - 总预算 ≤96KB（超出部分跳过并在附注中说明）
 //   - 读取失败（不存在/二进制/越界）→ 附注说明，绝不炸主流程
 //
-// 优雅降级：无 @ 提及零成本直通；全部失败 → 原样返回 + 提示。
+// 优雅降级：无 @ 提及零成本直通；检索无命中 → 附注说明；全部失败 →
+// 原样返回 + 提示。
 // ============================================================================
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { semanticSearch } from "./search.ts";
 
 export interface MentionResult {
   /** 展开后的完整问题（原问题 + 附注）。 */
@@ -41,6 +48,37 @@ export function expandMentions(question: string, workspace: string): MentionResu
   let m: RegExpExecArray | null;
   let body = question;
   const attachments: string[] = [];
+
+  // ---- v0.5.8 @?语义检索注入（先于 @path：@?x 不匹配路径正则，两不相扰）----
+  const ragRe = /@\?([^\s@]+)/g;
+  const ragSeen = new Set<string>();
+  let rm: RegExpExecArray | null;
+  while ((rm = ragRe.exec(question)) !== null) {
+    const q = rm[1]!;
+    if (ragSeen.has(q)) continue;
+    ragSeen.add(q);
+    try {
+      const sr = semanticSearch(workspace, q, 5);
+      if (sr.hits.length === 0) {
+        res.skipped.push({ path: `?${q}`, reason: `检索无命中（${sr.total_docs} 文档）` });
+        continue;
+      }
+      const lines = sr.hits.map((h) =>
+        `  ${h.path}（score ${h.score.toFixed(2)}）\n    ${h.snippet}`);
+      const block = `🔎 @?${q}（语义检索 top ${sr.hits.length} / ${sr.total_docs} 文档 · ${sr.took_ms}ms）\n${lines.join("\n")}`;
+      if (total + block.length > TOTAL_CAP) {
+        res.skipped.push({ path: `?${q}`, reason: "总预算超出（96KB）" });
+        continue;
+      }
+      attachments.push(block);
+      total += block.length;
+      res.expanded.push(`?${q}`);
+    } catch (err) {
+      // 检索引擎异常不炸主流程（RAG 是增强通道）
+      res.skipped.push({ path: `?${q}`, reason: `检索失败（${(err as Error).message}）` });
+    }
+  }
+
   while ((m = re.exec(question)) !== null) {
     const rel = m[1]!;
     if (seen.has(rel)) continue;
