@@ -1,5 +1,67 @@
 # CHANGELOG
 
+## v0.5.11（2026-09-16）—— 子生孙递归派生深化：预算继承 + 池化重档 + 派生池面板
+
+v0.5.6 的 agent_spawn 只有深度治理（ORG_SPAWN_MAX），**无预算语义**
+（子组织可无限烧 token）、**无池化登记**（相似任务不能复用、spawn 目录用完
+即弃）、**无 Web 观测面**（只能看运行卡 tool_call 通知）。本版补全三块：
+**双重治理**（深度帽 + 预算随深度指数衰减）、**池化重档**（相似 goal 零成本
+复用）、**🌳 派生池面板**（Web GUI 独立操作面板：树形视图 + 统计 + 展开
+详情）。测试 491/491 全绿（+7 例：spawn 预算/池化 4 例 + Web 端点/自洽/GUI 3 例）。
+
+### 预算继承（hsl/pool/tools.hsl tool_agent_spawn）
+
+- `ORG_SPAWN_BUDGET`（份数）：未设 = 100；`0` = 已耗尽（拒绝派生，明确
+  反馈「请在本层自行完成任务」）；`off` / `unlimited` = 治理关闭（逃生口，
+  与 ORG_SPAWN_MAX=0 语义对称）；
+- `ORG_SPAWN_DECAY`（衰减率 (0,1]，缺省 0.5）：**子预算 =
+  floor(父预算 × decay)** —— 预算随深度指数衰减（100→50→25→…→0），
+  无保底（floor 到 0 即耗尽）；默认深度帽 2 先到，用户调大 MAX 时预算
+  接得住（预算是第二道安全线）；
+- 旗标 `--spawn-budget N|off`（cli/org.ts cmdRun/cmdAsk 双入口）：深度
+  经旗标递归传递的既有模式同构（env 前缀会破坏 shell 白名单首词判定）；
+- **用量回填**：子组织 `metrics.json` 的 tokens_total / model_calls_total
+  与 run.json 的 elapsed_ms 回填到 agent_spawn 结果（scripted 车道是估算
+  口径、真实车道是 llm_stream_done 计量 —— 本层只搬运不重复计量）。
+
+### 池化重档（<ws>/spawn/pool.json）
+
+- 每次派生登记一条：`{id, goal, mode, depth, budget, workspace, out, ok,
+  usage, summary, spawned_at, finished_at, reuse_count}`（粗上限 200 条防膨胀）；
+- **复用判定**：派生前查池 —— 成功记录中 goal 相似度（中英混合分词 +
+  **双向词面重合 max**，长短表述不齐不漏）≥ `ORG_SPAWN_REUSE_FLOOR`
+  （缺省 0.6）→ 命中即复用：reuse_count 递增、结果标 `reused: true +
+  similarity + 零派生成本`；`args.reuse: false` 强制新派生；
+- **治理面降级不阻断执行面**：池读写失败（损坏/权限）→ 派生照常，
+  只是不留痕（登记是治理面，派生是执行面）；
+- 存量兼容：v0.5.6-v0.5.10 的旧派生目录无登记 —— /api/spawns 扫描
+  `spawn/*/out-spawn/run.json` 合成 legacy 记录（面板无盲区）。
+
+### Web GUI：🌳 派生池面板（web/entry.ts）
+
+- 顶栏新 rchip「🌳 派生」→ scrim+pane 对话框（与检索/音频面板同族交互，
+  Esc 栈式关闭）；
+- `GET /api/spawns`：三层数据源 —— ① 顶层池登记 ② 孤儿目录兜底合成
+  ③ **递归挂孙**（沿 record.workspace BFS 深入各子池，深度 ≤4 · 总量
+  ≤300 · 工作区越界守卫）→ 完整子生孙树形；
+- 面板要素：统计条（总派生/成功/失败/复用命中/tokens 合计）· 树形行
+  （depth 缩进 + 状态点 + goal + mode/depth/预算 ◈/复用 ♻ 徽标 + 相对
+  时间 + tokens）· 点击展开（summary 全文 + 产物/工作区路径复制）·
+  空态与底部语义注解（预算继承 + 池化复用口径一页可查）；
+- 运行卡增强（lib/runCards.ts）：agent_spawn 专属卡 —— 派生 🌳 调用卡
+  （goal + mode + reuse 开关）/ ♻ 池化复用结果卡（×N + 相似度）/ 预算
+  拒绝卡 / 完成卡（预算 + tokens）—— 三端（TUI/Web/chat）同源渲染。
+
+### 测试
+
+- tests/spawn.test.ts +4（B1 预算继承 e2e：缺省 100→子 50 + 池登记 +
+  usage 回填；B2 预算耗尽拒绝零派生；B3 同 goal 二连发 → 第二次复用
+  reuse_count=1；B4 reuse:false 强制新派生二目录二记录）；
+- tests/web.test.ts +3（/api/spawns 池登记+孤儿兜底+递归挂孙+统计；
+  空工作区不炸自洽；GUI 要素 + 内联脚本自洽）；
+- 既有 spawn e2e 适配：spawn/ 目录现在含 pool.json —— 子目录断言改
+  statSync 过滤（实现细节变更，无语义损失）。
+
 ## v0.5.10（2026-09-16）—— scripted 车道语义地板 + 跨车道救援
 
 QA 实测（agent-browser 驱动 Web GUI 团队模式）发现 B-19：发域外任务

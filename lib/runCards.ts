@@ -316,7 +316,39 @@ export function classifyRunEvent(ev:
         return { t: "drift", alerts: n ?? 0, detail };
       }
       // ---- v0.5.3：agent 工具环（观测面 notice 三色调）----
+      // v0.5.11：agent_spawn 专属卡（🌳）—— 派生是编排动作，比普通工具调用
+      // 更接近 lane_rescue 一级的一等公民事件；detail 形如
+      // `agent_spawn goal=… mode=run`（preview_args 的 k=v 拼接）
+      if (action === "tool_call" && detail.startsWith("agent_spawn")) {
+        // preview_args 是 k=v 空格拼接（goal 值可含空格）：goal 捕获到下一个
+        // 键值对为止（mode=/reuse=），无后续键则取尾
+        const goal = /goal=(.*?)(?=\s+(?:mode|reuse|expert)=|\s*$)/.exec(detail)?.[1] ?? "";
+        const mode = /mode=(\w+)/.exec(detail)?.[1] ?? "run";
+        const reuseOff = /reuse=false/.test(detail);
+        return {
+          t: "notice", tone: "info",
+          text: `🌳 派生子组织（${mode}）${goal ? " · " + goal : ""}${reuseOff ? " · 强制新派生（reuse=false）" : ""}`,
+        };
+      }
       if (action === "tool_call") return { t: "notice", tone: "info", text: `🛠 调用 ${detail}` };
+      // v0.5.11：agent_spawn 结果专属卡 —— 池化命中（♻ 复用）与预算耗尽拒绝
+      // 分开呈现（detail 来自 result_summary：reused ×N sim=… / budget=… tokens=…）
+      if (action === "tool_result" && detail.startsWith("agent_spawn")) {
+        if (detail.includes(" reused")) {
+          const n = /reused ×(\d+)/.exec(detail)?.[1] ?? "?";
+          const sim = /sim=([\d.]+)/.exec(detail)?.[1] ?? "?";
+          return { t: "notice", tone: "ok", text: `♻ 池化复用 ×${n}（相似度 ${sim} · 零派生成本）` };
+        }
+        if (detail.includes("error") && detail.includes("预算")) {
+          return { t: "notice", tone: "warn", text: `🌳 派生被拒 · ${detail.slice("agent_spawn error ".length)}` };
+        }
+        const bud = /budget=([\d/off]+)/.exec(detail)?.[1];
+        const tok = /tokens=(\d+)/.exec(detail)?.[1];
+        return {
+          t: "notice", tone: detail.includes(" ok") ? "ok" : "err",
+          text: `🌳 子组织完成${bud ? " · 预算 " + bud : ""}${tok ? " · " + tok + " tok" : ""}`,
+        };
+      }
       if (action === "tool_result") return { t: "notice", tone: detail.includes("ok") ? "ok" : "err", text: `🛠 结果 ${detail}` };
       if (action === "tool_denied") return { t: "notice", tone: "warn", text: `🛠 拒绝 ${detail}` };
       return { t: "other", name: "journal", action, detail };

@@ -1088,4 +1088,97 @@ describe("Web v0.5.9：音频工坊端点（audio-demo / audio .mid / --host）"
     expect(m).not.toBeNull();
     expect(() => new Function(m![1]!)).not.toThrow();
   });
+
+  // ---- v0.5.11：派生池（预算继承 + 池化重档的观测面） ----
+
+  test("GET /api/spawns：池登记 + 孤儿兜底 + 递归挂孙 + 统计", async () => {
+    // 造数据：① 顶层池一条记录（含 usage + reuse_count）② 该记录的子池挂一条孙
+    // ③ 一个无登记的孤儿目录（v0.5.6-v0.5.10 旧派生 → legacy 合成）
+    const spawnRoot = path.join(ws2, "spawn");
+    const childWs = path.join(spawnRoot, "m1-canon");
+    fs.mkdirSync(path.join(childWs, "out-spawn"), { recursive: true });
+    fs.writeFileSync(path.join(childWs, "out-spawn", "run.json"),
+      JSON.stringify({ ok: true, task: "写一首卡农", elapsed_ms: 900, ts: "2026-09-15T10:00:00Z" }));
+    // 孙池（子工作区自己的 spawn/pool.json —— 递归挂载源）
+    fs.mkdirSync(path.join(childWs, "spawn"), { recursive: true });
+    fs.writeFileSync(path.join(childWs, "spawn", "pool.json"), JSON.stringify({
+      version: 1,
+      records: [{
+        id: "m2-孙任务", goal: "孙辈任务：校验记录", mode: "ask", depth: 2, budget: 25,
+        workspace: path.join(childWs, "spawn", "m2-孙任务"), out: path.join(childWs, "spawn", "m2-孙任务", "out-spawn"),
+        ok: true, usage: { tokens: 120, model_calls: 1, elapsed_ms: 300 },
+        summary: "孙辈完成", reuse_count: 0,
+        spawned_at: "2026-09-15T10:01:00Z", finished_at: "2026-09-15T10:01:01Z",
+      }],
+    }));
+    // 顶层池
+    fs.writeFileSync(path.join(spawnRoot, "pool.json"), JSON.stringify({
+      version: 1,
+      records: [{
+        id: "m1-canon", goal: "写一首卡农", mode: "run", depth: 1, budget: 50,
+        workspace: childWs, out: path.join(childWs, "out-spawn"),
+        ok: true, usage: { tokens: 480, model_calls: 3, elapsed_ms: 1200 },
+        summary: "交付 3/3", reuse_count: 2,
+        spawned_at: "2026-09-15T10:00:00Z", finished_at: "2026-09-15T10:00:01Z",
+      }],
+    }));
+    // 孤儿目录（旧版派生，无池登记）
+    const orphan = path.join(spawnRoot, "old1-mission");
+    fs.mkdirSync(path.join(orphan, "out-spawn"), { recursive: true });
+    fs.writeFileSync(path.join(orphan, "out-spawn", "run.json"),
+      JSON.stringify({ ok: true, task: "旧版派生任务", ts: "2026-09-01T00:00:00Z" }));
+
+    const r = await fetch(`${base}/api/spawns`);
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as {
+      ok: boolean;
+      records: Array<{ id: string; legacy?: boolean; children?: Array<{ id: string }> }>;
+      stats: { total: number; ok: number; failed: number; reuse_hits: number; tokens_total: number };
+    };
+    expect(j.ok).toBe(true);
+    // 顶层两条：池登记 m1-canon + 孤儿合成 old1-mission（legacy）
+    expect(j.records.length).toBe(2);
+    const m1 = j.records.find((x) => x.id === "m1-canon");
+    const orphan1 = j.records.find((x) => x.id === "old1-mission");
+    expect(m1).toBeDefined();
+    expect(orphan1).toBeDefined();
+    expect(orphan1!.legacy).toBe(true);
+    // 递归挂孙：m1 的 children 含孙记录
+    expect(m1!.children?.length).toBe(1);
+    expect(m1!.children![0]!.id).toBe("m2-孙任务");
+    // 统计：3 条（1 池 + 1 孤儿 + 1 孙）全 ok，复用命中 2，tokens 480+120
+    expect(j.stats.total).toBe(3);
+    expect(j.stats.ok).toBe(3);
+    expect(j.stats.failed).toBe(0);
+    expect(j.stats.reuse_hits).toBe(2);
+    expect(j.stats.tokens_total).toBe(600);
+  });
+
+  test("GET /api/spawns：空工作区 → 空记录不炸（200 + stats 全零）", async () => {
+    const r = await fetch(`${base}/api/spawns?__=1`);
+    expect(r.status).toBe(200);
+    // web-e2e 工作区此时已有上一用例的池数据 —— 换断言：ok=true 且 stats 自洽
+    const j = (await r.json()) as { ok: boolean; records: unknown[]; stats: { total: number } };
+    expect(j.ok).toBe(true);
+    expect(Array.isArray(j.records)).toBe(true);
+    expect(j.stats.total).toBe(j.records.length + ((j.records as Array<{ children?: unknown[] }>)
+      .reduce((n, r2) => n + (Array.isArray(r2.children) ? r2.children.length : 0), 0)));
+  });
+
+  test("GUI 单页含派生池要素（🌳 面板 / 统计条 / 树行 / Esc 关闭）", async () => {
+    const html = await (await fetch(`${base}/`)).text();
+    for (const needle of [
+      'id="spawnBtn"', 'id="spawnPane"', 'id="spwStats"', 'id="spwBody"',
+      "/api/spawns", "function openSpawns(", "function closeSpawns(",
+      "function refreshSpawns(", "function spwRow(",
+      "预算继承", "池化复用", "reuse:false",
+      '{ pane: "spawnPane", close: closeSpawns }',
+    ]) {
+      expect(html).toContain(needle);
+    }
+    // 内联脚本自洽
+    const m = html.match(/<script>([\s\S]*?)<\/script>/);
+    expect(m).not.toBeNull();
+    expect(() => new Function(m![1]!)).not.toThrow();
+  });
 });

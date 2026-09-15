@@ -19,7 +19,9 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **v0.5.10 当前状态**：可运行实现，**484/484 机制级测试全绿**（27 文件 · 2096 expect）。本版落地**scripted 车道域外任务语义地板 + 跨车道救援**（B-19）：团队模式发域外任务（如「请创作一首古典风格的卡农」）不再套用公告流水线答非所问 —— 注册表专家命中即**跨车道转直连**（⇄ 卡片可观测，audio_compose 开箱即用，同一 run 交付 WAV+MIDI）；无命中则**零消耗诚实降级**（不跑流水线，标准产物 + 建议出口）。GUI 直连默认开工具环（v0.5.9 演示缺口补齐）。
+> **v0.5.11 当前状态**：可运行实现，**491/491 机制级测试全绿**（27 文件 · 2160 expect）。本版深化**子生孙递归派生**：**预算继承**（ORG_SPAWN_BUDGET 缺省 100 份 × ORG_SPAWN_DECAY 缺省 0.5 —— 子预算 = floor(父预算 × 衰减率) 随深度指数衰减；用量 tokens/model_calls 回填观测）· **池化重档**（<ws>/spawn/pool.json 登记每次派生，相似 goal 词面重合 ≥0.6 命中即零成本复用，reuse:false 强制新派生）· **Web 🌳 派生池面板**（树形视图 + 统计条 + 递归挂孙 + legacy 孤儿兜底 + 点击展开详情/复制路径）· agent_spawn 专属运行卡（🌳 调用 / ♻ 复用 / 预算拒绝三态）。
+
+> **v0.5.10 历史状态**：可运行实现，**484/484 机制级测试全绿**（27 文件 · 2096 expect）。本版落地**scripted 车道域外任务语义地板 + 跨车道救援**（B-19）：团队模式发域外任务（如「请创作一首古典风格的卡农」）不再套用公告流水线答非所问 —— 注册表专家命中即**跨车道转直连**（⇄ 卡片可观测，audio_compose 开箱即用，同一 run 交付 WAV+MIDI）；无命中则**零消耗诚实降级**（不跑流水线，标准产物 + 建议出口）。GUI 直连默认开工具环（v0.5.9 演示缺口补齐）。
 
 > **v0.5.9 历史状态**：可运行实现，**469/469 机制级测试全绿**（26 文件 · 2042 expect）。本版落地**音频工坊**：8 种乐器音色（谐波表+包络+颤音 FM）× 7 套和弦进行（柱式/琶音）× **MIDI 导出**（SMF 0 可入 DAW）—— 产物从单一正弦 WAV 升级为多乐器 WAV+MIDI 双格式；Web GUI 新增 🎵 音色试听面板（/api/audio-demo 服务端合成+缓存）、直连 t-bot 音频卡（B-18 补齐第三入口收尾钩子）、断连优雅降级（状态条+轮询降频）、Esc 统一关面板。
 
@@ -614,7 +616,7 @@ notice-parser⟩ 金丝雀发布是先把新版本……          （逐 token �
 - **消息级操作**：每轮「复制」+ 末轮「重发」（账本为事实源，重发 = 追加新轮次，不篡改历史）+ 代码块级 copy；hover 浮现不抢视觉；
 - **会话搜索 · 移动端抽屉 · 快捷键**：侧栏过滤框（id / 首问预览匹配）；≤720px 抽屉侧栏（菜单钮 + 遮罩）；`⌘K`/`Ctrl+K` 新会话 · `/` 聚焦输入 · `Esc` 停止；
 - **正常 Agent 功能面**：停止生成（`POST /api/abort` SIGKILL 子进程，该轮不落账本）· **排队轮预取消（v0.4.14）**（排队等待期 `Esc` 取消本轮：票据 id 寻址，不误伤运行中的前一轮；取消轮从不开跑、不落账本，流以 `error{aborted,queued}` 收尾）· 失败重试（错误块按钮，失败轮不落账本安全重发）· 会话重命名（行内编辑，`PATCH` mv 账本）· 会话删除（两步确认，`DELETE` 删账本文件）· 导出会话 Markdown · 模型切换（scripted/deepseek 分段控制）· 智能滚动（底部跟随 + 「回到最新」）· 空态终端 banner；
-- **只读端点**：`GET /api/status`（专家清单 + 会话上下文占用 + 服务级 model，与 `org status` 同数据源）· `GET /api/sessions?expert=X` · `GET /api/session/<E>/<S>`（逐轮 question/answer/tokens/ctx_tokens，账本健壮解析）；
+- **只读端点**：`GET /api/status`（专家清单 + 会话上下文占用 + 服务级 model，与 `org status` 同数据源）· `GET /api/sessions?expert=X` · `GET /api/session/<E>/<S>`（逐轮 question/answer/tokens/ctx_tokens，账本健壮解析）· **`GET /api/spawns`（v0.5.11 派生池：`<ws>/spawn/pool.json` 登记 + 孤儿目录 legacy 兜底 + 递归挂孙子池 → 完整子生孙树形 + 全树统计）**；
 - **工具库治理端点（v0.4.12）**：`POST /api/keep` / `POST /api/drop`（body `{expert}`）——与 CLI `org keep` / TUI `:keep` 同一代码路径（`setRetained`：翻转 retained + 双写注册表 + git「(user curation)」留痕）；专家卡 hover 浮现 ★/○ 切换钮，导入专家免切换，运行中禁用；
 - **交互式审批端点（v0.5.0）**：`GET /api/approvals`（待批准 + 长期放行集 + 已判定记录）· `POST /api/approvals`（body `{id, allow, always?}`；已判定重复决策 409 / 坏 id 400 / 不存在 404）——与 CLI `org approvals` 同一实现（`lib/approvals.ts`），审批请求由运行中的 run 落盘到 `<workspace>/runtime/approvals/`
 - **团队模式端点（v0.5.0）**：`POST /api/run-stream`（SSE 团队派单：`open → start → run → card* → done/error`，card 帧携带 `{ev, fact}` —— 分类在服务端做，浏览器只渲染）· `GET /api/runs`（运行产物列表，TUI 会话栏同源）· `GET /api/run?dir=`（只读回放，`SAFE_NAME` 守卫）· `GET /api/score`（评分卡）；`POST /api/abort` 对团队 run 走 `RunHandle.cancel`（SIGTERM）
@@ -1001,6 +1003,10 @@ bun cli/org.ts web --model deepseek                   # Web GUI（SSE delta 逐 
 | `ORG_WORKSPACE` | 覆盖默认工作区 |
 | `ORG_RUNTIME` | 单二进制运行时解包根（缺省 `~/.org`） |
 | `ORG_FORCE_INPROC=1` | 强制引擎走进程内车道（调试） |
+| `ORG_SPAWN_MAX` | agent_spawn 递归派生深度上限（缺省 2；0 = 全局关闭） |
+| `ORG_SPAWN_BUDGET` | 递归派生预算份数（缺省 100；0 = 已耗尽拒绝派生；off/unlimited = 关闭预算治理） |
+| `ORG_SPAWN_DECAY` | 预算衰减率（缺省 0.5，(0,1] —— 子预算 = floor(父预算 × 衰减率)，随深度指数衰减） |
+| `ORG_SPAWN_REUSE_FLOOR` | 池化复用相似度地板（缺省 0.6 —— goal 词面重合达标即零成本复用；`reuse:false` 单次绕过） |
 | `DHV_TS` | 覆盖内嵌工具链（指向 dhv-ts/src/main.ts） |
 
 ## 🗂️ 工作区布局
@@ -1027,6 +1033,9 @@ bun cli/org.ts web --model deepseek                   # Web GUI（SSE delta 逐 
 │   └── mint-out/ patch-out/ canary-*/ #   工厂 / 补丁 / 金丝雀运行产物
 ├── raw/                               # 任务原材料（notices.txt 等）
 ├── work/                              # 子任务交付物机械编接（parse-output.json）
+├── spawn/                             # v0.5.11 递归派生区（agent_spawn 工具）
+│   ├── pool.json                      #   派生池登记（goal/mode/depth/budget/ok/usage/reuse_count）
+│   └── <id>-<slug>/                   #   每次派生的子组织工作区（含自己的 spawn/ 子池）
 ├── out-<id>/                          # 每次运行产物（out-a/b/c · out-direct · out-handoff · out-ask …）
 │   ├── run.json                       #   运行结果（ok / verdict / model_calls…）
 │   ├── events.jsonl                   #   结构化事件（seq/ts/name/data）

@@ -21,11 +21,16 @@
 //   shell_run {cmd}                      命令执行（能力门 + --allow 白名单）
 //
 // v0.5.6 新增（Full 模式）：
-//   agent_spawn  {goal, mode?, expert?}  子生孙递归派生：派生一个子组织
-//           （org run 团队任务 / org ask 直连专家）。深度治理：
-//           ORG_SPAWN_DEPTH（当前深度，派生方注入）+ ORG_SPAWN_MAX
-//           （上限，缺省 2，0=关闭）—— 理论上子子孙孙无穷尽，但每层
-//           自主判断是否派生，深度帽是安全线。子进程继承全部车道环境。
+//   agent_spawn  {goal, mode?, expert?, reuse?}  子生孙递归派生：派生一个子
+//           组织（org run 团队任务 / org ask 直连专家）。双重治理：
+//           ① 深度：ORG_SPAWN_DEPTH（当前深度，派生方注入）+ ORG_SPAWN_MAX
+//           （上限，缺省 2，0=关闭）；② 预算（v0.5.11）：ORG_SPAWN_BUDGET
+//           份数（未设=100，0=耗尽，off=关闭治理）× ORG_SPAWN_DECAY 衰减率
+//           （缺省 0.5）—— 子预算 = floor(父预算 × decay)，随深度指数衰减。
+//           池化重档（v0.5.11）：<ws>/spawn/pool.json 登记每次派生；相似
+//           goal（词面重合 ≥ ORG_SPAWN_REUSE_FLOOR，缺省 0.6）命中即复用
+//           （reuse:false 强制新派生）。子进程继承全部车道环境；子组织
+//           metrics.json 的 tokens/model_calls 用量回填到结果（观测面）。
 //   audio_compose {name?, title?, tempo?, notes}  古典音乐作曲：写乐谱
 //           工件 <name>.notes.json，引擎收尾自动渲染同名 .wav
 //           （产物开袋即食：音频不是乐谱）。
@@ -84,7 +89,7 @@ export fn tools_prompt(mode: ToolMode) -> String {
         out.push_str("- fs_write {\"path\":\"...\",\"content\":\"...\"} — write a file (may require approval)\n");
         out.push_str("- fs_edit {\"path\":\"...\",\"old\":\"exact unique text\",\"new\":\"replacement\"} — precise edit (may require approval)\n");
         out.push_str("- shell_run {\"cmd\":\"git status\"} — run an allowlisted command (may require approval)\n");
-        out.push_str("- agent_spawn {\"goal\":\"...\",\"mode\":\"run\"|\"ask\",\"expert\":\"name\"} — spawn a sub-organization (team mission via org run, or direct expert via org ask). Depth-governed recursion: use it ONLY when the task genuinely needs multi-step decomposition or another expert's specialty; for trivial lookups use fs_read/fs_list first. The child inherits your model lane.\n");
+        out.push_str("- agent_spawn {\"goal\":\"...\",\"mode\":\"run\"|\"ask\",\"expert\":\"name\",\"reuse\":false?} — spawn a sub-organization (team mission via org run, or direct expert via org ask). Depth+budget governed recursion (child budget halves each level); similar goals hit the spawn pool and are REUSED at zero cost (pass reuse:false to force a fresh spawn). Use it ONLY when the task genuinely needs multi-step decomposition or another expert's specialty; for trivial lookups use fs_read/fs_list first. The child inherits your model lane.\n");
         out.push_str("- audio_compose {\"timbre\":\"strings\",\"chords\":\"D3:canon:arp\",\"tempo\":90} — compose from chord progression + timbre (8 instruments: piano/strings/flute/organ/harpsichord/music-box/guitar/bell; 7 progressions: canon/pop/epic/circle/jazz/blues/romance); or explicit notes [{\"freq\":261.63,\"start_beat\":0,\"beats\":1}]. Engine renders playable .wav + .mid alongside your reply (deliverable = audio, not sheet).\n");
     }
     out.push_str("After a tool call you will receive a <tool_result> message; use it and continue. When you have the final answer, reply WITHOUT any <tool> tags.\n");
@@ -476,6 +481,8 @@ async fn tool_agent_spawn(args: String) -> String {
             const mode = String(a.mode || "run") === "ask" ? "ask" : "run";
             const expert = String(a.expert || "");
             if (mode === "ask" && !expert) return JSON.stringify({ tool: "agent_spawn", ok: false, error: "ask 模式需要 args.expert（直连专家名）" });
+            // v0.5.11 池化复用开关：reuse:false 强制新派生（绕过池命中）
+            const forceFresh = a.reuse === false;
 
             // ---- 深度治理（先于一切执行：拒绝即终态，不烧预算） ----
             const depth = Number($host.env.get("ORG_SPAWN_DEPTH") || "0") || 0;
@@ -491,6 +498,26 @@ async fn tool_agent_spawn(args: String) -> String {
                 });
             }
 
+            // ---- v0.5.11 预算继承（深度帽之后的第二道安全线） ----
+            // ORG_SPAWN_BUDGET（份数）：未设=100；"0"=已耗尽（拒绝派生）；
+            // "off"/"unlimited"/"-1"=治理关闭（逃生口，语义与 MAX=0 对称）。
+            // ORG_SPAWN_DECAY（衰减率 (0,1]，缺省 0.5）：
+            //   子预算 = floor(父预算 × decay) —— 预算随深度指数衰减，无保底
+            //   （floor 到 0 即耗尽），用户调大 ORG_SPAWN_MAX 时预算接得住。
+            const budgetRaw = String($host.env.get("ORG_SPAWN_BUDGET") || "").trim().toLowerCase();
+            const budgetOff = budgetRaw === "off" || budgetRaw === "unlimited" || budgetRaw === "-1";
+            let budget = budgetOff ? -1 : (budgetRaw === "" ? 100 : Math.floor(Number(budgetRaw)));
+            if (!budgetOff && !Number.isFinite(budget)) budget = 100;
+            const decayRaw = Number($host.env.get("ORG_SPAWN_DECAY"));
+            const decay = Math.min(1, Math.max(0.01, Number.isFinite(decayRaw) && decayRaw > 0 ? decayRaw : 0.5));
+            if (!budgetOff && budget < 1) {
+                return JSON.stringify({
+                    tool: "agent_spawn", ok: false, denied: true,
+                    error: "派生预算已耗尽（本层剩余 " + budget + " 份）。请在本层自行完成任务；确需派生请让用户调大 ORG_SPAWN_BUDGET（off=关闭预算治理）。",
+                });
+            }
+            const childBudget = budgetOff ? -1 : Math.floor(budget * decay);
+
             // ---- org 根目录（DHV_TS = <root>/toolchain/dhv-ts/src/main.ts） ----
             const norm = (s) => String(s || "").replace(/\\/g, "/");
             const dhv = norm($host.env.get("DHV_TS"));
@@ -500,15 +527,78 @@ async fn tool_agent_spawn(args: String) -> String {
             const lane = String($host.config.model || "scripted");
             const fixture = norm(String($host.env.get("ORG_FIXTURE") || ""));
 
+            // ---- v0.5.11 池化重档：同 goal 复用（先查池，零派生成本） ----
+            // 池文件 <ws>/spawn/pool.json：每次派生登记一条；相似 goal 命中即
+            // 复用（reuse_count 递增）。池读写失败降级 —— 登记是治理面，派生
+            // 是执行面，治理面故障不能阻断执行面（派生照常，只是不留痕）。
+            const POOL_PATH = "spawn/pool.json"; // 相对 ws（jail 内）
+            const REUSE_FLOOR = Math.max(0.3, Math.min(0.95, Number($host.env.get("ORG_SPAWN_REUSE_FLOOR")) || 0.6));
+            const loadPool = () => {
+                try {
+                    const o = JSON.parse($host.fs.read(POOL_PATH));
+                    if (o && Array.isArray(o.records)) return o;
+                } catch (e) { /* 池不存在/损坏 → 空池 */ }
+                return { version: 1, records: [] };
+            };
+            // 中英混合分词（与 semantic_search 同构：西文词元 + CJK bigram）
+            const tokenize = (text) => {
+                const tokens = [];
+                const lower = String(text).toLowerCase();
+                for (const m of lower.match(/[a-z0-9_]+/g) || []) tokens.push(m);
+                for (const seg of lower.match(/[\u3400-\u9fff]+/g) || []) {
+                    if (seg.length === 1) { tokens.push(seg); continue; }
+                    for (let i = 0; i < seg.length - 1; i++) tokens.push(seg.slice(i, i + 2));
+                    tokens.push(seg.slice(seg.length - 1));
+                }
+                return tokens;
+            };
+            // 双向词面重合（max 覆盖率）：goal 表述长短不齐时单向覆盖会漏
+            // （记录「做X」vs 任务「请帮我做X」：正向 1.0 反向 0.6）
+            const overlap = (x, y) => {
+                const tx = [...new Set(tokenize(x))], sy = new Set(tokenize(y));
+                if (tx.length === 0 || sy.size === 0) return 0;
+                let hx = 0; for (const t of tx) if (sy.has(t)) hx++;
+                const ty = [...new Set(tokenize(y))], sx = new Set(tokenize(x));
+                if (ty.length === 0) return 0;
+                let hy = 0; for (const t of ty) if (sx.has(t)) hy++;
+                return Math.max(hx / tx.length, hy / ty.length);
+            };
+            if (!forceFresh) {
+                const pool = loadPool();
+                let best = null, bestScore = 0;
+                for (const r of pool.records) {
+                    if (!r || r.ok !== true) continue; // 只复用成功记录
+                    const s = overlap(goal, String(r.goal || ""));
+                    if (s >= REUSE_FLOOR && s > bestScore) { best = r; bestScore = s; }
+                }
+                if (best) {
+                    best.reuse_count = (Number(best.reuse_count) || 0) + 1;
+                    best.reused_at = new Date().toISOString();
+                    try { $host.fs.write(POOL_PATH, JSON.stringify(pool, null, 2)); } catch (e) { /* 命中计数失败：本次仍复用 */ }
+                    return JSON.stringify({
+                        tool: "agent_spawn", ok: true, reused: true, reuse_of: best.id,
+                        similarity: Math.round(bestScore * 100) / 100,
+                        goal: best.goal, mode: best.mode, depth: best.depth,
+                        budget: best.budget,
+                        workspace: best.workspace, out: best.out,
+                        reuse_count: best.reuse_count,
+                        summary: String(best.summary || "").slice(0, 2048),
+                        note: "池化命中：相似 goal 的子组织已在池（零派生成本）。args.reuse=false 可强制新派生。",
+                    });
+                }
+            }
+
             // ---- 子工作区与产物目录 ----
             const slug = goal.slice(0, 24).replace(/[^A-Za-z0-9\u4e00-\u9fff]+/g, "-").replace(/^-+|-+$/g, "") || "mission";
             const childWs = ws + "/spawn/" + Date.now().toString(36) + "-" + slug;
             const outDir = childWs + "/out-spawn";
+            const spawnedAt = new Date().toISOString();
 
             // ---- 命令组装（sh 单引号转义：goal 来自模型，不得破坏命令边界；
-            // 深度经 --spawn-depth 旗标传递 —— env 前缀会破坏 shell 白名单
-            // 首词判定，CLI 旗标是白名单友好的递归通道） ----
+            // 深度/预算经 --spawn-depth/--spawn-budget 旗标传递 —— env 前缀会
+            // 破坏 shell 白名单首词判定，CLI 旗标是白名单友好的递归通道） ----
             const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+            const budgetFlag = budgetOff ? "off" : String(childBudget); // -1 → off（子进程侧同语义）
             let cmd;
             if (mode === "ask") {
                 cmd = "bun " + q(root + "/cli/org.ts")
@@ -516,25 +606,61 @@ async fn tool_agent_spawn(args: String) -> String {
                     + " --workspace " + q(childWs) + " --model " + q(lane)
                     + (fixture ? " --fixture " + q(fixture) : "")
                     + " --out " + q(outDir)
-                    + " --spawn-depth " + childDepth;
+                    + " --spawn-depth " + childDepth
+                    + " --spawn-budget " + budgetFlag;
             } else {
                 cmd = "bun " + q(root + "/cli/org.ts")
                     + " run --task " + q(goal)
                     + " --workspace " + q(childWs) + " --model " + q(lane)
                     + (fixture ? " --fixture " + q(fixture) : "")
                     + " --out " + q(outDir)
-                    + " --spawn-depth " + childDepth;
+                    + " --spawn-depth " + childDepth
+                    + " --spawn-budget " + budgetFlag;
             }
 
             const r = await $host.shell.run(cmd, { timeoutMs: 180000 });
             const out = String(r.stdout || "");
             // 子运行摘要（交付物行 + 验收行；观测有界）
             const lines = out.split("\n").filter((l) => /task#|accepted|交付物|✓ harness|♪/.test(l)).slice(-12);
+            const summary = lines.join("\n").slice(0, 4096);
+
+            // ---- v0.5.11 用量回填：子组织 metrics.json / run.json 的真实开销 ----
+            // （scripted 车道是估算口径 tokens_total；真实车道是 llm_stream_done
+            // 计量 —— 都落 metrics.json，本层只做搬运，不重复计量）
+            let usage = null;
+            try {
+                const m = JSON.parse($host.fs.read(outDir + "/metrics.json"));
+                let elapsed = 0;
+                try {
+                    const j = JSON.parse($host.fs.read(outDir + "/run.json"));
+                    elapsed = Number(j.elapsed_ms) || 0;
+                } catch (e2) { /* run.json 缺席：elapsed 留 0 */ }
+                usage = { tokens: Number(m.tokens_total) || 0, model_calls: Number(m.model_calls_total) || 0, elapsed_ms: elapsed };
+            } catch (e) { /* 产物缺席：usage 留空（观测面降级，不影响派生语义） */ }
+
+            // ---- v0.5.11 池化登记（治理面：失败降级不阻断 —— 派生已完成不回滚） ----
+            const id = childWs.split("/").pop();
+            try {
+                const pool = loadPool();
+                pool.version = 1;
+                pool.records.push({
+                    id: id, goal: goal, mode: mode, depth: childDepth, budget: budgetOff ? "off" : childBudget,
+                    workspace: childWs, out: outDir,
+                    ok: r.ok === true, usage: usage,
+                    summary: summary.slice(0, 2048),
+                    spawned_at: spawnedAt, finished_at: new Date().toISOString(),
+                    reuse_count: 0,
+                });
+                if (pool.records.length > 200) pool.records = pool.records.slice(-200); // 粗上限防膨胀
+                $host.fs.write(POOL_PATH, JSON.stringify(pool, null, 2));
+            } catch (e) { /* 登记失败：留痕缺失，不回滚派生 */ }
+
             return JSON.stringify({
                 tool: "agent_spawn", ok: r.ok, code: r.code,
                 depth: childDepth, max: maxD, mode: mode,
+                budget: budgetOff ? "off" : budget, child_budget: budgetOff ? "off" : childBudget,
                 workspace: childWs, out: outDir,
-                summary: lines.join("\n").slice(0, 4096),
+                usage: usage, summary: summary,
                 stdout_tail: out.slice(-2048),
                 stderr: String(r.stderr || "").slice(0, 1024),
             });
@@ -723,7 +849,13 @@ fn result_summary(result: String) -> String {
             if (o.ok === true) {
                 const size = o.content != null ? String(o.content).length : o.entries != null ? String(o.entries).length : o.files != null ? String(o.files).length : 0;
                 // v0.5.6：agent_spawn / audio_compose 的观测摘要（深度/音符数等结构化字段）
-                if (tool === "agent_spawn") return tool + " ok depth=" + String(o.depth ?? "?") + " ws=" + String((o.workspace || "?").split("/").pop());
+                // v0.5.11：agent_spawn 加预算/复用/用量（池化命中 reused×N；新派生 budget 与 usage tokens）
+                if (tool === "agent_spawn") {
+                    const bud = o.budget !== undefined ? " budget=" + String(o.budget) : "";
+                    const tok = o.usage && o.usage.tokens ? " tokens=" + String(o.usage.tokens) : "";
+                    if (o.reused) return tool + " reused ×" + String(o.reuse_count ?? "?") + " sim=" + String(o.similarity ?? "?") + bud + " ws=" + String((o.workspace || "?").split("/").pop());
+                    return tool + " ok depth=" + String(o.depth ?? "?") + bud + tok + " ws=" + String((o.workspace || "?").split("/").pop());
+                }
                 if (tool === "audio_compose") return tool + " ok notes=" + String(o.notes ?? "?") + " wav=" + String(o.wav ?? "?");
                 // v0.5.8：语义检索的观测摘要（hits 数 + top-1 路径 —— tests/
                 // search.test.ts 以此对拍 HSL 版与 lib 版的排序一致性）

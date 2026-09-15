@@ -1092,6 +1092,75 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
             headers: { "Content-Type": "audio/wav", "Cache-Control": "no-store" },
           });
         }
+        if (route === "GET /api/spawns") {
+          // v0.5.11：派生池（agent_spawn 池化重档的观测面）。
+          // 数据源三层：① <ws>/spawn/pool.json 登记（v0.5.11 起每次派生回写）；
+          // ② 孤儿目录兜底（v0.5.6-v0.5.10 的旧派生无登记 —— 扫描
+          //    spawn/*/out-spawn/run.json 合成 legacy 记录，面板不出现盲区）；
+          // ③ 递归挂孙：沿 record.workspace 深入各子池（BFS，深度 ≤4 ·
+          //    总量 ≤300），子生孙的完整树形。
+          const rws = readWorkspaceOf(ws);
+          const rwsAbs = path.resolve(rws);
+          type SpawnRec = Record<string, unknown> & { id?: string; workspace?: string; children?: SpawnRec[] };
+          const readPool = (wsDir: string): SpawnRec[] => {
+            try {
+              const pool = JSON.parse(fs.readFileSync(path.join(wsDir, "spawn", "pool.json"), "utf-8")) as { records?: unknown };
+              if (Array.isArray(pool.records)) {
+                return pool.records.filter((r): r is SpawnRec => !!r && typeof r === "object");
+              }
+            } catch { /* 池不存在/损坏 → 空 */ }
+            return [];
+          };
+          const records: SpawnRec[] = readPool(rws);
+          // 孤儿兜底：池里没有的 spawn 目录（旧版本派生）合成 legacy 记录
+          const seen = new Set(records.map((r) => String(r.id ?? "")));
+          const spawnRoot = path.join(rws, "spawn");
+          try {
+            for (const e of fs.readdirSync(spawnRoot, { withFileTypes: true })) {
+              if (!e.isDirectory()) continue;
+              const id = e.name;
+              if (seen.has(id)) continue;
+              try {
+                const j = JSON.parse(fs.readFileSync(path.join(spawnRoot, id, "out-spawn", "run.json"), "utf-8")) as {
+                  ok?: boolean; task?: string; elapsed_ms?: number; ts?: string;
+                };
+                records.push({
+                  id, goal: j.task ?? id, mode: "run", depth: 1, budget: "?",
+                  workspace: path.join(spawnRoot, id), out: path.join(spawnRoot, id, "out-spawn"),
+                  ok: j.ok === true, usage: null, summary: "", legacy: true,
+                  spawned_at: j.ts ?? "", finished_at: j.ts ?? "", reuse_count: 0,
+                });
+              } catch { /* 无 run.json 的半成品目录：跳过（可能是进行中的派生） */ }
+            }
+          } catch { /* spawn 目录不存在 → 空 */ }
+          // 递归挂孙（工作区越界守卫：子池路径必须在本 ws 之下）
+          const queue: SpawnRec[] = [...records];
+          let nodeBudget = 300;
+          while (queue.length > 0 && nodeBudget > 0) {
+            const r = queue.shift()!;
+            const wsDir = String(r.workspace ?? "");
+            if (!wsDir || !path.resolve(wsDir).startsWith(rwsAbs + path.sep)) continue;
+            const kids = readPool(wsDir);
+            if (kids.length > 0) r.children = kids;
+            nodeBudget -= kids.length;
+            queue.push(...kids);
+          }
+          // 统计（全树递归）
+          let okN = 0, failN = 0, reuseHits = 0, tokens = 0;
+          const walk = (arr: SpawnRec[]): void => {
+            for (const r of arr) {
+              if (r.ok === true) okN++; else failN++;
+              reuseHits += Math.max(0, Number(r.reuse_count) || 0);
+              tokens += Number((r.usage as { tokens?: number } | null)?.tokens) || 0;
+              if (Array.isArray(r.children)) walk(r.children);
+            }
+          };
+          walk(records);
+          return json({
+            ok: true, workspace: rws, records,
+            stats: { total: okN + failN, ok: okN, failed: failN, reuse_hits: reuseHits, tokens_total: tokens },
+          });
+        }
         if (route === "GET /api/run") {
           const name = url.searchParams.get("dir") ?? "";
           // run 目录名形如 out-a / out-20260912-101500；SAFE_NAME 覆盖（含 - 与数字）
@@ -2154,6 +2223,60 @@ function renderIndexHtml(): string {
   .audnote { padding: 8px 14px; border-top: 1px solid var(--border);
         font: 10px/1.7 var(--mono); color: var(--dim); }
 
+  /* v0.5.11：派生池面板（预算继承 + 池化重档的观测面 —— 树形 + 连接线） */
+  #spawnPane { display: none; position: fixed; top: 8vh; left: 50%; transform: translateX(-50%);
+        width: min(780px, 94vw); max-height: 82vh; z-index: 40;
+        background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+        box-shadow: 0 18px 60px rgba(0,0,0,.45); flex-direction: column; }
+  #spawnPane.on { display: flex; }
+  #spawnPane .schhead { padding: 12px 14px; display: flex; align-items: center;
+        border-bottom: 1px solid var(--border); }
+  #spawnPane .schhead .tt { font: 600 13px/1.4 var(--mono); color: var(--fg); }
+  .spwstats { flex: none; display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px;
+        border-bottom: 1px solid var(--border); }
+  .spwstats span { font: 10px/1.6 var(--mono); color: var(--muted);
+        padding: 2px 10px; border: 1px solid var(--border); border-radius: 4px; }
+  .spwstats b { color: var(--greenb); font-weight: 600; }
+  .spwstats span.warnstat b { color: #f59e0b; }
+  .spwbody { flex: 1; overflow-y: auto; padding: 12px 14px; }
+  .spwempty { padding: 28px 14px; text-align: center; font: 11px/1.8 var(--mono); color: var(--dim); }
+  /* 树行：depth 缩进 + 左侧连接线（::before 竖线 + ::after 肘弯） */
+  .spwrow { position: relative; border: 1px solid var(--border); border-radius: 7px;
+        margin: 0 0 6px calc(var(--ind, 0) * 22px); padding: 8px 11px;
+        cursor: pointer; transition: border-color .12s, background .12s; background: var(--panel); }
+  .spwrow:hover { border-color: var(--muted); background: rgba(255,255,255,.025); }
+  .spwrow.open { border-color: var(--greenb); background: rgba(16,185,129,.05); }
+  .spwrow .l1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .spwrow .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+  .spwrow .dot.ok { background: var(--greenb); box-shadow: 0 0 6px rgba(16,185,129,.45); }
+  .spwrow .dot.fail { background: #ef4444; }
+  .spwrow .dot.legacy { background: var(--muted); }
+  .spwrow .gl { flex: 1 1 auto; min-width: 0; font: 600 11.5px/1.5 var(--mono);
+        color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .spwrow .bds { flex: none; display: flex; gap: 4px; flex-wrap: wrap; }
+  .spwrow .bd { font: 9px/1.6 var(--mono); padding: 0 6px; border-radius: 3px;
+        border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+  .spwrow .bd.run { color: #38bdf8; border-color: rgba(56,189,248,.35); }
+  .spwrow .bd.ask { color: #c084fc; border-color: rgba(192,132,252,.35); }
+  .spwrow .bd.bud { color: #fbbf24; border-color: rgba(251,191,36,.3); }
+  .spwrow .bd.reuse { color: var(--greenb); border-color: rgba(16,185,129,.35); }
+  .spwrow .bd.legacy { color: var(--dim); }
+  .spwrow .l2 { margin-top: 3px; font: 10px/1.6 var(--mono); color: var(--dim);
+        display: flex; gap: 10px; flex-wrap: wrap; }
+  .spwrow .l2 .tm { color: var(--dim); }
+  .spwrow .l2 .tk { color: var(--muted); }
+  /* 展开区：摘要 + 路径 + 用量 */
+  .spwdetail { margin-top: 7px; border-top: 1px dashed var(--border); padding-top: 7px; }
+  .spwdetail .sm { font: 10px/1.7 var(--mono); color: var(--muted); white-space: pre-wrap;
+        word-break: break-word; max-height: 180px; overflow-y: auto; }
+  .spwdetail .pth { margin-top: 5px; font: 10px/1.6 var(--mono); color: var(--dim);
+        word-break: break-all; }
+  .spwdetail .pth b { color: var(--greenb); cursor: pointer; font-weight: 600; }
+  .spwdetail .pth b:hover { text-decoration: underline; }
+  .spwfoot { flex: none; padding: 8px 14px; border-top: 1px solid var(--border);
+        font: 10px/1.7 var(--mono); color: var(--dim); }
+  .spwfoot b { color: var(--muted); font-weight: 600; }
+
   /* 移动端：侧栏改抽屉（≤720px，issue #13 —— 不再 display:none 直接消失） */
   #backdrop { display: none; position: fixed; inset: 34px 0 0 0;
            background: rgba(0,0,0,.5); z-index: 25; }
@@ -2203,6 +2326,9 @@ function renderIndexHtml(): string {
   </button>
   <button id="timbreBtn" class="rchip" type="button" title="音频工坊（v0.5.9）— 8 种乐器音色试听 · 7 套和弦进行 · 柱式/琶音；派单作曲任务时在问题里写明音色即可">
     <span class="rc-label">🎵 音色</span>
+  </button>
+  <button id="spawnBtn" class="rchip" type="button" title="派生池（v0.5.11）— 子生孙递归派生登记 · 预算继承（随深度衰减）· 池化复用（相似 goal 零成本）">
+    <span class="rc-label">🌳 派生</span>
   </button>
   <span class="tstats" id="topStats"></span>
 </header>
@@ -2270,6 +2396,18 @@ function renderIndexHtml(): string {
     <button id="audStyle" type="button" title="柱式和弦与琶音滚动切换">琶音</button>
   </div>
   <div class="audnote">作曲任务用法：团队/直连派单时在问题里写明音色与进行，如「用弦乐音色写一段卡农进行」或直连 composer/audio_compose 工具（timbre + chords 参数）。产物 = .wav（开袋即食）+ .mid（可导入 DAW/打谱软件）。</div>
+</div>
+<div id="spawnScrim" aria-hidden="true"></div>
+<div id="spawnPane" role="dialog" aria-modal="true" aria-labelledby="spwTitle">
+  <div class="schhead">
+    <div class="tt" id="spwTitle">🌳 派生池 — 子生孙递归派生登记</div>
+    <button class="schclose" type="button" onclick="closeSpawns()" title="关闭（Esc）" aria-label="关闭派生池面板">✕</button>
+  </div>
+  <div class="spwstats" id="spwStats"></div>
+  <div class="spwbody" id="spwBody">
+    <div class="spwempty">尚无派生记录 —— 直连专家经 agent_spawn 工具派生子组织（团队任务 run / 直连 ask），相似 goal 自动池化复用；每次派生登记在此（预算 / 用量 / 复用计数）。</div>
+  </div>
+  <div class="spwfoot"><b>预算继承</b>：ORG_SPAWN_BUDGET（缺省 100 份）× ORG_SPAWN_DECAY（缺省 0.5）→ 子预算 = floor(父预算 × 衰减率)，随深度指数衰减；深度帽 ORG_SPAWN_MAX（缺省 2）仍是最外层安全线。 <b>池化复用</b>：相似 goal（词面重合 ≥0.6）命中即零成本复用，reuse:false 强制新派生。旧版本派生自动兼容显示（legacy）。</div>
 </div>
 <div class="app">
   <aside>
@@ -3610,6 +3748,107 @@ document.getElementById("audioScrim").onclick = closeTimbre;
   if (progSel) progSel.onchange = function () { stopTimbreDemo(); };
 })();
 
+// ---- 派生池面板（v0.5.11：预算继承 + 池化重档的观测面） ----
+var spwExpanded = {}; // id → true（展开态，刷新时保留）
+function openSpawns() {
+  document.getElementById("spawnPane").classList.add("on");
+  document.getElementById("spawnScrim").classList.add("on");
+  refreshSpawns();
+}
+function closeSpawns() {
+  document.getElementById("spawnPane").classList.remove("on");
+  document.getElementById("spawnScrim").classList.remove("on");
+}
+function spwAgo(iso) {
+  var t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "";
+  var s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 60) return Math.floor(s) + "s 前";
+  if (s < 3600) return Math.floor(s / 60) + "m 前";
+  if (s < 86400) return Math.floor(s / 3600) + "h 前";
+  return Math.floor(s / 86400) + "d 前";
+}
+function spwRow(r, depth) {
+  var dot = r.legacy ? "legacy" : (r.ok ? "ok" : "fail");
+  var bds = '';
+  bds += '<span class="bd ' + esc(String(r.mode || "run")) + '">' + esc(String(r.mode || "run")) + '</span>';
+  bds += '<span class="bd">d' + esc(String(r.depth ?? "?")) + '</span>';
+  if (r.budget !== undefined && r.budget !== null) bds += '<span class="bd bud">◈ ' + esc(String(r.budget)) + '</span>';
+  if (Number(r.reuse_count) > 0) bds += '<span class="bd reuse">♻ ×' + esc(String(r.reuse_count)) + '</span>';
+  if (r.legacy) bds += '<span class="bd legacy">legacy</span>';
+  var usage = r.usage;
+  var l2 = '<div class="l2">' +
+    '<span class="tm">' + esc(spwAgo(String(r.finished_at || r.spawned_at || ""))) + '</span>' +
+    (usage && usage.tokens ? '<span class="tk">' + esc(String(usage.tokens)) + ' tok · ' + esc(String(usage.model_calls || 0)) + ' calls' + (usage.elapsed_ms ? ' · ' + (usage.elapsed_ms / 1000).toFixed(1) + 's' : '') + '</span>' : '') +
+    '</div>';
+  var open = !!spwExpanded[String(r.id)];
+  var h = '<div class="spwrow' + (open ? " open" : "") + '" data-spw="' + esc(String(r.id)) + '" style="--ind:' + depth + '">';
+  h += '<div class="l1"><span class="dot ' + dot + '" aria-hidden="true"></span>' +
+       '<span class="gl" title="' + esc(String(r.goal || "")) + '">' + esc(String(r.goal || r.id)) + '</span>' +
+       '<span class="bds">' + bds + '</span></div>' + l2;
+  if (open) {
+    h += '<div class="spwdetail">';
+    h += '<div class="sm">' + (String(r.summary || "").trim() ? esc(String(r.summary)) : '（无摘要 —— 池化命中或旧版派生）') + '</div>';
+    if (r.out) h += '<div class="pth">产物 <b data-out="' + esc(String(r.out)) + '">复制路径</b> ' + esc(String(r.out)) + '</div>';
+    if (r.workspace) h += '<div class="pth">工作区 <b data-ws="' + esc(String(r.workspace)) + '">复制路径</b> ' + esc(String(r.workspace)) + '</div>';
+    h += '</div>';
+  }
+  h += '</div>';
+  var kids = Array.isArray(r.children) ? r.children : [];
+  for (var i = 0; i < kids.length; i++) h += spwRow(kids[i], depth + 1);
+  return h;
+}
+function refreshSpawns() {
+  fetch("/api/spawns").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j || j.ok !== true) return;
+    var st = j.stats || {};
+    var sh = document.getElementById("spwStats");
+    if (sh) sh.innerHTML =
+      '<span>总派生 <b>' + esc(String(st.total ?? 0)) + '</b></span>' +
+      '<span>成功 <b>' + esc(String(st.ok ?? 0)) + '</b></span>' +
+      '<span class="warnstat">失败 <b>' + esc(String(st.failed ?? 0)) + '</b></span>' +
+      '<span>复用命中 <b>' + esc(String(st.reuse_hits ?? 0)) + '</b></span>' +
+      '<span>tokens 合计 <b>' + esc(String(st.tokens_total ?? 0)) + '</b></span>';
+    var body = document.getElementById("spwBody");
+    if (!body) return;
+    var recs = Array.isArray(j.records) ? j.records : [];
+    if (recs.length === 0) {
+      body.innerHTML = '<div class="spwempty">尚无派生记录 —— 直连专家经 agent_spawn 工具派生子组织（团队任务 run / 直连 ask），相似 goal 自动池化复用；每次派生登记在此（预算 / 用量 / 复用计数）。</div>';
+      return;
+    }
+    var h = "";
+    for (var i = 0; i < recs.length; i++) h += spwRow(recs[i], 0);
+    body.innerHTML = h;
+    // 交互：点击行展开/收起；复制路径按钮
+    Array.prototype.forEach.call(body.querySelectorAll(".spwrow"), function (row) {
+      row.onclick = function (ev) {
+        if (ev.target && (ev.target.hasAttribute("data-out") || ev.target.hasAttribute("data-ws"))) return;
+        var id = row.getAttribute("data-spw");
+        spwExpanded[id] = !spwExpanded[id];
+        refreshSpawns();
+      };
+    });
+    Array.prototype.forEach.call(body.querySelectorAll("[data-out]"), function (b) {
+      b.onclick = function (ev) {
+        ev.stopPropagation();
+        copyText(b.getAttribute("data-out"));
+        flashHint("产物路径已复制");
+      };
+    });
+    Array.prototype.forEach.call(body.querySelectorAll("[data-ws]"), function (b) {
+      b.onclick = function (ev) {
+        ev.stopPropagation();
+        copyText(b.getAttribute("data-ws"));
+        flashHint("工作区路径已复制");
+      };
+    });
+  }).catch(function () {
+    flashHint("派生池加载失败");
+  });
+}
+document.getElementById("spawnBtn").onclick = openSpawns;
+document.getElementById("spawnScrim").onclick = closeSpawns;
+
 // ---- Esc 关闭当前面板（v0.5.9：所有 dialog/scrim 类面板统一口径） ----
 // 顺序：最后打开的先关（栈式）。输入框内 Esc 已有既有语义（停止运行）的
 // 不受影响 —— 这里只处理「有面板打开」的情形。
@@ -3618,6 +3857,7 @@ document.addEventListener("keydown", function (ev) {
   var panes = [
     { pane: "searchPane", close: closeSearch },
     { pane: "audioPane", close: closeTimbre },
+    { pane: "spawnPane", close: closeSpawns },
     { pane: "tasksPane", close: closeTasks },
     { pane: "schedPane", close: closeSched },
     { pane: "notifyPane", close: closeNotify },

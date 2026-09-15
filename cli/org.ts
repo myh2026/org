@@ -124,6 +124,7 @@ interface Args {
   toVersion: string;      // org revert --to <x.y.z>
   approval: boolean;      // org run --approval（开交互式审批队列）
   spawnDepth: number;     // v0.5.6：递归派生深度（agent_spawn 工具注入；内部旗标）
+  spawnBudget: number;    // v0.5.11：递归派生预算（--spawn-budget N|off；NaN=未设不注入；内部旗标）
   k: number;              // v0.5.8：org search --k（top-N 命中数）
   rest: string[];
 }
@@ -156,6 +157,7 @@ function parseArgs(argv: string[]): Args {
     toVersion: "",
     approval: false,
     spawnDepth: 0,
+    spawnBudget: Number.NaN,
     k: 5,
     rest: [],
   };
@@ -176,6 +178,16 @@ function parseArgs(argv: string[]): Args {
     else if (v === "--to") a.toVersion = argv[++i] ?? "";
     else if (v === "--approval") a.approval = true;
     else if (v === "--spawn-depth") a.spawnDepth = Math.max(0, Number(argv[++i] ?? "0") || 0);
+    else if (v === "--spawn-budget") {
+      // v0.5.11：预算旗标（agent_spawn 工具链）：N 份 | off/unlimited（关闭治理）。
+      // 非法值 → NaN（不注入，子进程缺省 100）。
+      const b = String(argv[++i] ?? "").trim().toLowerCase();
+      if (b === "off" || b === "unlimited") a.spawnBudget = -1;
+      else {
+        const n = Math.floor(Number(b));
+        a.spawnBudget = Number.isFinite(n) && n >= 0 ? n : Number.NaN;
+      }
+    }
     else if (v === "--k") a.k = Math.max(1, Math.floor(Number(argv[++i] ?? "5") || 5));
     else if (v === "--continue" || v === "-c") a.continue = true;
     else if (v === "--name") a.name = (argv[++i] ?? "").toLowerCase();
@@ -259,6 +271,8 @@ async function cmdRun(a: Args): Promise<number> {
   if (a.approval) env.ORG_APPROVAL = "1";
   // v0.5.6：递归派生深度透传（agent_spawn 工具链：子组织的工具环须知道自己在第几层）
   if (a.spawnDepth > 0) env.ORG_SPAWN_DEPTH = String(a.spawnDepth);
+  // v0.5.11：递归派生预算透传（子预算 = floor(父预算 × DECAY)；off = 关闭治理）
+  if (Number.isFinite(a.spawnBudget)) env.ORG_SPAWN_BUDGET = a.spawnBudget === -1 ? "off" : String(a.spawnBudget);
   // v0.5.10：scripted 团队车道域外任务语义地板（B-19，与 lib/engine.ts
   // startRun 预检同构 —— Web/TUI 走 startRun，CLI run 在此）。仅 scripted +
   // 未显式指定 fixture 时介入：域内放行 / 注册表专家跨车道救援转直连 /
@@ -640,6 +654,8 @@ async function cmdAsk(a: Args): Promise<number> {
   };
   // v0.5.6：递归派生深度透传（agent_spawn ask 模式子组织）
   if (a.spawnDepth > 0) env.ORG_SPAWN_DEPTH = String(a.spawnDepth);
+  // v0.5.11：递归派生预算透传（ask 模式子组织同享预算语义）
+  if (Number.isFinite(a.spawnBudget)) env.ORG_SPAWN_BUDGET = a.spawnBudget === -1 ? "off" : String(a.spawnBudget);
   // v0.5.3：@文件/目录引用展开（workspace 相对路径 → 围栏内容注入）
   if (question.includes("@")) {
     const m = expandMentions(question, a.workspace);
