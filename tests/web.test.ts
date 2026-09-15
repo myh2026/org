@@ -1181,4 +1181,28 @@ describe("Web v0.5.9：音频工坊端点（audio-demo / audio .mid / --host）"
     expect(m).not.toBeNull();
     expect(() => new Function(m![1]!)).not.toThrow();
   });
+
+  test("B-20 回归：[hidden] 全局防护规则（.mictx/.schmeta 幽灵浮条修复）", async () => {
+    const html = await (await fetch(`${base}/`)).text();
+    // class 定义了 display:flex 的元素携带 hidden 属性时，UA 的 [hidden]{display:none}
+    // 会被类选择器特异性覆盖 → 页面加载即显示幽灵"⠋ 转写中…"浮条（v0.5.12 回归）
+    expect(html).toContain("[hidden] { display: none !important; }");
+    // 两个受害元素本体仍在（防护规则必须真实覆盖它们）
+    expect(html).toContain('id="micTx"');
+    expect(html).toContain('id="schMeta"');
+    // .rchip 既有定向防护保留（双保险不冲突）
+    expect(html).toContain(".rchip[hidden] { display: none; }");
+  });
+
+  test("B-21 回归：Enter 派发与 send 按钮同构（团队模式切换后回车必须走 runTeam）", async () => {
+    const html = await (await fetch(`${base}/`)).text();
+    // Enter 键处理器必须分派 state.mode（曾无条件 ask() 直连 —— UI 显示团队、
+    // 行为却是直连的不一致 bug；点击发送按钮的路径 v0.5.10 起就正确）
+    const enterBlock = html.match(
+      /question\.addEventListener\("keydown",[\s\S]{0,400}?ask\(\);/,
+    );
+    expect(enterBlock).not.toBeNull();
+    expect(enterBlock![0]).toContain('state.mode === "team"');
+    expect(enterBlock![0]).toContain("runTeam(");
+  });
 });

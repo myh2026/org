@@ -62,6 +62,7 @@ import { listApprovals, decideApproval } from "../lib/approvals.ts";
 import { readCostTimeline, latestHarnessRunDir } from "../lib/engine.ts";
 import { AskGate, QueueCancelledError } from "./gate.ts";
 import { transcribeAudio, synthesizeSpeech, voiceStatus, VOICES } from "../lib/voice.ts"; // v0.5.12 语音入口（ASR/TTS）
+import { analyzeImages, visionStatus, VISION_MAX_IMAGES } from "../lib/vision.ts"; // v0.5.13 视觉入口（VLM 图片理解）
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14 漂移治理：此前本文件落后两版）
 
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
@@ -70,6 +71,7 @@ const DEFAULT_PORT = 4600; // 3000/3030/5000 被本机其他服务占用，绝�
 
 /** v0.5.12：语音服务探测缓存（60s —— 面板状态行不发探测风暴）。 */
 const voiceStatusCache = new Map<number, { at: number; value: { sdk: boolean; voices: number; error?: string } }>();
+const visionStatusCache = new Map<number, { at: number; value: { sdk: boolean; formats: number; error?: string } }>();
 
 // ---- 参数解析 ----
 
@@ -1165,6 +1167,77 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
             stats: { total: okN + failN, ok: okN, failed: failN, reuse_hits: reuseHits, tokens_total: tokens },
           });
         }
+        if (route === "DELETE /api/spawns") {
+          // v0.5.13：派生池清理（失败记录占位 / 全量重置 / 按id精确删）。
+          // body {mode:"failed"|"all", ids?: string[]}；删除语义 = 池登记移除 +
+          // 对应 spawn/<id> 目录整删（路径越界守卫：必须在本 ws 的 spawn/ 之下）。
+          const body = await req.json().catch(() => ({})) as { mode?: unknown; ids?: unknown };
+          const mode = String(body.mode ?? "failed");
+          const ids = Array.isArray(body.ids) ? body.ids.map(String) : null;
+          if (mode !== "failed" && mode !== "all" && !ids) {
+            return json({ ok: false, error: 'mode 必须是 "failed" | "all"，或提供 ids 数组' }, 400);
+          }
+          const rws = readWorkspaceOf(ws);
+          const spawnRoot = path.join(rws, "spawn");
+          const inGuard = (p: string): boolean => {
+            try { const abs = path.resolve(p); return abs.startsWith(path.resolve(spawnRoot) + path.sep); }
+            catch { return false; }
+          };
+          // 读池（失败 → 空池，仍可清孤儿目录）
+          type PoolRec = Record<string, unknown> & { id?: string; workspace?: string; ok?: boolean };
+          const poolPath = path.join(spawnRoot, "pool.json");
+          let poolRecs: PoolRec[] = [];
+          try {
+            const pool = JSON.parse(fs.readFileSync(poolPath, "utf-8")) as { records?: unknown };
+            if (Array.isArray(pool.records)) poolRecs = pool.records.filter((r): r is PoolRec => !!r && typeof r === "object");
+          } catch { /* 池不存在/损坏 */ }
+          const keep: PoolRec[] = [];
+          const dropped: Array<{ id: string; dir?: string }> = [];
+          for (const r of poolRecs) {
+            const id = String(r.id ?? "");
+            const drop = mode === "all" || (mode === "failed" && r.ok !== true) || (ids !== null && ids.includes(id));
+            if (drop) dropped.push({ id, dir: String(r.workspace ?? "") || undefined });
+            else keep.push(r);
+          }
+          // 孤儿目录（legacy 无登记）：failed 模式删 run.json 标记失败的；all 模式全删
+          const seen = new Set(poolRecs.map((r) => String(r.id ?? "")));
+          try {
+            for (const e of fs.readdirSync(spawnRoot, { withFileTypes: true })) {
+              if (!e.isDirectory() || e.name === ".DS_Store") continue;
+              if (seen.has(e.name)) continue;
+              if (mode === "all" || mode === "failed" || ids?.includes(e.name)) {
+                let isFailed = mode === "all";
+                if (!isFailed) {
+                  try {
+                    const j = JSON.parse(fs.readFileSync(path.join(spawnRoot, e.name, "out-spawn", "run.json"), "utf-8")) as { ok?: boolean };
+                    isFailed = j.ok !== true;
+                  } catch { isFailed = true; } // 无 run.json 的半成品 → 失败语义
+                }
+                if (isFailed) dropped.push({ id: e.name, dir: path.join(spawnRoot, e.name) });
+              }
+            }
+          } catch { /* spawn 目录不存在 → 跳过 */ }
+          // 执行删除（目录整删 + 池回写）
+          let dirsRemoved = 0, dirErrors: string[] = [];
+          for (const d of dropped) {
+            const dir = d.dir && inGuard(d.dir) ? d.dir : (d.id ? path.join(spawnRoot, d.id) : "");
+            if (!dir || !inGuard(dir)) continue;
+            if (!fs.existsSync(dir)) continue;
+            try { fs.rmSync(dir, { recursive: true, force: true }); dirsRemoved++; }
+            catch (err) { dirErrors.push(`${d.id}: ${String((err as Error).message ?? err).slice(0, 120)}`); }
+          }
+          try {
+            fs.mkdirSync(spawnRoot, { recursive: true });
+            fs.writeFileSync(poolPath, JSON.stringify({ version: 1, records: keep }, null, 2));
+          } catch (err) {
+            dirErrors.push(`pool.json 回写失败: ${String((err as Error).message ?? err).slice(0, 120)}`);
+          }
+          return json({
+            ok: dirErrors.length === 0, mode: ids ? "ids" : mode,
+            removed: dropped.length, records_kept: keep.length, dirs_removed: dirsRemoved,
+            errors: dirErrors.length ? dirErrors : undefined,
+          });
+        }
         if (route === "GET /api/voice-status") {
           // v0.5.12：语音服务健康探测（GUI 🎙 面板状态行 + 🎤 按钮降级依据）。
           // 60s 内存缓存（探测不打 SDK——零调用实现：仅试 create 实例化）。
@@ -1213,6 +1286,49 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
               "X-Voice-Chunks": String(out.chunks ?? 1),
               "X-Voice-Truncated": out.truncated ? "1" : "0",
             },
+          });
+        }
+        if (route === "GET /api/vision-status") {
+          // v0.5.13：视觉服务健康探测（GUI 📷 按钮降级依据；与 voice-status 同构 60s 缓存）。
+          const hit = visionStatusCache.get(0);
+          if (hit && Date.now() - hit.at < 60_000) {
+            return json(hit.value);
+          }
+          const value = await visionStatus();
+          visionStatusCache.set(0, { at: Date.now(), value });
+          return json(value);
+        }
+        if (route === "POST /api/vision") {
+          // v0.5.13：视觉分析（📷 选图 → base64 → VLM 描述）。两种 body 形态：
+          //   便捷单图 {image_base64, mime?, prompt?} / 多图 {images: [{base64, mime}], prompt}。
+          // 降级：SDK 凭据缺席 → 503 {ok:false, error}（GUI 提示条，不炸）。
+          const body = await req.json().catch(() => ({})) as {
+            image_base64?: unknown; mime?: unknown; prompt?: unknown;
+            images?: Array<{ base64?: unknown; mime?: unknown }>;
+          };
+          const prompt = body.prompt === undefined ? undefined : String(body.prompt);
+          let imgs: Array<{ buf: Buffer; mime?: string }> = [];
+          if (Array.isArray(body.images) && body.images.length > 0) {
+            imgs = body.images.slice(0, VISION_MAX_IMAGES).map((im) => ({
+              buf: Buffer.from(String(im?.base64 ?? "").replace(/^data:[^,]*,/, ""), "base64"),
+              mime: im?.mime === undefined ? undefined : String(im.mime),
+            }));
+          } else {
+            const b64 = String(body.image_base64 ?? "").replace(/^data:[^,]*,/, "");
+            if (!b64) return json({ ok: false, error: "image_base64 必填（图片数据），或多图形态 images[] 数组" }, 400);
+            imgs = [{
+              buf: Buffer.from(b64, "base64"),
+              mime: body.mime === undefined ? undefined : String(body.mime),
+            }];
+          }
+          const out = await analyzeImages(imgs, prompt);
+          if (!out.ok) {
+            const status = /凭据|401|SDK/.test(out.error ?? "") ? 503 : 400;
+            return json({ ok: false, error: out.error }, status);
+          }
+          return json({
+            ok: true, text: out.text, chars: out.chars, images: out.images,
+            prompt: out.prompt, prompt_truncated: out.promptTruncated ?? false,
           });
         }
         if (route === "GET /api/run") {
@@ -2028,6 +2144,9 @@ function renderIndexHtml(): string {
         cursor: pointer; white-space: nowrap; }
   .rchip:hover { border-color: var(--amber); background: var(--raise); }
   .rchip[hidden] { display: none; }
+  /* 全局防护：class 定义了 display 的元素携带 hidden 属性时必须真正隐藏
+     （.mictx/.schmeta 的 display:flex 曾覆盖 UA 的 [hidden] 样式 → 幽灵浮条 B-20） */
+  [hidden] { display: none !important; }
   #reviewScrim { display: none; position: fixed; inset: 0;
         background: rgba(0,0,0,.58); z-index: 40; }
   #reviewScrim.on { display: block; }
@@ -2292,6 +2411,13 @@ function renderIndexHtml(): string {
         padding: 2px 10px; border: 1px solid var(--border); border-radius: 4px; }
   .spwstats b { color: var(--greenb); font-weight: 600; }
   .spwstats span.warnstat b { color: #f59e0b; }
+  /* v0.5.13：统计条清理钮（🧹 失败 / 重置池 —— danger 态红沿） */
+  .spwstats .spwclean { font: 10px/1.6 var(--mono); color: var(--muted); padding: 2px 10px;
+        border: 1px solid var(--border); border-radius: 4px; background: transparent;
+        cursor: pointer; transition: border-color .12s, color .12s; margin-left: auto; }
+  .spwstats .spwclean:hover { color: #f59e0b; border-color: rgba(245,158,11,.45); }
+  .spwstats .spwclean.danger { margin-left: 0; }
+  .spwstats .spwclean.danger:hover { color: #ef4444; border-color: rgba(239,68,68,.45); }
   .spwbody { flex: 1; overflow-y: auto; padding: 12px 14px; }
   .spwempty { padding: 28px 14px; text-align: center; font: 11px/1.8 var(--mono); color: var(--dim); }
   /* 树行：depth 缩进 + 左侧连接线（::before 竖线 + ::after 肘弯） */
@@ -2300,6 +2426,15 @@ function renderIndexHtml(): string {
         cursor: pointer; transition: border-color .12s, background .12s; background: var(--panel); }
   .spwrow:hover { border-color: var(--muted); background: rgba(255,255,255,.025); }
   .spwrow.open { border-color: var(--greenb); background: rgba(16,185,129,.05); }
+  /* v0.5.13：失败行红沿提示 + 行级删除钮（hover 浮现，失败行常显） */
+  .spwrow.failrow { border-color: rgba(239,68,68,.3); }
+  .spwrow.failrow:hover { border-color: rgba(239,68,68,.5); }
+  .spwrow .spwdel { flex: none; width: 22px; height: 22px; display: inline-flex; align-items: center;
+        justify-content: center; border: 1px solid transparent; background: transparent;
+        color: var(--dim); border-radius: 4px; cursor: pointer; font-size: 11px;
+        opacity: 0; transition: opacity .12s, border-color .12s, color .12s; }
+  .spwrow:hover .spwdel, .spwrow.failrow .spwdel { opacity: 1; }
+  .spwdel:hover { color: #ef4444; border-color: rgba(239,68,68,.45); }
   .spwrow .l1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .spwrow .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
   .spwrow .dot.ok { background: var(--greenb); box-shadow: 0 0 6px rgba(16,185,129,.45); }
@@ -2345,13 +2480,20 @@ function renderIndexHtml(): string {
   .vosec .st { font: 600 11px/1.6 var(--mono); color: var(--muted); margin-bottom: 6px; }
   /* 声音网格（7 声音卡片：名字 + 描述 + 选中态） */
   .vogrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
-  .vocard { padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px;
+  .vocard { position: relative; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px;
         cursor: pointer; transition: border-color .12s, background .12s; }
   .vocard:hover { border-color: var(--muted); background: rgba(255,255,255,.025); }
   .vocard.on { border-color: var(--greenb); background: rgba(16,185,129,.07); }
   .vocard .nm { font: 600 11px/1.5 var(--mono); color: var(--fg); }
   .vocard .ds { margin-top: 1px; font: 10px/1.6 var(--mono); color: var(--dim); }
   .vocard.on .ds { color: var(--greenb); }
+  /* v0.5.13：声音试听钮（卡片右上角；合成/播放中态互斥） */
+  .voaud { position: absolute; top: 5px; right: 5px; padding: 1px 6px; border: 1px solid var(--border);
+        background: transparent; color: var(--dim); font: 10px/1.6 var(--mono); cursor: pointer;
+        border-radius: 4px; transition: border-color .12s, color .12s; }
+  .voaud:hover { color: var(--greenb); border-color: rgba(16,185,129,.4); }
+  .voaud.play { color: var(--greenb); border-color: rgba(16,185,129,.55); }
+  .voaud.busy { color: var(--amber); border-color: rgba(217,119,6,.55); }
   /* 语速滑条（0.5-2.0 —— 数值实时显示） */
   .vospeed { display: flex; align-items: center; gap: 10px; }
   .vospeed input[type="range"] { flex: 1; accent-color: var(--greenb); height: 4px; }
@@ -2370,16 +2512,19 @@ function renderIndexHtml(): string {
   .vofoot { flex: none; padding: 8px 14px; border-top: 1px solid var(--border);
         font: 10px/1.7 var(--mono); color: var(--dim); }
   .vofoot b { color: var(--muted); font-weight: 600; }
-  /* 🎤 录音钮（composer 内，录制中红点脉冲） */
-  #micBtn { flex: none; width: 30px; height: 30px; display: inline-flex; align-items: center;
+  /* 🎤 录音钮（composer 内，录制中红点脉冲）；📷 图片钮同构（分析中琥珀脉冲） */
+  #micBtn, #visBtn { flex: none; width: 30px; height: 30px; display: inline-flex; align-items: center;
         justify-content: center; border: 1px solid var(--border); background: transparent;
         color: var(--muted); border-radius: 6px; cursor: pointer; font-size: 13px;
         transition: border-color .12s, color .12s; }
-  #micBtn:hover { color: var(--fg); border-color: var(--muted); }
+  #micBtn:hover, #visBtn:hover { color: var(--fg); border-color: var(--muted); }
   #micBtn.rec { color: #ef4444; border-color: rgba(239,68,68,.55);
         animation: micpulse 1.1s ease-in-out infinite; }
+  #visBtn.busy { color: var(--amber); border-color: rgba(217,119,6,.55);
+        animation: vispulse 1.1s ease-in-out infinite; }
   @keyframes micpulse { 0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,.35) } 50% { box-shadow: 0 0 0 6px rgba(239,68,68,0) } }
-  #micBtn:disabled { opacity: .4; cursor: not-allowed; }
+  @keyframes vispulse { 0%,100% { box-shadow: 0 0 0 0 rgba(217,119,6,.35) } 50% { box-shadow: 0 0 0 6px rgba(217,119,6,0) } }
+  #micBtn:disabled, #visBtn:disabled { opacity: .4; cursor: not-allowed; }
   /* 🔊 朗读钮（t-bot 操作行；合成/播放中态） */
   .saybtn { flex: none; padding: 1px 8px; border: 1px solid var(--border); background: transparent;
         color: var(--dim); font: 10px/1.6 var(--mono); cursor: pointer; border-radius: 4px;
@@ -2584,11 +2729,14 @@ function renderIndexHtml(): string {
     <div class="composer">
       <div class="cbox">
         <button id="micBtn" type="button" title="语音输入（v0.5.12）— 点击开始录音，再点结束并转写进输入框（ASR）" aria-label="语音输入">🎤</button>
+        <button id="visBtn" type="button" title="图片分析（v0.5.13）— 选择图片，VLM 描述内容并追加进输入框" aria-label="图片分析">📷</button>
+        <input type="file" id="visFile" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" multiple hidden>
         <span class="ps" aria-hidden="true">❯</span>
         <textarea id="question" rows="1"
           placeholder="输入问题，enter 发送 · shift+enter 换行 · esc 停止"></textarea>
       </div>
       <div class="mictx" id="micTx" hidden><span class="sp">⠋</span><span id="micTxText">转写中…</span></div>
+      <div class="mictx" id="visTx" hidden><span class="sp">⠋</span><span id="visTxText">分析中…</span></div>
       <div class="crow">
         <div class="seg" id="modeSeg" role="radiogroup" aria-label="派单模式">
           <button type="button" data-mode="team" class="on">团队</button>
@@ -3933,10 +4081,11 @@ function spwRow(r, depth) {
     (usage && usage.tokens ? '<span class="tk">' + esc(String(usage.tokens)) + ' tok · ' + esc(String(usage.model_calls || 0)) + ' calls' + (usage.elapsed_ms ? ' · ' + (usage.elapsed_ms / 1000).toFixed(1) + 's' : '') + '</span>' : '') +
     '</div>';
   var open = !!spwExpanded[String(r.id)];
-  var h = '<div class="spwrow' + (open ? " open" : "") + '" data-spw="' + esc(String(r.id)) + '" style="--ind:' + depth + '">';
+  var h = '<div class="spwrow' + (open ? " open" : "") + (r.ok ? "" : " failrow") + '" data-spw="' + esc(String(r.id)) + '" style="--ind:' + depth + '">';
   h += '<div class="l1"><span class="dot ' + dot + '" aria-hidden="true"></span>' +
        '<span class="gl" title="' + esc(String(r.goal || "")) + '">' + esc(String(r.goal || r.id)) + '</span>' +
-       '<span class="bds">' + bds + '</span></div>' + l2;
+       '<span class="bds">' + bds + '</span>' +
+       '<button type="button" class="spwdel" data-del="' + esc(String(r.id)) + '" title="删除此派生（登记 + 目录，v0.5.13）" aria-label="删除 ' + esc(String(r.goal || r.id)) + '">🗑</button></div>' + l2;
   if (open) {
     h += '<div class="spwdetail">';
     h += '<div class="sm">' + (String(r.summary || "").trim() ? esc(String(r.summary)) : '（无摘要 —— 池化命中或旧版派生）') + '</div>';
@@ -3959,8 +4108,36 @@ function refreshSpawns() {
       '<span>成功 <b>' + esc(String(st.ok ?? 0)) + '</b></span>' +
       '<span class="warnstat">失败 <b>' + esc(String(st.failed ?? 0)) + '</b></span>' +
       '<span>复用命中 <b>' + esc(String(st.reuse_hits ?? 0)) + '</b></span>' +
-      '<span>tokens 合计 <b>' + esc(String(st.tokens_total ?? 0)) + '</b></span>';
+      '<span>tokens 合计 <b>' + esc(String(st.tokens_total ?? 0)) + '</b></span>' +
+      '<button type="button" class="spwclean" data-clean="failed" title="删除全部失败派生（登记 + 目录）">🧹 清理失败</button>' +
+      '<button type="button" class="spwclean danger" data-clean="all" title="清空派生池（全部登记 + 目录，不可恢复）">重置池</button>';
     var body = document.getElementById("spwBody");
+    // 统计条清理按钮（空态也要能清理 —— 孤儿目录不占 records 数）
+    var statsEl = document.getElementById("spwStats");
+    if (statsEl) {
+      Array.prototype.forEach.call(statsEl.querySelectorAll("[data-clean]"), function (b) {
+        b.onclick = function () {
+          var mode = b.getAttribute("data-clean");
+          var msg = mode === "all"
+            ? "重置整个派生池？（全部登记 + 目录，不可恢复）"
+            : "删除全部失败派生？（登记 + 目录）";
+          if (!confirm(msg)) return;
+          fetch("/api/spawns", {
+            method: "DELETE",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ mode: mode })
+          }).then(function (r) { return r.json(); }).then(function (j) {
+            if (j && j.ok) {
+              flashHint("已清理 " + (j.removed ?? 0) + " 条（保留 " + (j.records_kept ?? 0) + " 条 · 目录 " + (j.dirs_removed ?? 0) + "）");
+              spwExpanded = {};
+              refreshSpawns();
+            } else {
+              flashHint("清理失败：" + ((j && j.errors && j.errors[0]) || (j && j.error) || "未知错误"));
+            }
+          }).catch(function (e) { flashHint("清理失败：" + e); });
+        };
+      });
+    }
     if (!body) return;
     var recs = Array.isArray(j.records) ? j.records : [];
     if (recs.length === 0) {
@@ -3970,10 +4147,10 @@ function refreshSpawns() {
     var h = "";
     for (var i = 0; i < recs.length; i++) h += spwRow(recs[i], 0);
     body.innerHTML = h;
-    // 交互：点击行展开/收起；复制路径按钮
+    // 交互：点击行展开/收起；复制路径按钮；行级删除；统计条清理
     Array.prototype.forEach.call(body.querySelectorAll(".spwrow"), function (row) {
       row.onclick = function (ev) {
-        if (ev.target && (ev.target.hasAttribute("data-out") || ev.target.hasAttribute("data-ws"))) return;
+        if (ev.target && (ev.target.hasAttribute("data-out") || ev.target.hasAttribute("data-ws") || ev.target.hasAttribute("data-del"))) return;
         var id = row.getAttribute("data-spw");
         spwExpanded[id] = !spwExpanded[id];
         refreshSpawns();
@@ -3991,6 +4168,26 @@ function refreshSpawns() {
         ev.stopPropagation();
         copyText(b.getAttribute("data-ws"));
         flashHint("工作区路径已复制");
+      };
+    });
+    Array.prototype.forEach.call(body.querySelectorAll("[data-del]"), function (b) {
+      b.onclick = function (ev) {
+        ev.stopPropagation();
+        var id = b.getAttribute("data-del");
+        if (!confirm("删除此派生？（登记 + 目录，不可恢复）「" + id + "」")) return;
+        fetch("/api/spawns", {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ids: [id] })
+        }).then(function (r) { return r.json(); }).then(function (j) {
+          if (j && j.ok) {
+            flashHint("已删除 1 条派生（保留 " + (j.records_kept ?? 0) + " 条）");
+            delete spwExpanded[id];
+            refreshSpawns();
+          } else {
+            flashHint("删除失败：" + ((j && j.error) || (j && j.errors && j.errors[0]) || "未知错误"));
+          }
+        }).catch(function (e) { flashHint("删除失败：" + e); });
       };
     });
   }).catch(function () {
@@ -4028,7 +4225,8 @@ function renderVoiceGrid() {
   var h = "";
   Object.keys(VOICE_META).forEach(function (k) {
     h += '<div class="vocard' + (k === voiceCfg.voice ? " on" : "") + '" data-voice="' + esc(k) + '" title="' + esc(VOICE_META[k]) + '">' +
-         '<div class="nm">' + esc(k) + '</div><div class="ds">' + esc(VOICE_META[k]) + '</div></div>';
+         '<div class="nm">' + esc(k) + '</div><div class="ds">' + esc(VOICE_META[k]) + '</div>' +
+         '<button type="button" class="voaud" data-voice="' + esc(k) + '" title="试听一句（v0.5.13）" aria-label="试听 ' + esc(k) + '">🔊</button></div>';
   });
   grid.innerHTML = h;
   Array.prototype.forEach.call(grid.querySelectorAll(".vocard"), function (card) {
@@ -4038,6 +4236,56 @@ function renderVoiceGrid() {
       renderVoiceGrid();
       flashHint("朗读声音已切换：" + VOICE_META[voiceCfg.voice]);
     };
+  });
+  Array.prototype.forEach.call(grid.querySelectorAll(".voaud"), function (aud) {
+    aud.onclick = function (ev) { // 试听不切换选中（stopPropagation）
+      ev.stopPropagation();
+      previewVoice(aud.getAttribute("data-voice"), aud);
+    };
+  });
+}
+// v0.5.13：声音试听 —— 该声音合成一句自我介绍并播放（互斥：新试听先停旧）。
+// 降级：401/凭据缺席 → 按钮复位 + 人话提示（不炸不卡）。
+var voicePreview = { audio: null, btn: null };
+function previewVoice(voice, btn) {
+  if (!voice) return;
+  if (voicePreview.audio) { try { voicePreview.audio.pause(); } catch (e) { /* 已结束 */ } voicePreview.audio = null; }
+  if (voicePreview.btn) { voicePreview.btn.classList.remove("play", "busy"); voicePreview.btn.textContent = "🔊"; }
+  var meta = VOICE_META[voice] || "";
+  var text = "你好，我是" + voice + "。" + (meta ? meta.replace(/ · /g, "，") + "。" : "这是我的声音。");
+  btn.classList.add("busy");
+  btn.textContent = "…";
+  fetch("/api/tts", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: text, voice: voice, speed: voiceCfg.speed })
+  }).then(function (r) {
+    if (!r.ok) return r.json().then(function (j) { throw new Error((j && j.error) || "HTTP " + r.status); });
+    return r.arrayBuffer().then(function (ab) {
+      var blob = new Blob([ab], { type: "audio/wav" });
+      var url = URL.createObjectURL(blob);
+      var audio = new Audio(url);
+      voicePreview.audio = audio;
+      voicePreview.btn = btn;
+      btn.classList.remove("busy");
+      btn.classList.add("play");
+      btn.textContent = "▶";
+      audio.onended = function () {
+        btn.classList.remove("play");
+        btn.textContent = "🔊";
+        URL.revokeObjectURL(url);
+        if (voicePreview.audio === audio) voicePreview.audio = null;
+      };
+      audio.play().catch(function (e) {
+        btn.classList.remove("play");
+        btn.textContent = "🔊";
+        flashHint("试听播放失败：" + (e && e.message ? e.message : e));
+      });
+    });
+  }).catch(function (e) {
+    btn.classList.remove("busy", "play");
+    btn.textContent = "🔊";
+    flashHint("试听失败：" + (e && e.message ? e.message : e));
   });
 }
 function refreshVoiceStatus() {
@@ -4213,6 +4461,88 @@ function speakText(text, btn) {
       flashHint("录音中 —— 再点 🎤 结束并转写");
     }).catch(function (e) {
       flashHint("麦克风不可用：" + (e && e.message ? e.message : "权限拒绝"));
+    });
+  };
+})();
+
+// ---- 📷 图片分析（v0.5.13：file picker → base64 → /api/vision → 描述追加进输入框） ----
+// 与 🎤 转写同构（分析 → 引用闭环）：多选 ≤4 张，浮条 + 琥珀脉冲按钮，
+// 失败诚实提示（含 401 remedy），成功追加 🖼 前缀描述并可继续编辑后回车派单。
+(function () {
+  var btn = document.getElementById("visBtn");
+  var file = document.getElementById("visFile");
+  if (!btn || !file) return;
+  var busy = false;
+  function setTx(text, spin) {
+    var bar = document.getElementById("visTx");
+    var tx = document.getElementById("visTxText");
+    if (!bar || !tx) return;
+    if (!text) { bar.hidden = true; return; }
+    bar.hidden = false;
+    tx.textContent = text;
+    bar.querySelector(".sp").textContent = spin ? SPIN[0] : "";
+  }
+  var spinT = null;
+  function spin(on) {
+    if (spinT) { clearInterval(spinT); spinT = null; }
+    if (!on) return;
+    var i = 0;
+    spinT = setInterval(function () {
+      var el = document.querySelector("#visTx .sp");
+      if (el) el.textContent = SPIN[(i++) % SPIN.length];
+    }, 120);
+  }
+  function reset() { // 复位（含 busy —— 降级路径按钮不可卡死）
+    busy = false;
+    btn.classList.remove("busy");
+    spin(false);
+    setTx("", false);
+  }
+  btn.onclick = function () { if (!busy) file.click(); };
+  file.onchange = function () {
+    if (busy) { file.value = ""; return; }
+    var files = Array.from(file.files || []);
+    file.value = ""; // 立即清空（同名重选可再触发）
+    if (files.length === 0) return;
+    if (files.length > 4) { flashHint("图片过多（" + files.length + " > 4 张上限）"); return; }
+    var readers = files.map(function (f) {
+      return new Promise(function (res, rej) {
+        var fr = new FileReader();
+        fr.onload = function () { res({ dataUrl: String(fr.result), kb: Math.round(f.size / 1024) }); };
+        fr.onerror = function () { rej(new Error("读取失败：" + f.name)); };
+        fr.readAsDataURL(f);
+      });
+    });
+    busy = true;
+    btn.classList.add("busy");
+    Promise.all(readers).then(function (imgs) {
+      setTx("分析中…（" + imgs.length + " 张 · " + imgs.reduce(function (a, b) { return a + b.kb; }, 0) + "KB）", true);
+      spin(true);
+      var single = imgs.length === 1;
+      var body = single
+        ? { image_base64: imgs[0].dataUrl }
+        : { images: imgs.map(function (m) { return { base64: m.dataUrl }; }) };
+      return fetch("/api/vision", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }).then(function (r) { return r.json(); }).then(function (j) {
+        reset();
+        if (j && j.ok && j.text) {
+          var q = document.getElementById("question");
+          var cur = q.value.trim();
+          var add = (imgs.length > 1 ? "🖼×" + imgs.length + " " : "🖼 ") + j.text.trim();
+          q.value = cur ? cur + "\\n" + add : add; // 模板内双反斜杠 n → 输出字面换行转义
+          q.focus();
+          q.dispatchEvent(new Event("input", { bubbles: true }));
+          flashHint("已分析 " + j.chars + " 字 · " + imgs.length + " 图（可编辑后回车发送）");
+        } else {
+          flashHint("分析失败：" + ((j && j.error) || "未知错误"));
+        }
+      });
+    }).catch(function (e) {
+      reset();
+      flashHint("图片分析失败：" + (e && e.message ? e.message : e));
     });
   };
 })();
@@ -5208,7 +5538,9 @@ question.addEventListener("input", function () {
 question.addEventListener("keydown", function (e) {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
-    ask();
+    // 模式分派与 send 按钮同构（B-21：Enter 曾无条件走直连，团队模式切
+    // 换后按回车仍派直连 —— UI 显示团队、行为却是直连的不一致 bug）
+    if (state.mode === "team") runTeam(this.value.trim()); else ask();
   }
 });
 document.addEventListener("keydown", function (e) {

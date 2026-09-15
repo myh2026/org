@@ -62,7 +62,7 @@
 | 22 | RAG/向量检索 | ✅ | v0.5.8 检索增强生成的检索半环：`@?查询词` → BM25 top-5 命中展开为围栏摘要块自动织入模型上下文（org ask / 直连车道；无命中/异常附注降级不炸）。诚实边界：BM25 词频语义非 embedding 向量 —— embedding 升级是路线图（z-ai SDK 车道预留） |
 | 23 | 长期记忆 | ✅ | v0.5.3：runtime/memories/<expert>.md（跨会话注入尾部 40 行）· org memory CLI/Web/`/memory` 三端 |
 | 24 | 文档/PDF 读取 | 🟡 | 工具环 fs_read 文本类；PDF 解析未做（native 块可接 python pdf 库——逃生舱在） |
-| 25 | 图片/截图理解 | ⬜ | 未做（上游 HSL `$host.llm` 为文本车道；多模态属网关扩展项） |
+| 25 | 图片/截图理解 | ✅ | v0.5.13 视觉入口：lib/vision.ts（z-ai SDK createVision · 多图 ≤4 · 魔数唤探防伪造 mime · prompt 超长诚实截断）→ Web 📷 按钮（分析→引用闭环：描述追加进输入框可编辑后派单）+ CLI org vision；401/凭据缺席降级 remedy（部署环境配好即全功能） |
 | 26 | LSP/DAP 协议集成 | ⬜ | 未做 |
 | 27 | AST、语法树与类型信息 | ✅ | **这是 HSL 的本体**：S1-S8 静态铁律 + 38 后端 AST 投射 + 语义对拍 |
 | 28 | 增量索引/跨仓搜索 | 🟡 | 静默更新检测 + N 版本冗余 + registry git 资产层；代码索引未做 |

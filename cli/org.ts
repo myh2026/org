@@ -38,6 +38,7 @@ import { stockAffinityOf, rescueExpertOf, writeOutOfDomainRun, SEMANTIC_FLOOR } 
 import { scanAndRenderArtifacts } from "../lib/audio.ts"; // v0.5.6 音频产物通道（CLI 车道）
 import { semanticSearch } from "../lib/search.ts"; // v0.5.8 语义检索（capabilities #19/#22）
 import { synthesizeSpeech, voiceStatus, VOICES } from "../lib/voice.ts"; // v0.5.12 语音入口（ASR/TTS）
+import { analyzeImages, visionStatus, VISION_MAX_IMAGES } from "../lib/vision.ts"; // v0.5.13 视觉入口（VLM）
 import { listApprovals, decideApproval, clearGranted } from "../lib/approvals.ts";
 import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
@@ -1919,6 +1920,162 @@ async function cmdVoice(_a: Args): Promise<number> {
   return st.sdk ? 0 : 3;
 }
 
+/** org vision [图片路径...] [--prompt "问题"]
+ *  图片 → VLM 分析（多图 ≤4 · png/jpeg/gif/webp/bmp · 魔数唤探防伪造）。
+ *  无参 → 服务状态 + 用法。 */
+async function cmdVision(a: Args): Promise<number> {
+  const files = a.rest.filter((r) => !r.startsWith("--"));
+  const promptArg = a.rest.find((r) => r.startsWith("--prompt="))?.split("=").slice(1).join("=");
+  if (files.length === 0) {
+    const st = await visionStatus();
+    if (st.sdk) {
+      console.log(`📷 视觉服务在线（${st.formats} 种图片格式）：`);
+    } else {
+      console.log(`📷 视觉服务未就绪：${st.error}`);
+      console.error("  部署环境配置 z-ai SDK 凭据后，📷 图片分析即刻可用");
+    }
+    console.log('\n  分析：org vision photo.jpg --prompt="图里有什么文字？"');
+    console.log("  多图：org vision a.png b.jpg --prompt=\"对比这两张图\"（≤4 张）");
+    console.log("  Web：org web → 📷 按钮（分析结果追加进输入框，分析→引用闭环）");
+    return st.sdk ? 0 : 3;
+  }
+  if (files.length > VISION_MAX_IMAGES) {
+    console.error(`✗ 图片过多（${files.length} > ${VISION_MAX_IMAGES} 张上限）`);
+    return 2;
+  }
+  const imgs = [];
+  for (const f of files) {
+    if (!fs.existsSync(f)) {
+      console.error(`✗ 图片不存在：${f}`);
+      return 2;
+    }
+    const buf = fs.readFileSync(f);
+    imgs.push({ buf, mime: undefined }); // mime 交由魔数唤探（不信任扩展名）
+  }
+  const out = await analyzeImages(imgs, promptArg);
+  if (!out.ok || !out.text) {
+    console.error(`✗ 分析失败：${out.error}`);
+    console.error("  提示：视觉需要 z-ai SDK 凭据（部署环境配置后即可用）；DHV_VISION_DISABLE_SDK=1 可显式关闭");
+    return 1;
+  }
+  console.log(`📷 ${files.length} 图 · ${out.chars} 字${out.promptTruncated ? "（prompt 已截断）" : ""}：\n`);
+  console.log(out.text);
+  return 0;
+}
+
+/** org spawn [prune [--failed|--all] [--dry-run]] —— 派生池观测与清理（v0.5.13）。
+ *  无参：池列表 + 统计；prune：失败记录/全量/孤儿目录清理（与 Web DELETE /api/spawns 同语义）。 */
+async function cmdSpawn(a: Args): Promise<number> {
+  const ws = defaultWorkspace(a);
+  const verb = a.rest[0];
+  const spawnRoot = path.join(ws, "spawn");
+  const poolPath = path.join(spawnRoot, "pool.json");
+  type PoolRec = Record<string, unknown> & { id?: string; goal?: string; ok?: boolean;
+    mode?: string; depth?: number; budget?: unknown; reuse_count?: number;
+    workspace?: string; usage?: { tokens?: number; model_calls?: number } | null };
+  const loadPool = (): PoolRec[] => {
+    try {
+      const pool = JSON.parse(fs.readFileSync(poolPath, "utf-8")) as { records?: unknown };
+      if (Array.isArray(pool.records)) return pool.records.filter((r): r is PoolRec => !!r && typeof r === "object");
+    } catch { /* 池不存在/损坏 → 空 */ }
+    return [];
+  };
+
+  if (verb !== "prune") {
+    // 池列表 + 统计（观测面）
+    const recs = loadPool();
+    // 孤儿目录（legacy 无登记）
+    const seen = new Set(recs.map((r) => String(r.id ?? "")));
+    const orphans: string[] = [];
+    try {
+      for (const e of fs.readdirSync(spawnRoot, { withFileTypes: true })) {
+        if (!e.isDirectory()) continue;
+        if (!seen.has(e.name)) orphans.push(e.name);
+      }
+    } catch { /* spawn 目录不存在 */ }
+    const okN = recs.filter((r) => r.ok === true).length;
+    const tokens = recs.reduce((s, r) => s + (Number(r.usage?.tokens) || 0), 0);
+    const reuse = recs.reduce((s, r) => s + (Number(r.reuse_count) || 0), 0);
+    console.log(`🌳 派生池 · ${ws}/spawn（登记 ${recs.length} 条 · 成功 ${okN} · 失败 ${recs.length - okN} · 复用 ${reuse} · tokens ${tokens}${orphans.length > 0 ? ` · 孤儿目录 ${orphans.length}` : ""}）\n`);
+    for (const r of recs) {
+      const mark = r.ok === true ? "✓" : "✗";
+      console.log(`  ${mark} ${String(r.id ?? "?").slice(0, 40)}  [${String(r.mode ?? "run")} d${r.depth ?? "?"} ◈${String(r.budget ?? "?")} ♻×${Number(r.reuse_count) || 0}]`);
+    }
+    if (recs.length === 0 && orphans.length === 0) console.log("  （空 —— 尚无派生记录）");
+    console.log("\n  清理：org spawn prune --failed（失败记录）/ --all（全量重置）/ --dry-run（预览）");
+    return 0;
+  }
+
+  // ---- prune ----
+  const flags = a.rest.slice(1);
+  const failed = flags.includes("--failed");
+  const all = flags.includes("--all");
+  const dryRun = flags.includes("--dry-run");
+  if (!failed && !all) {
+    console.error('用法：org spawn prune --failed | --all [--dry-run]');
+    console.error('  --failed  删除全部失败派生（登记 + 目录 + 失败孤儿目录）');
+    console.error('  --all     清空派生池（全部登记 + 目录，不可恢复）');
+    console.error('  --dry-run 只列出将删条目，不动手');
+    return 2;
+  }
+  const inGuard = (p: string): boolean => {
+    try { const abs = path.resolve(p); return abs.startsWith(path.resolve(spawnRoot) + path.sep); }
+    catch { return false; }
+  };
+  const recs = loadPool();
+  const keep: PoolRec[] = [];
+  const dropped: Array<{ id: string; dir?: string }> = [];
+  for (const r of recs) {
+    const id = String(r.id ?? "");
+    const drop = all || (failed && r.ok !== true);
+    if (drop) dropped.push({ id, dir: String(r.workspace ?? "") || undefined });
+    else keep.push(r);
+  }
+  // 孤儿目录：failed 模式删 run.json 标记失败的；all 模式全删
+  const seen = new Set(recs.map((r) => String(r.id ?? "")));
+  try {
+    for (const e of fs.readdirSync(spawnRoot, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      if (seen.has(e.name)) continue;
+      let isFailed = all;
+      if (!isFailed) {
+        try {
+          const j = JSON.parse(fs.readFileSync(path.join(spawnRoot, e.name, "out-spawn", "run.json"), "utf-8")) as { ok?: boolean };
+          isFailed = j.ok !== true;
+        } catch { isFailed = true; } // 半成品 → 失败语义
+      }
+      if (isFailed) dropped.push({ id: e.name, dir: path.join(spawnRoot, e.name) });
+    }
+  } catch { /* spawn 目录不存在 */ }
+  const label = all ? "全量重置" : "失败清理";
+  if (dropped.length === 0) {
+    console.log(`🧹 ${label}：无可清理条目（池登记 ${recs.length} 条均为保留语义）`);
+    return 0;
+  }
+  if (dryRun) {
+    console.log(`🧹 ${label}（dry-run —— 将删除 ${dropped.length} 条）：`);
+    for (const d of dropped) console.log(`  ✂ ${d.id}${d.dir ? "  " + d.dir : ""}`);
+    console.log(`\n  确认执行：org spawn prune ${all ? "--all" : "--failed"}（去掉 --dry-run）`);
+    return 0;
+  }
+  let dirsRemoved = 0, errs = 0;
+  for (const d of dropped) {
+    const dir = d.dir && inGuard(d.dir) ? d.dir : (d.id ? path.join(spawnRoot, d.id) : "");
+    if (!dir || !inGuard(dir) || !fs.existsSync(dir)) continue;
+    try { fs.rmSync(dir, { recursive: true, force: true }); dirsRemoved++; }
+    catch { errs++; console.error(`  ✗ 目录删除失败：${d.id}`); }
+  }
+  try {
+    fs.mkdirSync(spawnRoot, { recursive: true });
+    fs.writeFileSync(poolPath, JSON.stringify({ version: 1, records: keep }, null, 2));
+  } catch (e) {
+    console.error(`✗ pool.json 回写失败：${String((e as Error).message ?? e)}`);
+    return 1;
+  }
+  console.log(`🧹 ${label}完成：删除 ${dropped.length} 条（目录 ${dirsRemoved}${errs ? ` · 失败 ${errs}` : ""}）· 保留 ${keep.length} 条`);
+  return errs > 0 ? 1 : 0;
+}
+
 // ---- org memory：专家长期记忆（v0.5.3） ----------------------------------------
 
 async function cmdMemory(a: Args): Promise<number> {
@@ -2071,6 +2228,8 @@ export async function orgMain(): Promise<number> {
     case "search": return cmdSearch(a);
     case "speak": return cmdSpeak(a);
     case "voice": return cmdVoice(a);
+    case "vision": return cmdVision(a);
+    case "spawn": return cmdSpawn(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -2157,6 +2316,10 @@ export async function orgMain(): Promise<number> {
       "…@?审计制度…" 检索命中自动织入上下文）
   org speak "文本" [--voice v] [--speed s] [--out file.wav]
       文本合成语音（TTS · 7 声音 · 语速 0.5-2.0 · 超长分段拼接）落盘 WAV
+  org vision [图片...] [--prompt "问题"]
+      VLM 图片理解（多图 ≤4 · png/jpeg/gif/webp/bmp · 魔数唤探；无参显示状态）
+  org spawn [prune --failed | --all [--dry-run]]
+      派生池观测与清理（登记 + 目录 + 孤儿；dry-run 预览）
   org voice
       语音服务状态探测 + 声音清单（🎤 转写 / 🔊 朗读需要 SDK 凭据）
   org providers [ledger]

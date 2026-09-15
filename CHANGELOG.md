@@ -1,5 +1,74 @@
 # CHANGELOG
 
+## v0.5.13（2026-09-16）—— 视觉入口 + 派生池清理 + 双 UI 修复（B-20/B-21）
+
+agent-browser QA 复测 v0.5.12 稳定性时发现两枚 UI 回归，随本轮新能力一并
+修复交付。**能力面三新增**：📷 图片分析（capabilities #25 ⬜→✅，重点方向①
+再下一城）· 🔊 声音试听 · 🧹 派生池清理（worklog 风险 #3/#5 收口）。
+测试 536/536 全绿（+24 例：vision 22 + B-20/B-21 回归 2）。
+
+### 双 UI 修复（QA 发现）
+
+- **B-20 幽灵转写浮条**：`.mictx`/`.schmeta` 定义了 `display:flex`，其
+  特异性覆盖 UA 的 `[hidden]{display:none}` → v0.5.12 起「⠋ 转写中…」
+  浮条**从页面加载即常驻显示**（`hidden` 属性形同虚设）。修复：全局
+  `[hidden] { display: none !important; }` 防护规则（一劳永逸防再犯；
+  `.rchip[hidden]` 定向规则保留双保险）。回归测试锚定两受害元素 + 防护规则；
+- **B-21 Enter 派发无视团队模式**：textarea 的 Enter handler 无条件
+  `ask()`（直连车道），完全忽略 `state.mode` → 用户切「团队」后按回车
+  （最常用路径）UI 显示团队、行为却是直连。修复：Enter 与 send 按钮
+  onclick 同构分派（`state.mode === "team" ? runTeam(text) : ask()`）；
+  回归测试锚定 Enter 块内含 mode 分派。修复后团队模式卡农全链路 QA 复验：
+  Enter → 团队 → 语义地板 0 < 0.15 → ⇄ 跨车道救援 → composer →
+  audio_compose → ♪ 24.7s WAV + MIDI（B-19 修复持续有效）。
+
+### lib/vision.ts（视觉入口执行层）
+
+- `analyzeImages`：图片 Buffer 列表 + prompt → VLM 描述。**校验全在 SDK
+  调用前**：张数 ≤4 · 单图 ≤10MB · mime 白名单（png/jpeg/gif/webp/bmp）·
+  **魔数嗅探防伪造 mime**（声明 png 但内容 jpeg → 拒绝）· prompt >2000
+  诚实截断（truncated 标注）· 缺省提示词兜底；
+- SDK 车道：`chat.completions.createVision`（多 content 消息：text +
+  image_url×N data URL · thinking disabled）· 空结果明确错误；
+- **多重优雅降级**（与 voice.ts 同构纪律）：401/凭据缺席 → remedy 文案
+  （部署环境配置后即刻可用，文本交互不受影响）· `DHV_VISION_DISABLE_SDK=1`
+  零外联开关 · `setZaiFactory` 测试注入口（22 例全 mock 零外联）；
+- `visionStatus` 健康探测（凭据在首次调用时校验 —— 与 voice 同语义）。
+
+### Web GUI（web/entry.ts）
+
+- `POST /api/vision`：两种 body 形态（便捷单图 `{image_base64, mime?,
+  prompt?}` / 多图 `{images:[{base64,mime}], prompt}`）；凭据缺席 503
+  JSON；`GET /api/vision-status`（60s 缓存）；
+- **📷 composer 图片钮**（🎤 旁，同构分析→引用闭环）：file picker（多选
+  ≤4）→ FileReader → 分析中浮条（「N 张 · NKB」+ spinner）+ 按钮琥珀脉冲
+  （vispulse）→ 描述追加进输入框（🖼 前缀，可编辑后回车派单）；失败
+  诚实提示 + busy 复位（降级路径按钮不卡死）；
+- **🔊 声音试听钮**（vocard 右上角）：该声音合成一句自我介绍并播放
+  （互斥：新试听先停旧 · busy/play 态 · 401 降级按钮复位 + 人话提示）；
+  试听不切换选中（stopPropagation）；
+- **🧹 派生池清理**：统计条「清理失败」/「重置池」钮（confirm 两步）+
+  行级 🗑 删除钮（hover 浮现，失败行常显 + 红沿 failrow 态）；
+  `DELETE /api/spawns`（body `{mode:"failed"|"all", ids?}` —— 池登记
+  移除 + spawn/<id> 目录整删 + 孤儿半成品 failed 语义 + **路径越界守卫**
+  + pool.json 回写；空态也能清理孤儿目录）。
+
+### CLI
+
+- `org vision [图片...] [--prompt "问题"]`：多图 ≤4 分析输出（魔数嗅探，
+  不信任扩展名）；无参 → 服务状态 + 用法（退出码 3 = 未就绪）；
+- `org spawn [prune --failed | --all [--dry-run]]`：派生池观测（列表 +
+  统计 + 孤儿计数）与清理（dry-run 预览 · 越界守卫 · 与 Web DELETE 同
+  语义）。
+
+### 踩坑记录（模板字符串内嵌 JS 的转义陷阱）
+
+GUI 脚本嵌在 TS 模板字符串里输出 —— 源码里的 `\n`（字符串或**注释中**）
+都会被模板先解释为真实换行 → 浏览器端 JS 字符串断行 / 注释断行致代码
+污染（SyntaxError）。修复：字符串用 `"\\n"`（输出字面转义）；注释避免
+反斜杠转义。教训锚定在 vision.test.ts 的内联脚本自洽断言（new Function
+不抛 = 全脚本语法健康）。
+
 ## v0.5.12（2026-09-16）—— 语音入口：ASR 转写 + TTS 朗读（capabilities #15 🟡→✅）
 
 worklog 风险清单 #1（重点方向①剩余）落地：语音输入/输出。`lib/voice.ts`
