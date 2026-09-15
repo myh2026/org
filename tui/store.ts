@@ -399,9 +399,29 @@ export function pushEngineEvent(state: TuiState, ev: EngineEvent): TuiState {
       return { ...state, notice: { text: `审批超时降级为拒绝 ${ev.capability}（run 未被挂住）`, tone: "warn" } };
     case "approval_cached":
       return { ...state, notice: { text: `长期放行命中 ${ev.capability}`, tone: "info" } };
+    case "unknown":
+      // v0.5.6：unknown 里的具名增强事实（audio_rendered 等）
+      return applyUnknownEvent(state, ev);
     default:
       return state;
   }
+}
+
+/** v0.5.6：unknown 事件里的具名增强事实（引擎桥收尾注入的 audio_rendered）。
+ * TUI 以通知条呈现「渲染了什么、在哪听」；播放/下载走 Web（<audio>）与
+ * CLI（产物目录）的开袋即食通道 —— 终端不嵌播放器是能力边界不是缺陷。 */
+function applyUnknownEvent(state: TuiState, ev: { name: string; data?: Record<string, unknown> }): TuiState {
+  if (ev.name !== "audio_rendered") return state;
+  const files = Array.isArray(ev.data?.["files"])
+    ? (ev.data!["files"] as Array<Record<string, unknown>>)
+    : [];
+  if (files.length === 0) return state;
+  const names = files.map((f) => String(f["wavFile"] ?? f["file"] ?? "?")).join("、");
+  const dur = files.reduce((m, f) => Math.max(m, Number(f["durationSec"] ?? 0)), 0);
+  return {
+    ...state,
+    notice: { text: `♪ 音频产物已渲染：${names}（≈${Math.round(dur)}s，产物目录 / Web 面板可播放）`, tone: "info" },
+  };
 }
 
 function applyJournal(state: TuiState, action: string, detail: string): TuiState {

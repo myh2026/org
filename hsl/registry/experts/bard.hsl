@@ -1,0 +1,126 @@
+// ============================================================================
+// org/registry/experts/bard.hsl — 专家：诗歌创作（写诗能力的产品化）
+// ============================================================================
+// 信封契约（与 ENVELOPE_SIGNATURE 同构）：
+//     fn(spec: TaskSpec) -> Result<StatusReport, ExpertError>
+//
+// 节点分类：
+//   - 判定节点：poetry（经模型网关轨道 "poetry" —— 真实车道由 LLM 创作；
+//     scripted 车道消费剧本，CI 零外联可复现）
+//   - 机械节点：诗行统计 / 工件落盘 —— 纯 HSL
+//
+// 产物：poem.md（诗歌全文工件）+ StatusReport.deliverable（诗节选摘要）。
+// 优雅降级：模型输出为空/过短 → 内置示例诗（降级事实记入 notes，不静默）。
+// ============================================================================
+
+import { StatusReport, TaskSpec } from "../../contracts/contract.hsl";
+import { ExpertError } from "../../types/errors.hsl";
+import { ask } from "../../providers/model.hsl";
+
+/// 边事件（G5：枚举变体 guard）。
+enum BardSignal {
+    DraftReady,
+    PoemEmitted,
+}
+
+/// 判定节点提示词（专家私有静态资源：诗歌创作）。
+const POETRY_PROMPT: String = String::from(
+    "你是诗人。根据任务创作一首诗（可为古典诗、现代诗、俳句、十四行诗等，按任务要求的体裁与主题）。只输出诗本身（可含标题），不要解释、不要前后缀。返工时参考 [审查意见] 修改。"
+);
+
+/// 降级示例诗（产物永不缺席的最小兜底）。
+const FALLBACK_POEM: String = String::from(
+    "《卡农与代码》\n代码如卡农，声部各自运行；\n一行接一行，和声在依赖中成形。\n审查是节拍器，返工是呼吸，\n冻结的记忆里，成本递减如涟漪。"
+);
+
+/// 专家入口 graph（信封契约）。
+export graph Bard(spec: TaskSpec) -> Result<StatusReport, ExpertError> {
+    // node 声明：诗稿行 + 摘要轨迹（mut —— 机械节点逐条写回）
+    node mut poem: Vec<String> = Vec::new();
+    node mut summary: Vec<String> = Vec::new();
+
+    // 拓扑：poem → summary（草稿就绪即出摘要）；环由 PoemEmitted 打破（G3）
+    edge poem -> summary on BardSignal::DraftReady;
+    edge summary -> poem on BardSignal::PoemEmitted;
+
+    // 判定节点：诗歌创作（scripted = 剧本轨道 poetry；真实车道 = LLM 创作）
+    let draft = ask(String::from("poetry"), POETRY_PROMPT.clone(), poetry_user(spec.clone())).await?;
+
+    // 优雅降级：空/过短输出 → 内置示例诗（可观测，不静默）
+    let body = draft.trim();
+    let degraded = body.len() < 12;
+    if degraded {
+        poem.push(FALLBACK_POEM.clone());
+    } else {
+        poem.push(body.clone());
+    }
+
+    // 工件落盘：poem.md
+    let payload = poem[0].clone();
+    let _ = native typescript {
+        $host.artifacts.write("poem.md", payload);
+        return true;
+    };
+
+    // 机械统计（AgentLoop，G1）：诗行数与字符数
+    let lines = payload.clone().lines();
+    let mut line_count: u32 = 0;
+    let mut char_count: u32 = 0;
+    loop {
+        let head = lines_head(lines.clone(), line_count);
+        match head {
+            Some(line) => {
+                line_count = line_count + 1;
+                char_count = char_count + line.len() as u32;
+            },
+            None => break,
+        }
+    }
+    summary.push(format!("lines={} chars={}", line_count, char_count));
+    if degraded {
+        summary.push(String::from("degraded=builtin-sample"));
+    }
+
+    // 报告组装（信封 Ok 侧）
+    let excerpt = if char_count > 120 {
+        payload.clone().take(120)
+    } else {
+        payload.clone()
+    };
+    let mut report = StatusReport::new(
+        spec.task_id,
+        format!("poem.md（{} 行 · {} 字）：{}", line_count, char_count, excerpt),
+        1.0,
+    );
+    report.model_calls = 1;
+    report.tokens_used = 256 + char_count / 2;
+    report.node_trace.push(String::from("poetry ask(track=poetry)"));
+    if degraded {
+        report.notes.push(String::from("模型输出过短 —— 已降级为内置示例诗（创作质量待真实车道复验）"));
+    }
+    Ok(report)
+}
+
+// ---- 机械节点辅助 ------------------------------------------------------------
+
+/// 组装判定节点的用户输入（任务 + 领域负载 + 返工意见）。
+fn poetry_user(spec: TaskSpec) -> String {
+    let mut out = format!("任务：{}\n", spec.goal);
+    if spec.payload.len() > 0 {
+        out.push_str(format!("上下文材料：\n{}\n", spec.payload).as_str());
+    }
+    for note in spec.feedback.iter() {
+        out.push_str(format!("\n[审查意见] {}", note).as_str());
+    }
+    out
+}
+
+/// 行游标（机械节点）。
+fn lines_head(lines: Vec<String>, idx: u32) -> Option<String> {
+    let i = idx as usize;
+    if i < lines.len() {
+        Some(lines[i].clone())
+    } else {
+        None
+    }
+}

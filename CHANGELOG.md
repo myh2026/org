@@ -1,5 +1,60 @@
 # CHANGELOG
 
+## v0.5.6（2026-09-15）—— 音频产物通道（开袋即食）+ 子生孙递归派生 + 作品集 10 项目矩阵
+
+「org agent 成为正常 agent」的产物与组织双补全：古典音乐的交付物从此是
+**可播放的 WAV 音频**（不是一纸乐谱），direct 车道的 agent 可**递归派生
+子组织**（子生孙、深度治理），外加 10 项目作品集矩阵把三条执行车道钉进
+CI。431/431 机制级测试全绿（24 文件 · 1783 expect，+42 例）；真实车道
+实测：DeepSeek deepseek-flash 写诗 + 作曲（audio_compose 工具 → WAV）。
+
+### 音频产物通道（lib/audio.ts · composer 专家 · audio_compose 工具）
+
+- 协议：专家/工具写 `<name>.notes.json` 乐谱工件（title/tempo/notes
+  [{freq,start_beat,beats,gain,wave,channel}]）→ 引擎收尾扫描渲染同名
+  `.wav`（PCM16 立体声 44.1kHz · 44 字节标准 RIFF 头）；
+- 合成器：sine 叠加 2/3 次谐波（钢琴暖度）/triangle/saw/square，5ms
+  起音 + 指数衰减 + 20ms 释放包络，峰值归一化 0.9（不爆音）；
+- 多重优雅降级：字段级容错（坏音符跳过并记录 skipped）、时长上限 240s
+  截断、全静音诚实报错（不产假绿空 WAV）、composer 专家输出非法 JSON
+  → 内置 D 大调卡农进行兜底（降级事实记入 report.notes 可观测）；
+- 三端观测：CLI ♪ 渲染行 + events.jsonl `audio_rendered` 事件 +
+  Web 运行卡 `<audio>` 播放器/下载（`GET /api/audio`）+ TUI 通知条；
+- 静态专家 `composer`（B:reuse 路由 · 轨道 compose）：判定节点经模型
+  网关作曲（真实车道 = LLM 创作；scripted = 剧本）；工具环新增
+  `audio_compose`（direct 车道模型作曲 → 工件 → 渲染）。
+
+### 子生孙递归派生（agent_spawn 工具 · 深度治理）
+
+- 工具环新增 `agent_spawn {goal, mode: run|ask, expert}`：direct 车道
+  agent 可派生完整子组织（团队任务 org run / 直连专家 org ask）——
+  子组织内部工厂铸造的专家即「孙」；
+- 深度治理：`ORG_SPAWN_DEPTH`（派生方经 `--spawn-depth` 旗标注入，白
+  名单友好）+ `ORG_SPAWN_MAX`（上限，缺省 2，0=全局关闭）—— 理论上
+  子子孙孙无穷尽，深度帽是安全线；拒绝先于执行（不烧预算）；
+- 剧本/车道环境全继承（ORG_FIXTURE 透传 · DHV_LLM_* 经 bash 自动透
+  传）；子工作区 `<ws>/spawn/<id>-<slug>`（模板自动铺设）；
+- 工具调用解析多形态宽容（实测 deepseek-flash 混合格式）：规范
+  `<tool>JSON</tool>` / 混合未闭合（`<tool>` 开 + DSML 闭，花括号配
+  平提取）/ 纯 DSML 块。
+
+### 作品集 10 项目矩阵（tests/portfolio.test.ts）
+
+- #1 公告结构化（B:reuse notice-parser）· #2 古典音乐（composer →
+  WAV）· #3 十四行诗（B:reuse bard → poem.md）· #4 变更日志（org
+  import changelog-parser → 嵌套解释器车道 → changelog.md/stats）·
+  #5-#10 内联车道六类文书使命（纪要/周报/风险/术语表/数据字典/发布
+  说明 —— 监督回路 + 审查 + 报告骨架断言）。
+
+### 其他
+
+- 静态专家 `bard`（诗歌创作 · 轨道 poetry · poem.md 工件 · 降级内置
+  示例诗）；
+- 图灵完备实证恢复合入（issue #34：Rule 110 / BB(3) / Brainfuck 三程
+  序四语言对拍 11/11 + vendored dhv-ts 0.2.65→0.2.66 生成器六修 +
+  ruff 语料 3→6）；
+- RunResult 增 audioRendered/audioFailures 字段；Web done 帧与回放
+  面板带音频清单。
 ## v0.5.5（2026-09-13）—— 定时触发器 + webhook 出站 + key 池冷却落盘 + 预算水位三端渲染
 
 issue #32 遗留清单的集中消化：长程任务队列装上**时间维度**（cron /

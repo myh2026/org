@@ -182,9 +182,11 @@ export type RunFact =
   | { t: "runEnd"; ok: boolean; elapsed_ms: number }
   | { t: "result" }
   // 审计与异常类事实（v0.5.0 具名化的那批事件）：统一渲染成一条带色调的提示行
-  | { t: "notice"; tone: "info" | "warn" | "err"; text: string }
+  | { t: "notice"; tone: "info" | "warn" | "err" | "ok"; text: string }
   /** 待批准项：渲染层应给出可操作入口（Web 勾选 / CLI org approvals） */
   | { t: "approval"; id: string; capability: string; action: string; detail: string; tone: "warn"; text: string }
+  /** v0.5.6：音频产物渲染完成（引擎桥收尾注入 —— 并非解释器事件） */
+  | { t: "audio"; files: Array<{ wavFile: string; bytes: number; durationSec: number; notes: number; title: string }>; failures: Array<{ file: string; error: string }> }
   | { t: "other"; name: string; action: string; detail: string };
 
 /**
@@ -241,6 +243,25 @@ export function classifyRunEvent(ev:
     case "run_end":
       return { t: "runEnd", ok: ev.ok, elapsed_ms: ev.elapsed_ms };
     case "unknown":
+      // v0.5.6：引擎桥收尾注入的音频渲染事实（notes.json → wav 开袋即食）
+      if (ev.name === "audio_rendered") {
+        const files = Array.isArray(ev.data?.["files"])
+          ? (ev.data["files"] as Array<Record<string, unknown>>).map((f) => ({
+              wavFile: String(f["wavFile"] ?? f["file"] ?? "?"),
+              bytes: Number(f["bytes"] ?? 0),
+              durationSec: Number(f["durationSec"] ?? 0),
+              notes: Number(f["notes"] ?? 0),
+              title: String(f["title"] ?? "untitled"),
+            }))
+          : [];
+        const failures = Array.isArray(ev.data?.["failures"])
+          ? (ev.data["failures"] as Array<Record<string, unknown>>).map((f) => ({
+              file: String(f["file"] ?? "?"),
+              error: String(f["error"] ?? ""),
+            }))
+          : [];
+        return { t: "audio", files, failures };
+      }
       return { t: "other", name: ev.name, action: String(ev.data?.name ?? ""), detail: String(ev.data?.detail ?? "") };
     case "journal": {
       const { action, detail } = ev;

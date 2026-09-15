@@ -20,6 +20,16 @@
 //   fs_edit   {path, old, new}           唯一锚点编辑（能力门）
 //   shell_run {cmd}                      命令执行（能力门 + --allow 白名单）
 //
+// v0.5.6 新增（Full 模式）：
+//   agent_spawn  {goal, mode?, expert?}  子生孙递归派生：派生一个子组织
+//           （org run 团队任务 / org ask 直连专家）。深度治理：
+//           ORG_SPAWN_DEPTH（当前深度，派生方注入）+ ORG_SPAWN_MAX
+//           （上限，缺省 2，0=关闭）—— 理论上子子孙孙无穷尽，但每层
+//           自主判断是否派生，深度帽是安全线。子进程继承全部车道环境。
+//   audio_compose {name?, title?, tempo?, notes}  古典音乐作曲：写乐谱
+//           工件 <name>.notes.json，引擎收尾自动渲染同名 .wav
+//           （产物开袋即食：音频不是乐谱）。
+//
 // 事件（观测面，三端消费）：
 //   journal tool_call   <tool> <args 摘要>
 //   journal tool_result <tool> ok=<n> chars / denied=<原因>
@@ -73,27 +83,29 @@ export fn tools_prompt(mode: ToolMode) -> String {
         out.push_str("- fs_write {\"path\":\"...\",\"content\":\"...\"} — write a file (may require approval)\n");
         out.push_str("- fs_edit {\"path\":\"...\",\"old\":\"exact unique text\",\"new\":\"replacement\"} — precise edit (may require approval)\n");
         out.push_str("- shell_run {\"cmd\":\"git status\"} — run an allowlisted command (may require approval)\n");
+        out.push_str("- agent_spawn {\"goal\":\"...\",\"mode\":\"run\"|\"ask\",\"expert\":\"name\"} — spawn a sub-organization (team mission via org run, or direct expert via org ask). Depth-governed recursion: use it ONLY when the task genuinely needs multi-step decomposition or another expert's specialty; for trivial lookups use fs_read/fs_list first. The child inherits your model lane.\n");
+        out.push_str("- audio_compose {\"title\":\"...\",\"tempo\":72,\"notes\":[{\"freq\":261.63,\"start_beat\":0,\"beats\":1,\"gain\":0.6,\"wave\":\"sine\"}]} — compose music as structured score; the engine renders a playable .wav alongside your reply (deliverable = audio, not sheet).\n");
     }
     out.push_str("After a tool call you will receive a <tool_result> message; use it and continue. When you have the final answer, reply WITHOUT any <tool> tags.\n");
     out
 }
 
-/// 解析模型回复中的工具调用（<tool>JSON</tool>；坏 JSON 跳过不炸整轮）。
+/// 解析模型回复中的工具调用。多形态宽容（实测真实模型的标记形态多样）：
+///   1. 规范形态：<tool>JSON</tool>
+///   2. 混合未闭合（deepseek-flash 实测）：开标签 <tool>，闭标签吐成
+///      </｜｜DSML｜｜ parameter> 之类原生标记 —— 花括号配平提取 JSON
+///   3. 纯 DSML 块：<｜｜DSML｜｜ invoke> 后跟 {"name":...,"args":{...}}
+/// 坏 JSON 跳过不炸整轮（模型下轮会被结果消息纠正）。
 export fn parse_tool_calls(raw: String) -> Vec<ToolCall> {
     let out: Vec<ToolCall> = native typescript {
         const calls = [];
-        const re = /<tool>\s*([\s\S]*?)\s*<\/tool>/g;
-        let m;
-        while ((m = re.exec(String(raw))) !== null) {
+        const text = String(raw);
+        const pushCall = (jsonText) => {
             try {
-                const o = JSON.parse(m[1]);
+                const o = JSON.parse(jsonText);
                 if (o && typeof o === "object") {
-                    // 多形态宽容（实测真实模型的参数形态多样）：
-                    //   {name, args:{...}}  规范形态
-                    //   {name, path:...}    参数平铺
-                    //   {tool:"...", ...}   tool 键别名
                     const name = String(o.name ?? o.tool ?? "");
-                    if (!name) continue;
+                    if (!name) return;
                     let args = {};
                     if (o.args && typeof o.args === "object" && !Array.isArray(o.args)) {
                         args = o.args;
@@ -110,6 +122,37 @@ export fn parse_tool_calls(raw: String) -> Vec<ToolCall> {
             } catch (e) {
                 // 坏 JSON：跳过（模型下轮会被结果消息纠正）
             }
+        };
+        // 1) 规范形态：<tool>JSON</tool>
+        const re = /<tool>\s*([\s\S]*?)\s*<\/tool>/g;
+        let m;
+        while ((m = re.exec(text)) !== null) pushCall(m[1]);
+        // 2) 混合未闭合：<tool> 开标签 + 任意闭标签（或无闭标签）—— 花括号
+        //    配平提取（字符串感知：忽略引号内的花括号）
+        if (calls.length === 0 && text.indexOf("<tool>") >= 0) {
+            let idx = text.indexOf("<tool>");
+            while (idx >= 0) {
+                const start = text.indexOf("{", idx);
+                if (start >= 0) {
+                    let depth = 0, inStr = false, esc = false, end = -1;
+                    for (let i = start; i < text.length; i++) {
+                        const ch = text[i];
+                        if (esc) { esc = false; continue; }
+                        if (ch === "\\") { esc = true; continue; }
+                        if (ch === '"') { inStr = !inStr; continue; }
+                        if (inStr) continue;
+                        if (ch === "{") depth++;
+                        else if (ch === "}") { depth--; if (depth === 0) { end = i; break; } }
+                    }
+                    if (end > start) pushCall(text.slice(start, end + 1));
+                }
+                idx = text.indexOf("<tool>", idx + 6);
+            }
+        }
+        // 3) 纯 DSML 块：DSML 标记后跟 {"name":...} JSON（deepseek 原生工具调用标记）
+        if (calls.length === 0) {
+            const re2 = /(?:<｜｜DSML｜｜|<\/｜｜DSML｜｜)[^>]*>\s*(\{[\s\S]*?\})\s*(?:<\/｜｜DSML｜｜|$)/g;
+            while ((m = re2.exec(text)) !== null) pushCall(m[1]);
         }
         return calls;
     };
@@ -127,14 +170,24 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
     let args: String = call.args_json.clone();
     let name = call.name.clone();
 
-    // 能力门（读 = Auto；写/执行 = Confirm → 审批队列或明确拒绝）
+    // 能力门（读 = Auto；写/执行 = Confirm → 审批队列或明确拒绝；
+    // v0.5.6：agent_spawn / audio_compose 为编排/产物增强动作，Full 模式即门）
+    if name == String::from("agent_spawn") || name == String::from("audio_compose") {
+        let mode = tool_mode();
+        if mode != ToolMode::Full {
+            emit_tool(String::from("tool_denied"), format!("{} {}", name, "tools read-only"));
+            return json_ok(name.clone(), false, String::from("DENIED: 此工具需要完整工具环（ORG_TOOLS=write 开启）。"));
+        }
+    }
     let gate_cap = match name.as_str() {
         "fs_read" | "fs_list" | "fs_glob" => String::from("file_read"),
         "fs_write" | "fs_edit" => String::from("file_write"),
         "shell_run" => String::from("process_spawn"),
+        "agent_spawn" | "audio_compose" => String::from("agent_spawn"),
         _ => String::from("file_read"),
     };
-    if name != String::from("fs_read") && name != String::from("fs_list") && name != String::from("fs_glob") {
+    if name != String::from("fs_read") && name != String::from("fs_list") && name != String::from("fs_glob")
+        && name != String::from("agent_spawn") && name != String::from("audio_compose") {
         let approved = gate_write(policy, gate_cap, name.clone(), args.clone()).await;
         if approved == String::from("denied") {
             emit_tool(String::from("tool_denied"), format!("{} {}", name, "capability denied"));
@@ -155,7 +208,9 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "fs_write" => tool_fs_write(args.clone()),
         "fs_edit" => tool_fs_edit(args.clone()),
         "shell_run" => tool_shell_run(args.clone()),
-        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/fs_write/fs_edit/shell_run）", name)),
+        "agent_spawn" => tool_agent_spawn(args.clone()).await,
+        "audio_compose" => tool_audio_compose(args.clone()),
+        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/fs_write/fs_edit/shell_run/agent_spawn/audio_compose）", name)),
     };
     emit_tool(String::from("tool_result"), result_summary(result.clone()));
     result
@@ -295,6 +350,151 @@ fn tool_shell_run(args: String) -> String {
     }
 }
 
+// ---- v0.5.6 新工具：子生孙递归派生 + 音频作曲 ----------------------------------
+
+/// 子生孙递归派生：派生一个子组织进程（org run 团队任务 / org ask 直连专家）。
+///
+/// 深度治理（理论可子子孙孙无穷尽，深度帽是安全线）：
+///   ORG_SPAWN_DEPTH  当前深度（派生方注入；顶层缺省 0）
+///   ORG_SPAWN_MAX    深度上限（缺省 2；0 = 全局关闭派生）
+/// 子进程经 bash 继承本进程全部环境（DHV_LLM_* 车道配置自动透传），
+/// 子工作区 <ws>/spawn/<序号>-<slug>（ensureWorkspace 自动铺模板）。
+async fn tool_agent_spawn(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const goal = String(a.goal || a.task || a.question || "");
+            if (!goal) return JSON.stringify({ tool: "agent_spawn", ok: false, error: "args.goal 必填（要派生子组织完成的任务）" });
+            const mode = String(a.mode || "run") === "ask" ? "ask" : "run";
+            const expert = String(a.expert || "");
+            if (mode === "ask" && !expert) return JSON.stringify({ tool: "agent_spawn", ok: false, error: "ask 模式需要 args.expert（直连专家名）" });
+
+            // ---- 深度治理（先于一切执行：拒绝即终态，不烧预算） ----
+            const depth = Number($host.env.get("ORG_SPAWN_DEPTH") || "0") || 0;
+            const maxD = Number($host.env.get("ORG_SPAWN_MAX") || "2");
+            if (maxD === 0) {
+                return JSON.stringify({ tool: "agent_spawn", ok: false, denied: true, error: "递归派生已全局关闭（ORG_SPAWN_MAX=0）。请自行完成任务。" });
+            }
+            const childDepth = depth + 1;
+            if (childDepth > maxD) {
+                return JSON.stringify({
+                    tool: "agent_spawn", ok: false, denied: true,
+                    error: "递归深度已达上限（depth=" + depth + ", max=" + maxD + "）。子子孙孙须有界：请在本层自行完成任务，不要再派生。",
+                });
+            }
+
+            // ---- org 根目录（DHV_TS = <root>/toolchain/dhv-ts/src/main.ts） ----
+            const norm = (s) => String(s || "").replace(/\\/g, "/");
+            const dhv = norm($host.env.get("DHV_TS"));
+            if (!dhv) return JSON.stringify({ tool: "agent_spawn", ok: false, error: "DHV_TS 环境缺席：无法定位 org 根目录（需经 org 宿主启动）" });
+            const root = dhv.replace(/\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/, "");
+            const ws = norm(String($host.config.workspace || "."));
+            const lane = String($host.config.model || "scripted");
+            const fixture = norm(String($host.env.get("ORG_FIXTURE") || ""));
+
+            // ---- 子工作区与产物目录 ----
+            const slug = goal.slice(0, 24).replace(/[^A-Za-z0-9\u4e00-\u9fff]+/g, "-").replace(/^-+|-+$/g, "") || "mission";
+            const childWs = ws + "/spawn/" + Date.now().toString(36) + "-" + slug;
+            const outDir = childWs + "/out-spawn";
+
+            // ---- 命令组装（sh 单引号转义：goal 来自模型，不得破坏命令边界；
+            // 深度经 --spawn-depth 旗标传递 —— env 前缀会破坏 shell 白名单
+            // 首词判定，CLI 旗标是白名单友好的递归通道） ----
+            const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+            let cmd;
+            if (mode === "ask") {
+                cmd = "bun " + q(root + "/cli/org.ts")
+                    + " ask " + q(expert) + " " + q(goal)
+                    + " --workspace " + q(childWs) + " --model " + q(lane)
+                    + (fixture ? " --fixture " + q(fixture) : "")
+                    + " --out " + q(outDir)
+                    + " --spawn-depth " + childDepth;
+            } else {
+                cmd = "bun " + q(root + "/cli/org.ts")
+                    + " run --task " + q(goal)
+                    + " --workspace " + q(childWs) + " --model " + q(lane)
+                    + (fixture ? " --fixture " + q(fixture) : "")
+                    + " --out " + q(outDir)
+                    + " --spawn-depth " + childDepth;
+            }
+
+            const r = await $host.shell.run(cmd, { timeoutMs: 180000 });
+            const out = String(r.stdout || "");
+            // 子运行摘要（交付物行 + 验收行；观测有界）
+            const lines = out.split("\n").filter((l) => /task#|accepted|交付物|✓ harness|♪/.test(l)).slice(-12);
+            return JSON.stringify({
+                tool: "agent_spawn", ok: r.ok, code: r.code,
+                depth: childDepth, max: maxD, mode: mode,
+                workspace: childWs, out: outDir,
+                summary: lines.join("\n").slice(0, 4096),
+                stdout_tail: out.slice(-2048),
+                stderr: String(r.stderr || "").slice(0, 1024),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "agent_spawn", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// 音频作曲（直连车道）：写 <name>.notes.json 工件 —— 引擎收尾扫描渲染
+/// 同名 .wav（开袋即食：交付物是音频不是乐谱）。参数宽容（多形态别名）。
+fn tool_audio_compose(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            let notes = a.notes;
+            // 宽容形态：单个音符对象 / score 简谱串（"261.63:1, 293.66:1, 329.63:2"）
+            if (!Array.isArray(notes)) {
+                if (notes && typeof notes === "object") notes = [notes];
+                else if (typeof a.score === "string") {
+                    notes = String(a.score).split(",").map((seg) => {
+                        const m = seg.trim().split(":");
+                        return { freq: Number(m[0]), beats: Number(m[1] || 1) };
+                    });
+                } else notes = null;
+            }
+            if (!notes || !Array.isArray(notes) || notes.length === 0) {
+                return JSON.stringify({ tool: "audio_compose", ok: false, error: "args.notes 必填（[{freq,start_beat,beats,gain,wave}] 或 score 简谱串）" });
+            }
+            let beat = 0;
+            const clean = notes.slice(0, 20000).map((n) => {
+                const freq = Number(n.freq || n.f || 0);
+                const beats = Number(n.beats ?? n.dur ?? 1);
+                const start = Number(n.start_beat ?? beat);
+                beat = start + beats;
+                return {
+                    freq: freq,
+                    start_beat: start,
+                    beats: beats,
+                    gain: Number(n.gain ?? 0.6),
+                    wave: String(n.wave || "sine"),
+                    channel: String(n.channel || "both"),
+                };
+            }).filter((n) => Number.isFinite(n.freq) && n.freq > 0 && Number.isFinite(n.beats) && n.beats > 0);
+            if (clean.length === 0) {
+                return JSON.stringify({ tool: "audio_compose", ok: false, error: "notes 不含任何合法音符（freq/beats 必须为正数）" });
+            }
+            const name = String(a.name || a.file || "music").replace(/[^A-Za-z0-9_-]/g, "-") || "music";
+            const doc = {
+                title: String(a.title || "audio_compose"),
+                tempo: Number(a.tempo || 90),
+                sample_rate: 44100,
+                notes: clean,
+            };
+            $host.artifacts.write(name + ".notes.json", JSON.stringify(doc, null, 2));
+            const totalBeats = clean.reduce((m, n) => Math.max(m, n.start_beat + n.beats), 0);
+            return JSON.stringify({
+                tool: "audio_compose", ok: true, notes: clean.length,
+                artifact: name + ".notes.json", wav: name + ".wav",
+                duration_hint: Math.round(totalBeats * 60 / doc.tempo) + "s",
+                note: "引擎收尾自动渲染同名 .wav（本次运行产物目录）",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "audio_compose", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
 // ---- 观测与辅助 ----------------------------------------------------------------
 
 /// 事件上总线（journal 通道，三端消费）。
@@ -338,6 +538,9 @@ fn result_summary(result: String) -> String {
             const tool = String(o.tool || "?");
             if (o.ok === true) {
                 const size = o.content != null ? String(o.content).length : o.entries != null ? String(o.entries).length : o.files != null ? String(o.files).length : 0;
+                // v0.5.6：agent_spawn / audio_compose 的观测摘要（深度/音符数等结构化字段）
+                if (tool === "agent_spawn") return tool + " ok depth=" + String(o.depth ?? "?") + " ws=" + String((o.workspace || "?").split("/").pop());
+                if (tool === "audio_compose") return tool + " ok notes=" + String(o.notes ?? "?") + " wav=" + String(o.wav ?? "?");
                 return tool + " ok " + size + " chars";
             }
             return tool + " error " + String(o.error || "").slice(0, 120);

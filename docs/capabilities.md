@@ -1,4 +1,4 @@
-# ORG 能力矩阵 —— 主 Agent 150 项 / 专家 Agent 25 项对照（v0.5.4）
+# ORG 能力矩阵 —— 主 Agent 150 项 / 专家 Agent 25 项对照（v0.5.4 底稿 + v0.5.6 增补）
 
 > 本文是**毕业论文的能力对照底稿**：把 ORG 当前实现（v0.5.4，357/357 测试全绿）
 > 对照「桌面 Agent 主 agent 应有的 150 项能力」（十大类）与「专家 agent 应有的
@@ -12,6 +12,21 @@
 > 类的外围）为诚实未做。
 
 ---
+
+
+---
+
+## v0.5.6 增补（2026-09-15）
+
+> v0.5.6 在 v0.5.4 底稿之上新增三项（+42 测试，全量 431/431）：
+
+| 增补 | 状态 | 实现位置 / 说明 |
+|:--|:--|:--|
+| **音频产物通道**（产物开袋即食——超出 150 项清单的新维度） | ✅ | `lib/audio.ts`（WAV 合成渲染器：PCM16 立体声 · 谐波叠加 · 包络 · 峰值归一化 · 多重降级）· 静态专家 `composer`（B:reuse 路由）· 工具环 `audio_compose` · CLI ♪ 行 + `audio_rendered` 事件 + Web `<audio>` 播放器（`GET /api/audio`）+ TUI 通知条。古典音乐的交付物是可播放 WAV，不是乐谱。真实车道实测：DeepSeek deepseek-flash 经工具环作曲 → 27.1s WAV。 |
+| **#129 多 Agent 协作 → 递归派生（子生孙）** | ✅（升级） | 工具环 `agent_spawn {goal, mode, expert}`：direct 车道 agent 派生完整子组织（org run 团队任务 / org ask 直连专家）；子组织工厂铸造的专家即「孙」。深度治理 `ORG_SPAWN_DEPTH`/`ORG_SPAWN_MAX`（缺省 2，0=关闭）——理论上子子孙孙无穷尽，深度帽是安全线；拒绝先于执行。 |
+| **作品集 10 项目矩阵**（验收口径落地） | ✅ | `tests/portfolio.test.ts`：三条执行车道（A 内联 / B 复用静态 / B 复用导入 harness）× 10 类使命（公告/音乐/诗歌/变更日志/纪要/周报/风险/术语表/数据字典/发布说明）全部 scripted 进 CI。 |
+| 静态专家 `bard`（诗歌创作） | ✅ | 轨道 `poetry` · poem.md 工件 · 降级内置示例诗；真实车道实测写诗闭环。 |
+| 图灵完备实证（issue #34） | ✅ | `fixtures/turing/`（Rule 110 / BB(3) / Brainfuck）× 四语言对拍（解释器 + python ruff + rustc + g++）11/11；vendored dhv-ts 0.2.65→0.2.66；ruff 语料 3→6。 |
 
 ## 一、交互与入口（1–15）
 

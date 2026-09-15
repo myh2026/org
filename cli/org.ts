@@ -34,6 +34,7 @@ import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          latestHarnessRunDir, reviewCandidates, applyReview,
          forkSession, revertExpert, archivedVersions, renameSession, deleteSession } from "../lib/engine.ts";
 import { readCostTimeline, renderCostTimeline, latestScorecardDir } from "../lib/engine.ts";
+import { scanAndRenderArtifacts } from "../lib/audio.ts"; // v0.5.6 音频产物通道（CLI 车道）
 import { listApprovals, decideApproval, clearGranted } from "../lib/approvals.ts";
 import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
@@ -120,6 +121,7 @@ interface Args {
   exportDist: boolean;
   toVersion: string;      // org revert --to <x.y.z>
   approval: boolean;      // org run --approval（开交互式审批队列）
+  spawnDepth: number;     // v0.5.6：递归派生深度（agent_spawn 工具注入；内部旗标）
   rest: string[];
 }
 
@@ -150,6 +152,7 @@ function parseArgs(argv: string[]): Args {
     exportDist: false,
     toVersion: "",
     approval: false,
+    spawnDepth: 0,
     rest: [],
   };
   let i = 1;
@@ -168,6 +171,7 @@ function parseArgs(argv: string[]): Args {
     else if (v === "--export-dist") a.exportDist = true;
     else if (v === "--to") a.toVersion = argv[++i] ?? "";
     else if (v === "--approval") a.approval = true;
+    else if (v === "--spawn-depth") a.spawnDepth = Math.max(0, Number(argv[++i] ?? "0") || 0);
     else if (v === "--continue" || v === "-c") a.continue = true;
     else if (v === "--name") a.name = (argv[++i] ?? "").toLowerCase();
     else if (v === "--description" || v === "--desc") a.description = argv[++i] ?? "";
@@ -199,7 +203,33 @@ async function runHsl(entry: string, opts: {
     "--out", opts.out,
     "--allow", "bun,node,ls,cat,grep,diff,git",
   ];
-  return dhvRun(args, opts.env);
+  const r = await dhvRun(args, {
+    // v0.5.6：剧本路径透传（agent_spawn 子组织派生需要；绝对路径跨工作区可用）
+    ORG_FIXTURE: path.resolve(opts.fixture),
+    ...(opts.env ?? {}),
+  });
+  try {
+    // v0.5.6 音频产物通道（CLI 车道）：*.notes.json → 同名 .wav（开袋即食）。
+    // 扫描两处：run 产物目录（静态/工具环车道）+ work-out（磁盘专家车道）。
+    // 渲染结果拼进运行输出（♪ 行）+ events.jsonl 留痕；失败不改变 run 语义。
+    const audio = scanAndRenderArtifacts(opts.out);
+    const workOut = scanAndRenderArtifacts(path.join(opts.workspace, "work-out"));
+    audio.rendered.push(...workOut.rendered);
+    audio.failures.push(...workOut.failures);
+    if (audio.rendered.length > 0) {
+      for (const a of audio.rendered) {
+        r.out += `\n♪ 音频产物已渲染：${a.wavFile}（${a.title} · ${a.durationSec}s · ${a.notes} 音符 · ${(a.bytes / 1024).toFixed(0)}KB）`;
+      }
+      fs.appendFileSync(
+        path.join(opts.out, "events.jsonl"),
+        JSON.stringify({
+          seq: 2 ** 30 - 1, ts: new Date().toISOString(), name: "audio_rendered",
+          data: { files: audio.rendered, failures: audio.failures },
+        }) + "\n",
+      );
+    }
+  } catch { /* 音频渲染失败不影响 run 结果 */ }
+  return r;
 }
 
 async function checkFile(file: string): Promise<boolean> {
@@ -222,6 +252,8 @@ async function cmdRun(a: Args): Promise<number> {
   if (a.approveCapability) env.ORG_CAPABILITY_APPROVED = "1";
   // 交互式审批：能力类决策写请求 + 有界等待（另一终端跑 org approvals --watch）
   if (a.approval) env.ORG_APPROVAL = "1";
+  // v0.5.6：递归派生深度透传（agent_spawn 工具链：子组织的工具环须知道自己在第几层）
+  if (a.spawnDepth > 0) env.ORG_SPAWN_DEPTH = String(a.spawnDepth);
   const r = await runHsl(HSL_ENTRY, {
     workspace: a.workspace, task: a.task, model: a.model,
     fixture: a.fixture, out, env,
@@ -560,6 +592,8 @@ async function cmdAsk(a: Args): Promise<number> {
     ORG_ASK_EXPERT: expert,
     ORG_ASK_SESSION: a.session,
   };
+  // v0.5.6：递归派生深度透传（agent_spawn ask 模式子组织）
+  if (a.spawnDepth > 0) env.ORG_SPAWN_DEPTH = String(a.spawnDepth);
   // v0.5.3：@文件/目录引用展开（workspace 相对路径 → 围栏内容注入）
   if (question.includes("@")) {
     const m = expandMentions(question, a.workspace);

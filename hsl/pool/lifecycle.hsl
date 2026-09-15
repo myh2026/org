@@ -14,6 +14,8 @@ import { StatusReport, TaskSpec } from "../contracts/contract.hsl";
 import { ExpertError } from "../types/errors.hsl";
 import { ExpertManifest } from "../registry/manifest.hsl";
 import { NoticeParser } from "../registry/experts/notice-parser.hsl";
+import { Composer } from "../registry/experts/composer.hsl";
+import { Bard } from "../registry/experts/bard.hsl";
 
 /// 实例生命周期状态（候选态 = 影子晋升的载体：镜像生产流量计分，不交付）。
 #[derive(Debug, Clone, PartialEq)]
@@ -294,9 +296,17 @@ fn static_dispatch(name: String, spec: TaskSpec) -> Result<StatusReport, ExpertE
     if name == String::from("notice-parser") {
         NoticeParser::run(spec)
     } else {
-        Err(ExpertError::capability(
-            name,
-            String::from("未知静态专家（随发行静态专家需在 static_dispatch 登记）"),
-        ))
+        if name == String::from("composer") {
+            Composer::run(spec)
+        } else {
+            if name == String::from("bard") {
+                Bard::run(spec)
+            } else {
+                Err(ExpertError::capability(
+                    name,
+                    String::from("未知静态专家（随发行静态专家需在 static_dispatch 登记）"),
+                ))
+            }
+        }
     }
 }

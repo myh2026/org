@@ -27,6 +27,7 @@ import {
 import { ROOT } from "./root.ts";
 import { readSession as libReadSession } from "./sessions.ts";
 import { prepareLlmEnv } from "./router.ts";
+import { scanAndRenderArtifacts } from "./audio.ts";
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const STOCK_FIXTURE = path.join(ROOT, "fixtures/run-notices.json");
@@ -70,6 +71,10 @@ export interface RunResult {
   runJson: { ts?: string; ok?: boolean; elapsed_ms?: number; model?: string; task?: string; panic?: string } | null;
   metrics: RunMetrics | null;
   directTurns?: DirectTurn[];
+  /** v0.5.6 音频产物：本 run 渲染出的 .wav（开袋即食交付物）。 */
+  audioRendered?: Array<{ wavFile: string; bytes: number; durationSec: number; notes: number; title: string }>;
+  /** 音频渲染失败项（观察面：不影响 run 语义）。 */
+  audioFailures?: Array<{ file: string; error: string }>;
 }
 
 export interface RunHandle {
@@ -797,6 +802,20 @@ export function readMetrics(outDir: string): RunMetrics | null {
   }
 }
 
+/**
+ * 向产物目录的 events.jsonl 追加一条桥侧事件（append-only 契约）。
+ * 音频渲染（audio_rendered）等增强通道使用：解释器进程已退出，桥层
+ * 把「渲染了哪些 .wav」留痕进事件流 —— 三端（CLI/Web/TUI）统一观测面。
+ */
+function appendEvent(
+  outDir: string,
+  ev: { seq: number; ts: string; name: string; data: unknown },
+): void {
+  try {
+    fs.appendFileSync(path.join(outDir, "events.jsonl"), JSON.stringify(ev) + "\n");
+  } catch { /* 事件目录不可写：静默（渲染结果已通过 RunResult 返回） */ }
+}
+
 export interface Scorecard {
   model: string;
   evidence_count: number;
@@ -1151,6 +1170,28 @@ export function startRun(opts: RunOptions): RunHandle {
   const capture: string[] = [];
 
   const finish = (ok: boolean, error?: string): void => {
+    // v0.5.6 音频产物通道：扫描产物目录的 *.notes.json → 同名 .wav
+    // （「产物开袋即食」—— 古典音乐的交付物是可播放音频，不是乐谱）。
+    // 渲染失败不改变 run 结果（观测面记录 failure），绝不炸穿收尾。
+    let audioRendered: Array<{ wavFile: string; bytes: number; durationSec: number; notes: number; title: string }> = [];
+    let audioFailures: Array<{ file: string; error: string }> = [];
+    try {
+      // 两处扫描：run 产物目录（静态/工具环车道）+ work-out（磁盘专家车道）
+      const audio = scanAndRenderArtifacts(outDir);
+      const workOut = scanAndRenderArtifacts(path.join(opts.workspace, "work-out"));
+      audio.rendered.push(...workOut.rendered);
+      audio.failures.push(...workOut.failures);
+      audioRendered = audio.rendered.map((a) => ({
+        wavFile: a.wavFile, bytes: a.bytes, durationSec: a.durationSec, notes: a.notes, title: a.title,
+      }));
+      audioFailures = audio.failures;
+      if (audioRendered.length > 0) {
+        appendEvent(outDir, {
+          seq: 2 ** 30 - 1, ts: new Date().toISOString(), name: "audio_rendered",
+          data: { files: audioRendered, failures: audioFailures },
+        });
+      }
+    } catch { /* 音频渲染是增强通道：失败不影响 run 语义 */ }
     const runJson = readRunJson(outDir);
     const metrics = readMetrics(outDir);
     const turns = opts.entry === "direct"
@@ -1161,6 +1202,7 @@ export function startRun(opts: RunOptions): RunHandle {
       elapsed_ms: runJson?.elapsed_ms ?? 0,
       error: error ?? runJson?.panic ?? undefined,
       runJson, metrics, directTurns: turns,
+      audioRendered, audioFailures,
     };
     q.push({
       kind: "run_result", seq: 2 ** 30, ts: new Date().toISOString(),
@@ -1198,7 +1240,11 @@ export function startRun(opts: RunOptions): RunHandle {
         if (typeof v === "string") env[k] = v;
       }
       env.DHV_TS = shPath(resolveDhv());
-      const envExtra: Record<string, string> = { DHV_TS: shPath(resolveDhv()) };
+      const envExtra: Record<string, string> = {
+        DHV_TS: shPath(resolveDhv()),
+        // v0.5.6：剧本路径透传（agent_spawn 子组织派生需要）
+        ORG_FIXTURE: path.resolve(fixture),
+      };
       // 交互式审批开关（缺省不开：见 RunOptions.approval 的说明）
       if (opts.approval === true) envExtra.ORG_APPROVAL = "1";
       if (opts.entry === "direct") {

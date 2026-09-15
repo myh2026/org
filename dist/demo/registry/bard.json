@@ -1,0 +1,1 @@
+{"name":"bard","version":"1.0.0","bnf":"v1.5.0","description":"诗歌创作（古典诗、现代诗、俳句、十四行诗；写诗任务的诗文创作与 poem.md 工件产出）","capabilities":["poetry","creative"],"signature":"fn(TaskSpec) -> Result<StatusReport, ExpertError>","source":"manual","eval_score":1,"fixture":"factory/samples/bard.json","entry":"(in-process)","uses":0,"pass_rate":1,"retained":true,"provenance":[]}

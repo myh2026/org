@@ -5,9 +5,9 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.5.5_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
-[![Tests](https://img.shields.io/badge/tests-389%2F389_passing-brightgreen.svg)](#-测试与验证状态)
-[![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.64-blue.svg)](https://github.com/myh2026/harness-specification-language)
+[![Status](https://img.shields.io/badge/status-v0.5.6_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Tests](https://img.shields.io/badge/tests-431%2F431_passing-brightgreen.svg)](#-测试与验证状态)
+[![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.66-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
 [![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-三平台单二进制分发)
 [![CI](https://github.com/myh2026/org/actions/workflows/ci.yml/badge.svg)](https://github.com/myh2026/org/actions/workflows/ci.yml)
@@ -19,7 +19,9 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **v0.5.5 当前状态**：可运行实现，**389/389 机制级测试全绿**（20 文件 · 1600 expect）。本版集中消化 issue #32 遗留清单：**定时任务触发器**（org schedule：五段 cron / @every · 到期自动入队 · misfire 策略 · taskd/web 执行器挂载）· **通知 webhook 出站**（notify_webhook_url · 三通道互不影响）· **key 池状态落盘跨进程共享**（429 冷却 60s→0s 档位 · 沉底排序）· **预算水位三端渲染**（CLI/chat/Web 统一口径）· **chat REPL 指挥台化**（/tools /lane /tasks /sched /notify）。
+> **v0.5.6 当前状态**：可运行实现，**431/431 机制级测试全绿**（24 文件 · 1783 expect）。本版双补全「产物与组织」：**音频产物通道**（notes.json 乐谱工件 → 引擎收尾渲染同名 WAV，古典音乐的交付物是可播放音频不是乐谱；composer 专家 + audio_compose 工具 + Web `<audio>` 播放器，DeepSeek 真实车道实测闭环）· **子生孙递归派生**（agent_spawn 工具：direct 车道 agent 派生完整子组织，ORG_SPAWN_DEPTH/MAX 深度治理，理论上子子孙孙无穷尽而安全线有界）· **作品集 10 项目矩阵**（三条执行车道 × 10 类使命进 CI）· 图灵完备实证合入（issue #34 三程序四语言对拍 11/11）。
+>
+> **v0.5.5 历史状态**：可运行实现，389/389 机制级测试全绿（20 文件 · 1600 expect）。本版集中消化 issue #32 遗留清单：**定时任务触发器**（org schedule：五段 cron / @every · 到期自动入队 · misfire 策略 · taskd/web 执行器挂载）· **通知 webhook 出站**（notify_webhook_url · 三通道互不影响）· **key 池状态落盘跨进程共享**（429 冷却 60s→0s 档位 · 沉底排序）· **预算水位三端渲染**（CLI/chat/Web 统一口径）· **chat REPL 指挥台化**（/tools /lane /tasks /sched /notify）。
 
 > **v0.5.4 历史状态**：可运行实现，**357/357 机制级测试全绿**（19 文件 · 1481 expect）。本版落地**HSL python 产物 ruff 门禁**：python 生成器从 134 项 ruff 失败修到全规则全绿（按需导入 / 变体桩类 / 复合赋值算符翻倍等六修，双仓同步 + 上游 176/176 回归）· `scripts/ruff-gate.ts` 三语料门禁（ORG 内核 python 投射 + 全特性语料 + 模式全家族）· CI 接线（uv + ruff）。org.hsl 新增 python 投射车道（一源多投射实证）。
 

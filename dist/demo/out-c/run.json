@@ -1,7 +1,7 @@
 {
-  "ts": "2026-09-13T13:37:53.120Z",
+  "ts": "2026-09-15T15:06:18.864Z",
   "ok": true,
-  "elapsed_ms": 80,
+  "elapsed_ms": 314,
   "model": "scripted",
   "task": "抓取某站点近一周公告，输出结构化表格",
   "events": 47

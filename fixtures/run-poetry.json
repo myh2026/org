@@ -1,0 +1,30 @@
+{
+  "acts": [],
+  "reviews": [],
+  "tracks": {
+    "decompose": [
+      "[{\"id\": 1, \"goal\": \"确定诗歌体裁与主题立意（十四行诗，代码与音乐）\", \"role\": \"conceive\", \"skills\": [], \"depends_on\": [], \"priority\": 1, \"input\": \"mission\"}, {\"id\": 2, \"goal\": \"创作诗歌全文并产出 poem.md 工件\", \"role\": \"poetry\", \"skills\": [\"poetry\"], \"depends_on\": [1], \"priority\": 2, \"input\": \"mission\"}]"
+    ],
+    "clarify": [
+      "[\"体裁偏好：十四行诗还是俳句？\", \"主题基调：理性还是抒情？\"]"
+    ],
+    "answers": [
+      "[\"十四行诗（可自由分段）\", \"理性与抒情交织，呼应多智能体协作\"]"
+    ],
+    "poetry": [
+      "《代码与卡农》\n一行代码起，如种子入土，\n分解的任务，是春天的图谱。\n专家在池中醒来，接过工单，\n和声便在依赖里悄然生长。\n\n审查是节拍器，敲打着节拍，\n返工是呼吸，让旋律更真。\n冻结的记忆里藏着旧日的答案，\n成本如涟漪，一圈圈递减。\n\n而当测试全绿，夜色深沉，\n你听——那不是机器的轰鸣，\n是无数个自己，在时间里合唱。"
+    ],
+    "review:conceive": [
+      "{\"verdict\": \"accept\"}"
+    ],
+    "review:poetry": [
+      "{\"verdict\": \"accept\"}"
+    ],
+    "direct:bard": [
+      "我是诗人 poet：诗稿已写入 poem.md 工件（本次运行的产物目录）。"
+    ],
+    "handoff:bard": [
+      "一句话版：poet 专家按工单创作诗歌，全文落盘 poem.md，报告附诗节选。"
+    ]
+  }
+}

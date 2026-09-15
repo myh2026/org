@@ -1,0 +1,244 @@
+// ============================================================================
+// org/registry/experts/composer.hsl — 专家：古典音乐作曲（音频产物链路）
+// ============================================================================
+// 信封契约（与 ENVELOPE_SIGNATURE 同构）：
+//     fn(spec: TaskSpec) -> Result<StatusReport, ExpertError>
+//
+// 「产物开袋即食」的执行层：本专家产出的不是乐谱文本，而是结构化工件
+// music.notes.json —— 引擎收尾钩子（lib/audio.ts）扫描 *.notes.json 自动
+// 渲染同名 music.wav（PCM16 立体声）。用户拿到的直接是可播放的音频。
+//
+// 节点分类：
+//   - 判定节点：compose（经模型网关轨道 "compose" —— 真实车道由 LLM 创作
+//     乐谱 JSON；scripted 车道消费剧本，CI 零外联可复现）
+//   - 机械节点：乐谱归一化 / 统计汇总 / 工件落盘 —— 纯 HSL + native IO
+//
+// 优雅降级（多重备用）：模型输出非法 JSON / notes 为空 / 字段全非法 →
+// 内置 D 大调卡农进行（帕赫贝尔卡农的声部进行，确定性合成）—— 产物
+// 永不缺席，降级事实记入 report.notes（可观测，不静默）。
+// ============================================================================
+
+import { StatusReport, TaskSpec } from "../../contracts/contract.hsl";
+import { ExpertError } from "../../types/errors.hsl";
+import { ask } from "../../providers/model.hsl";
+
+/// 边事件（G5：枚举变体 guard）。
+enum ComposerSignal {
+    DraftReady,
+    ScoreEmitted,
+}
+
+/// 判定节点提示词（专家私有静态资源：乐谱 JSON 创作）。
+const COMPOSE_PROMPT: String = String::from(
+    "你是古典音乐作曲家。为给定任务创作一段乐谱，输出严格 JSON（不要 markdown 围栏、不要解释文字）：\n{\"title\":\"标题\",\"tempo\":72,\"notes\":[{\"freq\":261.63,\"start_beat\":0,\"beats\":1,\"gain\":0.6,\"wave\":\"sine\",\"channel\":\"both\"}]}\n字段约束：freq 为频率 Hz（20..4000）；start_beat/beats 为拍位与时值（正数）；gain 0..1；wave 可选 sine/triangle/saw/square；channel 可选 both/left/right。作曲要求：使用和声进行（如 D-A-Bm-F#m-G-D-G-A 卡农进行）；至少两个声部层次（低音分解和弦 + 上方旋律长音）；tempo 60..120；16..96 个音符；总长 8..48 拍。只输出 JSON。"
+);
+
+/// 专家入口 graph（信封契约）。
+export graph Composer(spec: TaskSpec) -> Result<StatusReport, ExpertError> {
+    // node 声明：乐谱工件行 + 摘要轨迹（mut —— 机械节点逐条写回）
+    node mut score: Vec<String> = Vec::new();
+    node mut summary: Vec<String> = Vec::new();
+
+    // 拓扑：score → summary（草稿就绪即出摘要）；summary → score 由
+    // ScoreEmitted 打破（G3：环上 guard 边）
+    edge score -> summary on ComposerSignal::DraftReady;
+    edge summary -> score on ComposerSignal::ScoreEmitted;
+
+    // 判定节点：作曲（scripted = 剧本轨道 compose；真实车道 = LLM 创作）
+    let draft = ask(String::from("compose"), COMPOSE_PROMPT.clone(), compose_user(spec.clone())).await?;
+
+    // 机械节点：宽容归一化 + 优雅降级（非法输出 → 内置卡农进行）
+    let normalized = normalize_score(draft);
+    let notes_json = normalized.0;
+    let degraded = normalized.1;
+    score.push(notes_json.clone());
+
+    // 工件落盘：music.notes.json（引擎收尾扫描 → 自动渲染 music.wav）
+    let payload_json = notes_json.clone();
+    let _ = native typescript {
+        $host.artifacts.write("music.notes.json", payload_json);
+        return true;
+    };
+
+    // 机械节点：音符行解析（freq/start/beats 三元组 → HSL 侧统计）
+    let rows: Vec<(f64, f64, f64)> = native typescript {
+        try {
+            const o = JSON.parse(payload_json);
+            const arr = Array.isArray(o && o.notes) ? o.notes : [];
+            return arr.map((n) => [Number(n.freq || 0), Number(n.start_beat ?? 0), Number(n.beats ?? 0)]);
+        } catch (e) {
+            return [];
+        }
+    };
+
+    // 机械节点：曲名与速度（报告摘要用）
+    let meta: (String, f64) = native typescript {
+        try {
+            const o = JSON.parse(payload_json);
+            return [String(o.title || "untitled"), Number(o.tempo || 90)];
+        } catch (e) {
+            return ["untitled", 90];
+        }
+    };
+
+    // AgentLoop（G1）：逐音符统计 —— 有效音符数 + 尾拍（时长换算原料）
+    let mut cursor: u32 = 0;
+    let mut count: u32 = 0;
+    let mut end_beat: f64 = 0.0;
+    loop {
+        let head = rows_head(rows.clone(), cursor);
+        match head {
+            Some(r) => {
+                cursor = cursor + 1;
+                if r.0 > 0.0 && r.2 > 0.0 {
+                    end_beat = max_f64(end_beat, r.1 + r.2);
+                    count = count + 1;
+                }
+            },
+            None => break,
+        }
+    }
+
+    // 时长（秒）= 尾拍 × 每拍秒数
+    let duration_sec = end_beat * 60.0 / meta.1;
+    summary.push(format!("notes={} tempo={} duration={:.1}s", count, meta.1, duration_sec));
+    if degraded {
+        summary.push(String::from("degraded=builtin-canon"));
+    }
+
+    // 报告组装（信封 Ok 侧；降级事实不静默 —— notes 通道留给审查与用户）
+    let mut report = StatusReport::new(
+        spec.task_id,
+        format!(
+            "music.notes.json + music.wav（{}「{}」：{} 个音符 · {:.1} 秒 · {}）",
+            if degraded { String::from("降级") } else { String::from("创作") },
+            meta.0,
+            count,
+            duration_sec,
+            summary.join(" ")
+        ),
+        1.0,
+    );
+    report.model_calls = 1;
+    report.tokens_used = 512 + 24 * count;
+    report.node_trace.push(String::from("compose ask(track=compose)"));
+    if degraded {
+        report.notes.push(String::from("模型输出未解析为合法乐谱 —— 已降级为内置 D 大调卡农进行（产物完整，创作质量待真实车道复验）"));
+    }
+    if count == 0 {
+        report.notes.push(String::from("乐谱不含有效音符（引擎渲染将失败并留痕 audio failure）"));
+    }
+    Ok(report)
+}
+
+// ---- 机械节点辅助 ------------------------------------------------------------
+
+/// 组装判定节点的用户输入（任务 + 领域负载 + 返工意见）。
+fn compose_user(spec: TaskSpec) -> String {
+    let mut out = format!("任务：{}\n", spec.goal);
+    if spec.payload.len() > 0 {
+        out.push_str(format!("上下文材料：\n{}\n", spec.payload).as_str());
+    }
+    for note in spec.feedback.iter() {
+        out.push_str(format!("\n[审查意见] {}", note).as_str());
+    }
+    out.push_str("请创作乐谱（严格 JSON，不要围栏）。");
+    out
+}
+
+/// 宽容归一化：模型原始输出 → 合法乐谱 JSON；任何不可解析形态 → 内置
+/// 卡农进行（降级位 = true）。返回 (notes_json, degraded)。
+fn normalize_score(raw: String) -> (String, bool) {
+    let r = raw.clone();
+    let out: (String, bool) = native typescript {
+        try {
+            const o = JSON.parse(r);
+            const notes = Array.isArray(o && o.notes) ? o.notes : null;
+            if (!notes || notes.length === 0) throw new Error("notes empty");
+            const clean = notes.slice(0, 20000).map((n) => ({
+                freq: Number(n.freq),
+                start_beat: Number(n.start_beat ?? n.start ?? 0),
+                beats: Number(n.beats ?? n.dur ?? n.duration_beats ?? 1),
+                gain: Number(n.gain ?? 0.6),
+                wave: String(n.wave || "sine"),
+                channel: String(n.channel || "both"),
+            })).filter((n) => Number.isFinite(n.freq) && n.freq > 0
+                && Number.isFinite(n.beats) && n.beats > 0);
+            if (clean.length === 0) throw new Error("no valid notes");
+            return [JSON.stringify({
+                title: String((o && o.title) || "untitled"),
+                tempo: Number((o && o.tempo) || 90),
+                sample_rate: 44100,
+                notes: clean,
+            }, null, 2), false];
+        } catch (e) {
+            return ["", true];
+        }
+    };
+    if out.1 == true {
+        return (canon_fallback(), true);
+    }
+    (out.0, false)
+}
+
+/// 内置降级曲：D 大调卡农进行（帕赫贝尔）—— 低音分解和弦 + 上方长音
+/// 声部，8 小节 32 拍，确定性合成（真实车道故障时的产物兜底）。
+fn canon_fallback() -> String {
+    let out: String = native typescript {
+        // 和弦（频率组）：D A Bm F#m G D G A —— 卡农进行的低音线
+        const CHORDS = [
+            [146.83, 220.00, 293.66, 369.99], // D
+            [110.00, 220.00, 277.18, 329.63], // A
+            [123.47, 185.00, 246.94, 293.66], // Bm
+            [92.50, 185.00, 220.00, 277.18],  // F#m
+            [98.00, 146.83, 196.00, 246.94],  // G
+            [146.83, 220.00, 293.66, 369.99], // D
+            [98.00, 146.83, 196.00, 293.66],  // G
+            [110.00, 220.00, 277.18, 440.00], // A
+        ];
+        // 上方声部长音（D5 C#5 B4 A4 G4 F#4 G4 A4 —— 与低音线严格对齐）
+        const CANTUS = [587.33, 554.37, 493.88, 440.00, 392.00, 369.99, 392.00, 440.00];
+        const notes = [];
+        for (let bar = 0; bar < CHORDS.length; bar++) {
+            const ch = CHORDS[bar];
+            // 低音声部：每拍一个分解和弦音（bass-fifth-octave-tenth）
+            for (let i = 0; i < 4; i++) {
+                notes.push({
+                    freq: ch[i], start_beat: bar * 4 + i, beats: 1,
+                    gain: 0.5, wave: "sine", channel: "both",
+                });
+            }
+            // 上方声部：整小节长音（cantus firmus）
+            notes.push({
+                freq: CANTUS[bar], start_beat: bar * 4, beats: 4,
+                gain: 0.62, wave: "sine", channel: "both",
+            });
+        }
+        return JSON.stringify({
+            title: "D 大调卡农（降级内置）",
+            tempo: 72,
+            sample_rate: 44100,
+            notes: notes,
+        }, null, 2);
+    };
+    out
+}
+
+/// 行游标（机械节点：按已处理数取下一行）。
+fn rows_head(rows: Vec<(f64, f64, f64)>, idx: u32) -> Option<(f64, f64, f64)> {
+    let i = idx as usize;
+    if i < rows.len() {
+        Some(rows[i])
+    } else {
+        None
+    }
+}
+
+/// f64 取大（机械节点）。
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}

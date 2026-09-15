@@ -496,9 +496,12 @@ function sseRun(ws: string, req: { task: string; model: string }): Response {
             } else {
               send("done", {
                 ok: res.ok, canceled: res.canceled, outDir: res.outDir,
+                outDirName: path.basename(res.outDir),
                 elapsed_ms: res.elapsed_ms, error: res.error ?? null,
                 metrics: res.metrics ?? null,
                 runJson: res.runJson ?? null,
+                audioRendered: res.audioRendered ?? [],
+                audioFailures: res.audioFailures ?? [],
               });
             }
           } finally {
@@ -974,6 +977,25 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
             hitLedger: info.hitLedger,
             minedTracks: info.minedTracks,
             scorecardDir: info.scorecardDir,
+          });
+        }
+        if (route === "GET /api/audio") {
+          // v0.5.6：音频产物直通（开袋即食的 Web 面 —— <audio> 播放/下载）。
+          // dir 同 /api/run 的 run 目录名；file 限 [A-Za-z0-9_.-]+ 且必为 .wav。
+          const name = url.searchParams.get("dir") ?? "";
+          const file = url.searchParams.get("file") ?? "";
+          if (!SAFE_NAME.test(name)) return json({ error: "run 目录名不合法" }, 400);
+          if (!/^[A-Za-z0-9_.-]+\.wav$/.test(file) || file.includes("..")) {
+            return json({ error: "音频文件名不合法" }, 400);
+          }
+          const p = path.join(readWorkspaceOf(ws), name, file);
+          if (!fs.existsSync(p)) return json({ error: `找不到音频产物：${name}/${file}` }, 404);
+          return new Response(Bun.file(p), {
+            headers: {
+              "Content-Type": "audio/wav",
+              "Cache-Control": "no-store",
+              "Content-Disposition": 'inline; filename="' + file + '"',
+            },
           });
         }
         if (route === "GET /api/run") {
@@ -1756,6 +1778,11 @@ function renderIndexHtml(): string {
   .revt.nv-info { color: var(--muted); }
   .revt.nv-warn { color: #fbbf24; }
   .revt.nv-err { color: var(--redb); }
+  .revt.nv-ok { color: var(--greenb); }
+  .raud { display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+          border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+  .raud audio { height: 34px; max-width: 320px; }
+  .raud a { text-decoration: none; }
   .rdone { display: flex; gap: 14px; flex-wrap: wrap; padding: 10px 12px;
         border-top: 1px solid var(--border); font: 11px var(--mono); color: var(--muted); }
   .rdone b { color: var(--text); font-weight: 600; }
@@ -2313,6 +2340,7 @@ function newRunModel(task, model) {
     crystals: [], scores: [], caps: [], others: [], shadows: [], notices: [],
     approvals: [], noise: 0,
     drift: 0, mined: 0, ctx: null, factoryNodes: [],
+    audio: [], audioFailures: [],
     runOk: null, elapsed: 0
   };
 }
@@ -2380,6 +2408,11 @@ function applyFact(m, fact) {
     case "shadow": m.shadows.push(fact); break;
     case "notice": m.notices.push(fact); break;
     case "approval": m.approvals.push(fact); break;
+    // v0.5.6：音频产物（引擎收尾注入的 audio_rendered 事实）
+    case "audio":
+      fact.files.forEach(function (f) { m.audio.push(f); });
+      fact.failures.forEach(function (f) { m.audioFailures.push(f); });
+      break;
     // run_result 是引擎桥的合成终态（与 done 帧同源信息），不再当作「未分类」
     case "result": break;
     default:
@@ -2479,8 +2512,16 @@ function renderRun(m) {
     h += approvalItemHtml({ id: ap.id, capability: ap.capability, action: ap.action, detail: ap.detail });
   });
   m.notices.forEach(function (n) {
-    var cls = n.tone === "err" ? "nv-err" : (n.tone === "warn" ? "nv-warn" : "nv-info");
+    var cls = n.tone === "err" ? "nv-err" : (n.tone === "warn" ? "nv-warn" : (n.tone === "ok" ? "nv-ok" : "nv-info"));
     h += '<div class="revt ' + cls + '">' + esc(n.text) + '</div>';
+  });
+  // v0.5.6：音频产物行（♪ 开袋即食；播放器在 done 段 —— dir 在终帧才确定）
+  m.audio.forEach(function (a) {
+    h += '<div class="revt nv-ok">♪ 音频产物 ' + esc(a.wavFile) +
+         ' · ' + esc(a.title) + ' · ' + a.durationSec + 's · ' + a.notes + ' 音符</div>';
+  });
+  m.audioFailures.forEach(function (f) {
+    h += '<div class="revt nv-warn">♪ 渲染失败 ' + esc(f.file) + '：<span class="dim">' + esc(f.error) + '</span></div>';
   });
   if (m.others.length > 0 || m.noise > 0) {
     // 不静默丢弃：未分类事件留名（audit / capability_denied / canary_rollback …）
@@ -2526,6 +2567,21 @@ function runDoneHtml(x) {
   if (mt.revises_total != null) h += cell("返工", mt.revises_total);
   if (x.elapsed_ms != null) h += cell("耗时", (x.elapsed_ms / 1000).toFixed(1) + "s");
   if (x.outDir) h += '<span class="dim">产物 ' + esc(x.outDir) + '</span>';
+  // v0.5.6：音频产物播放器（dir 名在终帧/回放时已知 —— 开袋即食的 Web 面；
+  // .rdone 是 flex-wrap 容器，播放器卡片作为子项自然流动）
+  var dirName = x.outDirName || (typeof x.outDir === "string" ? x.outDir.split(/[\\/]/).pop() : "");
+  var audio = x.audio || [];
+  if (dirName && audio.length > 0) {
+    audio.forEach(function (a) {
+      var src = "/api/audio?dir=" + encodeURIComponent(dirName) + "&file=" + encodeURIComponent(a.wavFile || a.file);
+      h += '<div class="raud">' +
+           '<span class="dim">♪ ' + esc(a.title || a.wavFile || a.file) + ' · ' +
+           (a.durationSec || 0) + 's</span>' +
+           '<audio controls preload="none" src="' + esc(src) + '"></audio>' +
+           '<a class="dim" download href="' + esc(src) + '">下载</a>' +
+           '</div>';
+    });
+  }
   return h;
 }
 
@@ -2561,7 +2617,11 @@ function runTeam(task) {
     } else {
       if (st) st.textContent = m.runOk ? "完成" : "结束（Err）";
       var d = document.getElementById("runDone" + m.id);
-      if (d) d.innerHTML = runDoneHtml(lastRunDone);
+      if (d) d.innerHTML = runDoneHtml(lastRunDone && {
+        metrics: lastRunDone.metrics, elapsed_ms: lastRunDone.elapsed_ms,
+        outDir: lastRunDone.outDir, outDirName: lastRunDone.outDirName,
+        audio: lastRunDone.audioRendered,
+      });
     }
     loadRuns();
     refreshReviewChip();
@@ -3332,7 +3392,10 @@ function openRun(name) {
     var st = document.getElementById("runStatus" + m.id);
     if (st) st.textContent = "历史回放（只读）";
     var d = document.getElementById("runDone" + m.id);
-    if (d) d.innerHTML = runDoneHtml({ metrics: r.metrics, elapsed_ms: m.elapsed, outDir: name });
+    if (d) d.innerHTML = runDoneHtml({
+      metrics: r.metrics, elapsed_ms: m.elapsed, outDir: name,
+      outDirName: name, audio: m.audio,
+    });
     scrollDown(true);
     flashHint("已回放 " + name + "（只读，未重跑引擎）");
   }).catch(function (e) { flashHint("回放失败：" + e); });
