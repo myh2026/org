@@ -55,6 +55,7 @@ import {
   startRun, scanWorkspace, replayRun, latestScorecardDir, readScorecard,
   type RunHandle,
 } from "../lib/engine.ts";
+import { directAskGateOf, directDegradeAnswer, writeDirectDegradeRun, prependAskRescueEvent, type DirectAskGate } from "../lib/engine.ts"; // v0.5.14 直连语义地板（B-22）
 import { tailLines } from "../lib/events.ts";
 import type { EngineEvent } from "../lib/events.ts";
 import { classifyRunEvent } from "../lib/runCards.ts";
@@ -192,6 +193,11 @@ export interface AskOutcome {
   logs: string;
   /** v0.5.9：直连车道的音频产物（out-ask 的 audio_rendered 事实；无则缺省）。 */
   audio?: Array<{ wavFile: string; midiFile?: string; timbre?: string; durationSec: number; notes: number; title: string }>;
+  /** v0.5.14：B-22 直连语义地板 —— 域外问题的跨车道救援元数据（换专家应答
+   *  的事实回执；GUI 气泡渲染 ⇄ 徽标，回放面板由 lane_rescue 事件渲染卡）。 */
+  rescue?: { from: string; to: string; score: number; selfScore: number };
+  /** v0.5.14：零消耗降级（不落账本，不跑模型；answer 自带 ◌ 叙事与出路）。 */
+  degraded?: boolean;
 }
 
 /** 解析 direct.hsl 的 stdout：[direct] 行 → 回答正文（多行）→ [ctx] 行 →
@@ -253,6 +259,50 @@ function askSerialized<T>(fn: () => Promise<T>, ticket: Parameters<AskGate["ente
   return gate.enter(fn, ticket);
 }
 
+/** v0.5.14：直连语义地板闸门（B-22）—— askOnce / askStreamOnce 共用。
+ *  返回 kind=degrade = 零消耗降级（调用方写产物 + 直接返回诚实应答）；
+ *  kind=run 携带有效专家/剧本（reroute 时已换）。仅 scripted 车道介入；
+ *  真实车道任何专家答任何问题（域感知是模型的活，不是桥的活）。 */
+type AskGatePrep =
+  | { kind: "run"; gate: DirectAskGate; expert: string; fixture: string }
+  | { kind: "degrade"; gate: DirectAskGate };
+
+function askGatePrepare(
+  ws: string,
+  req: { expert: string; question: string; session: string; model: string },
+  question: string,
+  scripted: boolean,
+): AskGatePrep {
+  const gate = directAskGateOf(ws, req.expert, question, scripted);
+  if (gate.kind === "degrade") return { kind: "degrade", gate };
+  if (gate.kind === "reroute") {
+    return { kind: "run", gate, expert: gate.expert!, fixture: gate.fixture! };
+  }
+  return {
+    kind: "run", gate, expert: req.expert,
+    fixture: expertFixtureOf(ws, req.expert) ?? STOCK_FIXTURE,
+  };
+}
+
+/** v0.5.14：reroute 事后回执 —— AskOutcome.rescue 元数据 + out-ask 事件前插
+ *  （回放面板渲染 ⇄ 卡）。 */
+function annotateAskRescue(
+  outcome: AskOutcome,
+  req: { expert: string },
+  prep: { gate: DirectAskGate; expert: string },
+  outDir: string,
+): void {
+  outcome.rescue = {
+    from: req.expert, to: prep.expert,
+    score: prep.gate.score ?? 0, selfScore: prep.gate.selfScore ?? 0,
+  };
+  prependAskRescueEvent(outDir, {
+    mode: "reroute", from: req.expert, expert: prep.expert,
+    score: prep.gate.score ?? 0, selfScore: prep.gate.selfScore ?? 0,
+    floor: 0.15,
+  });
+}
+
 /** 进程内执行一轮直连（DIRECT_ENTRY + env ORG_ASK_* + expertFixtureOf 剧本
  *  自动发现 + dhvRun 双车道）。不 spawn CLI 自身（web 服务进程内完成）。 */
 async function askOnce(
@@ -262,15 +312,27 @@ async function askOnce(
   ensureWorkspace(ws);
   // 车道环境准备（v0.5.1）：--model 车道名/裸模型 id 统一解析（key 池/
   // 降级链/路由器）；scripted 与未知名零影响
-  await prepareLlmEnv(req.model, ws);
+  const lane = await prepareLlmEnv(req.model, ws);
   // v0.5.3：@文件/目录引用展开（workspace 相对路径 → 围栏内容注入）
   let question = req.question;
   if (req.question.includes("@")) {
     const m = expandMentions(req.question, ws);
     if (m.expanded.length > 0) question = m.text;
   }
+  const outDir = path.join(ws, "out-ask");
+  // v0.5.14：B-22 直连语义地板 —— 域外问题不再套罐头答非所问
+  const prep = askGatePrepare(ws, req, question, lane.kind === "scripted");
+  if (prep.kind === "degrade") {
+    writeDirectDegradeRun(outDir, req.expert, question, prep.gate);
+    return {
+      ok: true, answer: directDegradeAnswer(req.expert, prep.gate),
+      tokens: 0, ctxLine: "", durationMs: 0, turn: null,
+      logs: `◌ 零消耗降级：${prep.gate.reason ?? "问题在所选专家的剧本域外"}`,
+      degraded: true,
+    };
+  }
   const env: Record<string, string> = {
-    ORG_ASK_EXPERT: req.expert,
+    ORG_ASK_EXPERT: prep.expert,
     ORG_ASK_SESSION: req.session,
     ORG_ASK_QUESTION: question,
     // v0.5.10：GUI 直连默认开工具环（B-19 伴生：直连 t-bot 的
@@ -279,24 +341,21 @@ async function askOnce(
     // 仍审批在环；用户显式设置优先）
     ORG_TOOLS: process.env.ORG_TOOLS || "write",
   };
-  // 剧本自动发现（与 cmdAsk 同规则）：导入 harness 自带占位剧本
-  // （manifest.fixture）——不传 fixture 也能立即 scripted 问答
-  let fixture = STOCK_FIXTURE;
-  const found = expertFixtureOf(ws, req.expert);
-  if (found) fixture = found;
   const r = await dhvRun(
     [
       "run", DIRECT_ENTRY,
       "--workspace", ws,
       "--task", `(direct) ${question}`,
       "--model", req.model,
-      "--fixture", fixture,
-      "--out", path.join(ws, "out-ask"),
+      "--fixture", prep.fixture,
+      "--out", outDir,
       "--allow", "bun,node,ls,cat,grep,diff,git",
     ],
     env,
   );
-  return parseAskOut(r.out);
+  const out = parseAskOut(r.out);
+  if (prep.gate.kind === "reroute") annotateAskRescue(out, req, prep, outDir);
+  return out;
 }
 
 // ---- 停止生成（POST /api/abort）----
@@ -338,30 +397,40 @@ async function askStreamOnce(
 ): Promise<AskOutcome> {
   ensureWorkspace(ws);
   // 车道环境准备（v0.5.1）：同 askOnce（spawn 车道读 process.env 注入）
-  await prepareLlmEnv(req.model, ws);
+  const lane = await prepareLlmEnv(req.model, ws);
   // v0.5.3：@文件/目录引用展开（与 askOnce 同规则）
   let question = req.question;
   if (req.question.includes("@")) {
     const m = expandMentions(req.question, ws);
     if (m.expanded.length > 0) question = m.text;
   }
+  const outDir = path.join(ws, "out-ask");
+  // v0.5.14：B-22 直连语义地板（与 askOnce 同规则；SSE 是 GUI 主路径）
+  const prep = askGatePrepare(ws, req, question, lane.kind === "scripted");
+  if (prep.kind === "degrade") {
+    writeDirectDegradeRun(outDir, req.expert, question, prep.gate);
+    onLog(`◌ 零消耗降级：${prep.gate.reason ?? "问题在所选专家的剧本域外"}`);
+    return {
+      ok: true, answer: directDegradeAnswer(req.expert, prep.gate),
+      tokens: 0, ctxLine: "", durationMs: 0, turn: null,
+      logs: `◌ 零消耗降级：${prep.gate.reason ?? "问题在所选专家的剧本域外"}`,
+      degraded: true,
+    };
+  }
   const env: Record<string, string> = {
-    ORG_ASK_EXPERT: req.expert,
+    ORG_ASK_EXPERT: prep.expert,
     ORG_ASK_SESSION: req.session,
     ORG_ASK_QUESTION: question,
     // v0.5.10：GUI 直连默认开工具环（与 askOnce 同规则，B-19 伴生）
     ORG_TOOLS: process.env.ORG_TOOLS || "write",
   };
-  let fixture = STOCK_FIXTURE;
-  const found = expertFixtureOf(ws, req.expert);
-  if (found) fixture = found;
   const args = [
     "run", DIRECT_ENTRY,
     "--workspace", ws,
     "--task", `(direct) ${question}`,
     "--model", req.model,
-    "--fixture", fixture,
-    "--out", path.join(ws, "out-ask"),
+    "--fixture", prep.fixture,
+    "--out", outDir,
     "--allow", "bun,node,ls,cat,grep,diff,git",
   ];
   const forceInproc = process.env.ORG_FORCE_INPROC === "1";
@@ -415,11 +484,15 @@ async function askStreamOnce(
       streamTailer.flush(); // 收尾冲刷：退出与最后一帧增量之间的竞态窗口补齐
       runningProc = null;
     }
-    return withAskAudio(parseAskOut(chunks.join("")), path.join(ws, "out-ask"));
+    const streamed = withAskAudio(parseAskOut(chunks.join("")), outDir);
+    if (prep.gate.kind === "reroute") annotateAskRescue(streamed, req, prep, outDir);
+    return streamed;
   }
   // 进程内车道：无增量输出，走 dhvRun 拿最终结果
   const r = await dhvRun(args, env);
-  return withAskAudio(parseAskOut(r.out), path.join(ws, "out-ask"));
+  const inproc = withAskAudio(parseAskOut(r.out), outDir);
+  if (prep.gate.kind === "reroute") annotateAskRescue(inproc, req, prep, outDir);
+  return inproc;
 }
 
 /** v0.5.9：直连产物音频附面（开袋即食的直连版）。
@@ -1304,17 +1377,27 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
           // 降级：SDK 凭据缺席 → 503 {ok:false, error}（GUI 提示条，不炸）。
           const body = await req.json().catch(() => ({})) as {
             image_base64?: unknown; mime?: unknown; prompt?: unknown;
-            images?: Array<{ base64?: unknown; mime?: unknown }>;
+            images?: Array<{ base64?: unknown; mime?: unknown } | string>;
           };
           const prompt = body.prompt === undefined ? undefined : String(body.prompt);
+          // v0.5.14：宽容解析 —— images[] 元素支持 {base64, mime} 对象与
+          // "data:image/...;base64,..." 字符串两形态（裸字符串此前报
+          // 「图片为空」，对 API 消费者不友好）；data URL 前缀统一剥离。
+          const stripDataUrl = (s: string): string => s.replace(/^data:[^,]*,/, "");
           let imgs: Array<{ buf: Buffer; mime?: string }> = [];
           if (Array.isArray(body.images) && body.images.length > 0) {
-            imgs = body.images.slice(0, VISION_MAX_IMAGES).map((im) => ({
-              buf: Buffer.from(String(im?.base64 ?? "").replace(/^data:[^,]*,/, ""), "base64"),
-              mime: im?.mime === undefined ? undefined : String(im.mime),
-            }));
+            imgs = body.images.slice(0, VISION_MAX_IMAGES).map((im) => {
+              if (typeof im === "string") {
+                const m = im.match(/^data:([^;,]*)[;,]/);
+                return { buf: Buffer.from(stripDataUrl(im), "base64"), mime: m?.[1] };
+              }
+              return {
+                buf: Buffer.from(stripDataUrl(String(im?.base64 ?? "")), "base64"),
+                mime: im?.mime === undefined ? undefined : String(im.mime),
+              };
+            });
           } else {
-            const b64 = String(body.image_base64 ?? "").replace(/^data:[^,]*,/, "");
+            const b64 = stripDataUrl(String(body.image_base64 ?? ""));
             if (!b64) return json({ ok: false, error: "image_base64 必填（图片数据），或多图形态 images[] 数组" }, 400);
             imgs = [{
               buf: Buffer.from(b64, "base64"),
@@ -1920,6 +2003,16 @@ function renderIndexHtml(): string {
            margin: 4px 0 5px; }
   .t-bot .body { font: 14px/1.75 var(--sans); color: var(--text);
            white-space: pre-wrap; word-break: break-word; }
+  /* v0.5.14：B-22 直连救援/降级徽标与降级气泡 */
+  .rsc-badge { display: inline-block; margin-left: 8px; padding: 1px 7px;
+           border: 1px solid var(--amber, #b8860b); border-radius: 999px;
+           font: 10px var(--mono); color: var(--amber, #b8860b);
+           background: rgba(184, 134, 11, .08); vertical-align: 1px; }
+  .rsc-badge.deg { border-color: var(--dim); color: var(--dim);
+           background: transparent; }
+  .t-bot.degraded .body { color: var(--dim); }
+  .t-bot.degraded { border-left: 2px solid var(--border2);
+           padding-left: 10px; }
 
   .runline { display: flex; align-items: center; gap: 8px;
            font: 12px var(--mono); color: var(--greenb); margin: 6px 0; }
@@ -5358,16 +5451,26 @@ function finalize(outcome, errMsg, aborted, queuedCancel) {
     if (pending) pending.remove();
     var chat = document.getElementById("chat");
     if (outcome && outcome.ok) {
-      var meta = "org · " + state.currentExpert + " · turn " +
+      // v0.5.14：B-22 —— 救援轮的 who 行亮出换专家事实；降级轮 ◌ 零消耗标注
+      var effExpert = (outcome.rescue && outcome.rescue.to) || state.currentExpert;
+      var meta = "org · " + effExpert + " · turn " +
         (outcome.turn == null ? "-" : outcome.turn) + " · " +
         (outcome.tokens == null ? "-" : outcome.tokens) + " tok" +
         (outcome.durationMs == null ? "" : " · " + outcome.durationMs + " ms");
+      var whoExtra = "";
+      if (outcome.rescue) {
+        whoExtra = '<span class="rsc-badge" title="域外问题语义地板放行：直连救援换专家应答（v0.5.14）">⇄ 救援自 ' +
+          esc(outcome.rescue.from) + "（重合 " + outcome.rescue.selfScore +
+          " < 0.15 地板）</span>";
+      } else if (outcome.degraded) {
+        whoExtra = '<span class="rsc-badge deg" title="零消耗降级：未跑模型、未落账本（v0.5.14）">◌ 零消耗</span>';
+      }
       chat.insertAdjacentHTML("beforeend",
-        '<div class="t-bot"><div class="who">' + esc(meta) + '</div>' +
+        '<div class="t-bot' + (outcome.degraded ? " degraded" : "") + '"><div class="who">' + esc(meta) + whoExtra + '</div>' +
         '<div class="body md">' + renderMd(outcome.answer || "（无回答）") + '</div>' +
         (outcome.audio && outcome.audio.length > 0 ? askAudioHtml(outcome.audio) : "") +
         '<div class="obs">' + meterHtml(outcome.ctxLine) +
-        '<span>ledger 已落盘</span></div>' +
+        '<span>' + (outcome.degraded ? "本轮零消耗，未落账本" : "ledger 已落盘") + '</span></div>' +
         mactsHtml(true) +
         logWinHtml(outcome.logs || "", false) + '</div>');
       markLast();

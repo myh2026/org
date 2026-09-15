@@ -326,9 +326,12 @@ describe("Web：@文件引用与记忆端点", () => {
     fs.writeFileSync(path.join(WS, "ref-me.txt"), "FILE-CONTENT-42");
     const srv = startWebServer({ workspace: WS, port: 0, model: "scripted" });
     try {
+      // v0.5.14：问题措辞域内化（「解析…公告…」过 B-22 直连语义地板）——
+      // 本用例验证 @mention 展开机制，不测罐头答案质量；域外措辞（如
+      // 「读 @x 讲讲」）如今会被闸门降级，不再落 notice-parser 账本
       const r = (await (await fetch(`http://127.0.0.1:${srv.port}/api/ask`, {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ expert: "notice-parser", question: "读 @ref-me.txt 讲讲", session: "web-mention" }),
+        body: JSON.stringify({ expert: "notice-parser", question: "解析 @ref-me.txt 里的公告记录", session: "web-mention" }),
       })).json()) as { ok: boolean; answer: string };
       expect(r.ok).toBe(true);
       // 账本里的问题带展开内容（模型看到的实际输入）

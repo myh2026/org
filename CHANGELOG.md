@@ -1,5 +1,58 @@
 # CHANGELOG
 
+## v0.5.14（2026-09-16）—— 直连车道语义地板 + 救援（B-22）
+
+agent-browser QA 驱动 Web GUI 直连模式发现：**GUI 缺省专家 notice-parser +
+scripted 模型，问「你好」/「请创作卡农」得到的是公告域罐头答案**（字段映射
+规则 memo）—— B-19 的直连车道变体（v0.5.10 只修了团队车道）。本轮把同一套
+「语义地板 + 救援 + 降级」三岔口哲学落到直连 ask（Web askOnce/askStreamOnce
++ CLI cmdAsk 双入口同构），另修复 QA 探测中发现的 vision 端点宽容解析与一枚
+潜伏的 CLI `dim` 未定义雷。测试 550/550 全绿（+14 例：directgate D1-D7，30 文件）。
+
+### B-22 直连车道语义地板（三岔口）
+
+- **`directAskGateOf`（lib/engine.ts 共享闸门）**：仅 scripted 车道介入（真实
+  LLM 天然域感知，任何专家答任何问题）——
+  ① `passthrough`：选中专家域内（`direct:<name>` 轨道语料或 manifest 词面
+  重合 ≥ 0.15 地板）→ 原行为零变化；
+  ② `reroute`：域外但注册表有域内专家（`rescueExpertOf` 复用）→ 换专家 +
+  换剧本应答 + `lane_rescue` 事件前插（回放面板 ⇄ 卡）+ 救援轮默认开工具环
+  （`ORG_TOOLS=write`，与团队救援同规则 —— audio_compose/fs_write 交付需要）；
+  ③ `degrade`：域外且无可救援 → **零消耗诚实降级**（不跑模型不落账本，
+  `writeDirectDegradeRun` 产物直写 + 建议出口四条）；
+- **附带修复**：选中专家在可用剧本中无 `direct:<name>` 轨道时（旧路径会在
+  消费阶段 FIXTURE_EXHAUSTED 硬失败）也走 ②/③ —— 硬失败变三岔口；
+- **超短问题口径差异**（与团队车道有意不同）：「你好」这类 1-token 域外
+  问题在直连车道**也降级**（团队车道保守放行）—— 直连的降级是一段可读
+  应答而非拦路墙，答非所问的罐头更糟；
+- **Web GUI**：reroute 轮 who 行亮出 `⇄ 救援自 <原专家>（重合 0.00 < 0.15
+  地板）` 琥珀徽标（`.rsc-badge`）+ 有效专家名；degrade 轮 `◌ 零消耗` 灰
+  徽标 + `.t-bot.degraded` 左竖线暗色气泡 + obs 行「本轮零消耗，未落账本」；
+- **CLI**：`org ask notice-parser "请创作卡农"` → `⇄ 直连救援 → composer
+  （原选 notice-parser 重合 0.00 < 0.15 地板 · 域内专家评分 0.75）` +
+  WAV/MIDI 开袋即食；降级轮退出码 0（诚实降级不是失败）。
+
+### 附带修复
+
+- **vision 端点宽容解析**（QA 探测发现）：`POST /api/vision` 的 `images[]`
+  此前只认 `[{base64, mime}]` 对象形态，裸 `"data:image/...;base64,..."`
+  字符串元素会得到困惑性的「图片为空（未读到内容）」—— 现两形态都收，
+  data URL 前缀统一剥离；
+- **CLI `dim` 未定义潜伏雷**（v0.5.3 @引用展开引入，本轮 D3 测试首次踩响）：
+  `cli/org.ts` 引用 `dim` 却从未定义，非 TTY 管道下 ReferenceError 炸退出
+  码 —— 补 `isTTY` 守卫的本地助手（TTY 才着色，管道/测试拿纯文本）。
+
+### 测试
+
+- 新增 `tests/directgate.test.ts` 14 例：D1 单元三岔口定标（域内放行 /
+  域外救援 / 完全域外降级 / 超短降级 / 真实车道旁路 / 占位剧本旁路 /
+  空问题旁路 / 无轨道专家不硬失败）· D2 CLI reroute e2e（WAV + 账本 + 事件前插）· D3 CLI
+  degrade e2e（零账本 + 产物诚实 + 退出码 0）· D4/D5 Web SSE reroute/
+  degrade（done 帧 rescue/degraded 元数据 + 音频 + 观测面）· D6 域内零影响
+  （公告问题原罐头答案）· D7 GUI 要素（rsc-badge 样式 + finalize 渲染 +
+  内联脚本自洽回归锚）；既有 tools.test.ts @mention 用例措辞域内化
+ （B-22 后域外措辞不再落 notice-parser 账本 —— 新契约的诚实适配）。
+
 ## v0.5.13（2026-09-16）—— 视觉入口 + 派生池清理 + 双 UI 修复（B-20/B-21）
 
 agent-browser QA 复测 v0.5.12 稳定性时发现两枚 UI 回归，随本轮新能力一并

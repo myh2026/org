@@ -35,6 +35,7 @@ import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          forkSession, revertExpert, archivedVersions, renameSession, deleteSession } from "../lib/engine.ts";
 import { readCostTimeline, renderCostTimeline, latestScorecardDir } from "../lib/engine.ts";
 import { stockAffinityOf, rescueExpertOf, writeOutOfDomainRun, SEMANTIC_FLOOR } from "../lib/engine.ts"; // v0.5.10 语义地板（B-19）
+import { directAskGateOf, directDegradeAnswer, writeDirectDegradeRun, prependAskRescueEvent } from "../lib/engine.ts"; // v0.5.14 直连语义地板（B-22）
 import { scanAndRenderArtifacts } from "../lib/audio.ts"; // v0.5.6 音频产物通道（CLI 车道）
 import { semanticSearch } from "../lib/search.ts"; // v0.5.8 语义检索（capabilities #19/#22）
 import { synthesizeSpeech, voiceStatus, VOICES } from "../lib/voice.ts"; // v0.5.12 语音入口（ASR/TTS）
@@ -69,6 +70,12 @@ const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const HANDOFF_ENTRY = path.join(ROOT, "hsl/pool/handoff.hsl");
 const STOCK_FIXTURE = path.join(ROOT, "fixtures/run-notices.json");
+
+// v0.5.14：终端淡色助手 —— cmdAsk 的 @引用展开（v0.5.3）与直连降级提示
+// 早就引用 dim，但本文件从未定义（非 TTY 管道下 ReferenceError 炸退出码，
+// 属潜伏 bug；本轮 D3 测试首次踩响）。TTY 才着色，管道/测试拿纯文本。
+const isTTY = process.stdout.isTTY === true;
+const dim = (s: string): string => (isTTY ? `\x1b[2m${s}\x1b[0m` : s);
 
 // ---- 工具链解析（vendored 优先） ----
 function resolveDhv(): string {
@@ -650,10 +657,42 @@ async function cmdAsk(a: Args): Promise<number> {
     console.error('用法：org ask <expert> "<question>"（问题必填）');
     return 2;
   }
+  // 剧本自动发现：导入 harness 自带占位剧本（manifest.fixture）—— 不传
+  // --fixture 也能立即 scripted 问答（零摩擦）；显式 --fixture 优先。
+  let fixture = a.fixture;
+  if (!a.fixtureExplicit) {
+    const found = expertFixtureOf(a.workspace, expert);
+    if (found) {
+      fixture = found;
+      console.log(`ℹ 使用导入剧本 ${path.relative(a.workspace, found)}（占位应答 · --model deepseek 换真实回答）`);
+    }
+  }
+  // v0.5.14：B-22 直连语义地板（与 Web askOnce/askStreamOnce 同规则；仅
+  // scripted 车道 + 未显式指定 fixture 时介入 —— 显式剧本是专家意志，不拦）
+  let effExpert = expert;
+  let rescueMeta: { score: number; selfScore: number } | null = null;
+  if (!a.fixtureExplicit && (a.model === "scripted" || a.model === "")) {
+    const gate = directAskGateOf(a.workspace, expert, turns.join(" / "), true);
+    if (gate.kind === "degrade") {
+      writeDirectDegradeRun(out, expert, turns.join(" / "), gate);
+      console.log(directDegradeAnswer(expert, gate));
+      console.log(dim(`产物：${out}/events.jsonl · run.json（◌ 零消耗降级，未落账本）`));
+      return 0; // 诚实降级不是失败
+    }
+    if (gate.kind === "reroute" && gate.expert && gate.fixture) {
+      console.log(`⇄ 直连救援 → ${gate.expert}（原选 ${expert} 重合 ${gate.selfScore?.toFixed(2)} < ${SEMANTIC_FLOOR} 地板 · 域内专家评分 ${gate.score?.toFixed(2)}）`);
+      effExpert = gate.expert;
+      fixture = gate.fixture;
+      rescueMeta = { score: gate.score ?? 0, selfScore: gate.selfScore ?? 0 };
+    }
+  }
   const env: Record<string, string> = {
-    ORG_ASK_EXPERT: expert,
+    ORG_ASK_EXPERT: effExpert,
     ORG_ASK_SESSION: a.session,
   };
+  // v0.5.14：救援轮默认开工具环（与团队救援/engine startRun 同规则 ——
+  // audio_compose 作曲 / fs_write 工件交付需要；用户显式 ORG_TOOLS 优先）
+  if (rescueMeta) env.ORG_TOOLS = process.env.ORG_TOOLS || "write";
   // v0.5.6：递归派生深度透传（agent_spawn ask 模式子组织）
   if (a.spawnDepth > 0) env.ORG_SPAWN_DEPTH = String(a.spawnDepth);
   // v0.5.11：递归派生预算透传（ask 模式子组织同享预算语义）
@@ -668,21 +707,18 @@ async function cmdAsk(a: Args): Promise<number> {
   }
   if (turns.length === 1) env.ORG_ASK_QUESTION = turns[0]!;
   else env.ORG_ASK_TURNS = JSON.stringify(turns);
-  // 剧本自动发现：导入 harness 自带占位剧本（manifest.fixture）—— 不传
-  // --fixture 也能立即 scripted 问答（零摩擦）；显式 --fixture 优先。
-  let fixture = a.fixture;
-  if (!a.fixtureExplicit) {
-    const found = expertFixtureOf(a.workspace, expert);
-    if (found) {
-      fixture = found;
-      console.log(`ℹ 使用导入剧本 ${path.relative(a.workspace, found)}（占位应答 · --model deepseek 换真实回答）`);
-    }
-  }
   const r = await runHsl(DIRECT_ENTRY, {
     workspace: a.workspace, task: `(direct) ${turns.join(" / ")}`, model: a.model,
     fixture, out, env,
   });
   process.stdout.write(r.out);
+  // v0.5.14：reroute 留痕（out-ask 事件前插，回放面板渲染 ⇄ 卡 —— 与 Web 同叙事）
+  if (rescueMeta && r.ok) {
+    prependAskRescueEvent(out, {
+      mode: "reroute", from: expert, expert: effExpert,
+      score: rescueMeta.score, selfScore: rescueMeta.selfScore, floor: SEMANTIC_FLOOR,
+    });
+  }
   return r.ok ? 0 : 1;
 }
 

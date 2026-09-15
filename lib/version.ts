@@ -9,7 +9,7 @@
 // ============================================================================
 
 /** CLI banner / web chrome 用（无前缀，拼接处自带格式）。 */
-export const ORG_VERSION = "0.5.13";
+export const ORG_VERSION = "0.5.14";
 
 /** TUI 标题栏用（带 v 前缀）。 */
 export const ORG_VERSION_TAG = `v${ORG_VERSION}`;

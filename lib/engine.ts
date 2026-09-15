@@ -822,8 +822,9 @@ export function readMetrics(outDir: string): RunMetrics | null {
  * 向产物目录的 events.jsonl 追加一条桥侧事件（append-only 契约）。
  * 音频渲染（audio_rendered）等增强通道使用：解释器进程已退出，桥层
  * 把「渲染了哪些 .wav」留痕进事件流 —— 三端（CLI/Web/TUI）统一观测面。
+ * v0.5.14 起导出：直连 ask 的 lane_rescue 留痕（B-22 救援回放卡）复用。
  */
-function appendEvent(
+export function appendEvent(
   outDir: string,
   ev: { seq: number; ts: string; name: string; data: unknown },
 ): void {
@@ -1285,6 +1286,160 @@ function laneRescueEvent(d: {
       floor: SEMANTIC_FLOOR,
     },
   };
+}
+
+// ---------- v0.5.14：直连车道语义地板（B-22） ----------
+
+export interface DirectAskGate {
+  kind: "passthrough" | "reroute" | "degrade";
+  /** reroute：救援目标专家与其剧本（direct:<name> 轨道所在）。 */
+  expert?: string;
+  fixture?: string;
+  score?: number;        // reroute：目标专家综合分
+  /** 选中专家自身与问题的域内重合（诊断观测；passthrough 时也填充）。 */
+  selfScore?: number;
+  /** 选中专家的 direct:<name> 轨道是否存在（scripted 消费的前提）。 */
+  hasTrack?: boolean;
+  /** 占位剧本旁路（导入专家的元应答对任何问题诚实 —— 不属答非所问）。 */
+  placeholder?: boolean;
+  /** degrade：人话原因 + 建议出路。 */
+  reason?: string;
+  remedies?: string[];
+}
+
+/** B-22（v0.5.14）：直连 ask 的域感知预检 —— 与 v0.5.10 团队车道语义地板
+ *  同哲学的三岔口，仅 scripted 车道介入（真实 LLM 天然域感知，任何专家答
+ *  任何问题）：
+ *    passthrough —— 选中专家域内（direct 轨道语料或 manifest 词面重合 ≥ 地板）
+ *    reroute     —— 域外但注册表有域内专家（rescueExpertOf，换专家 + 换剧本）
+ *    degrade     —— 域外且无可救援（零消耗诚实降级，不套罐头答非所问）
+ *  两条旁路（不属答非所问，均 passthrough）：
+ *    ① 占位剧本 —— 导入专家的 fixture 是「[imported harness X] 占位剧本
+ *       应答…」元应答（对任何问题诚实：这是占位，真实回答换车道）——
+ *       它就是零摩擦导入链路的设计行为，词面地板对它没有意义；
+ *    ② 空问题 —— 信息不足不拦（原行为）。
+ *  附带修复：选中专家在可用剧本中无 direct:<name> 轨道时（旧路径会在消费
+ *  阶段 FIXTURE_EXHAUSTED 硬失败）也走 reroute/degrade —— 硬失败变三岔口。 */
+export function directAskGateOf(
+  ws: string,
+  expert: string,
+  question: string,
+  scripted: boolean,
+): DirectAskGate {
+  if (!scripted) return { kind: "passthrough" };
+  const tt = [...new Set(tokenize(question))];
+  if (tt.length === 0) return { kind: "passthrough" }; // 空问题信息不足不拦
+  // 选中专家自身亲和：direct:<expert> 轨道语料 + manifest 词面取 max
+  //（rescueExpertOf 同口径 —— 预录回复复述任务域词汇，是最强领域信号）
+  const fixture = expertFixtureOf(ws, expert) ?? STOCK_FIXTURE;
+  let selfScore = 0;
+  let hasTrack = false;
+  let placeholder = false;
+  try {
+    const obj = JSON.parse(fs.readFileSync(fixture, "utf-8")) as { tracks?: Record<string, string[]> };
+    const dir = obj.tracks?.[`direct:${expert}`];
+    if (Array.isArray(dir) && dir.length > 0) {
+      hasTrack = true;
+      // 占位剧本旁路：全部轨道条目都是「[imported harness X] 占位剧本应答」
+      // 形态 → 元应答对任何问题诚实，词面地板无意义（web/import 既有契约）
+      placeholder = dir.every((s) => /^\s*\[imported harness\s/.test(String(s)));
+      if (!placeholder) {
+        const m = loadRegistryIndex(ws).find(
+          (x) => String((x as Record<string, unknown>)["name"] ?? "") === expert,
+        ) as Record<string, unknown> | undefined;
+        const manifestCorpus = m
+          ? [expert, String(m["description"] ?? ""),
+              ...(Array.isArray(m["capabilities"]) ? m["capabilities"].map(String) : [])].join(" ")
+          : expert;
+        selfScore = Math.max(tokenOverlap(question, dir.join(" ")), tokenOverlap(question, manifestCorpus));
+      }
+    }
+  } catch { /* 剧本不可读 → hasTrack=false → 救援/降级 */ }
+  if (hasTrack && (placeholder || selfScore >= SEMANTIC_FLOOR)) {
+    return { kind: "passthrough", selfScore, hasTrack, placeholder };
+  }
+  // 域外（或无轨道）→ 救援优先
+  const pick = rescueExpertOf(question, ws);
+  if (pick && pick.expert !== expert) {
+    return {
+      kind: "reroute", expert: pick.expert, fixture: pick.fixture,
+      score: pick.score, selfScore, hasTrack,
+    };
+  }
+  const pct = (x: number): string => (Math.round(x * 100) / 100).toFixed(2);
+  const reason = hasTrack
+    ? `所选专家 ${expert} 的 scripted 剧本与该问题词面重合 ${pct(selfScore)} < 地板 ${SEMANTIC_FLOOR}`
+    : `所选专家 ${expert} 在可用剧本中无 direct:${expert} 轨道（scripted 车道消费不到应答）`;
+  const remedies = [
+    "切换域内专家（左侧 EXPERTS 面板 / CLI org ask <专家>，如 composer · bard）",
+    "团队模式派单（分解 → 路由 → 审查 → 汇总，域外任务自动跨车道救援）",
+    "配置真实模型车道（org providers 后 --model <车道>，动态应答不受剧本域限制）",
+    'org search "关键词" 语义检索工作区，确认在岗专家与语料',
+  ];
+  return { kind: "degrade", reason, remedies, selfScore, hasTrack };
+}
+
+/** 直连降级的应答正文（GUI 气泡 / CLI stdout 同文；◌ 前缀与团队降级卡同款
+ *  叙事 —— 零消耗、不落账本、不答非所问）。 */
+export function directDegradeAnswer(expert: string, gate: DirectAskGate): string {
+  return [
+    `◌ 直连车道不服务此问题域（零消耗，本轮未跑模型）`,
+    "",
+    `${gate.reason ?? "问题在所选专家的剧本域外"}，且注册表中无可救援的域内专家`,
+    "—— 与其套用域外罐头答非所问，不如诚实报告。",
+    "",
+    "建议出口：",
+    ...(gate.remedies ?? []).map((r) => `- ${r}`),
+  ].join("\n");
+}
+
+/** 直连 ask 零消耗降级的产物直写（out-ask 固定目录；events.jsonl 的
+ *  lane_rescue(degrade) 让回放面板渲染 ◌ 卡 —— 与团队 writeOutOfDomainRun
+ *  同叙事，直连形态不写 journal（无流水线可记）。 */
+export function writeDirectDegradeRun(
+  outDir: string,
+  expert: string,
+  question: string,
+  gate: DirectAskGate,
+): void {
+  try {
+    fs.mkdirSync(outDir, { recursive: true });
+    const ts = new Date().toISOString();
+    const r2 = (x: number): number => Math.round(x * 100) / 100;
+    const events = [
+      { seq: 1, ts, name: "journal", data: { name: "ask-degrade", detail: `${expert} · ${question}` } },
+      { seq: 2, ts, name: "lane_rescue", data: {
+        mode: "degrade", expert, selfScore: r2(gate.selfScore ?? 0), floor: SEMANTIC_FLOOR,
+      } },
+      { seq: 3, ts, name: "run_end", data: { ok: true, elapsed_ms: 0 } },
+    ];
+    fs.writeFileSync(path.join(outDir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    fs.writeFileSync(path.join(outDir, "run.json"), JSON.stringify({
+      ts, ok: true, elapsed_ms: 0, model: "scripted", task: `(direct) ${question}`,
+      events: events.length, lane: "degraded-out-of-domain",
+      reason: gate.reason, remedies: gate.remedies,
+    }, null, 2) + "\n");
+  } catch { /* 产物不可写：降级应答仍返回（内存态），观测面尽力而为 */ }
+}
+
+/** 直连 ask 救援（reroute）的 lane_rescue 事件前插 —— 回放叙事里救援判定
+ *  先于应答出现（readEventStream 按 ts 排序 + 文件序 tie-break：复用首事件
+ *  ts + 前插行 → 稳定排首）。与团队车道的 seq=0 前置同语义，直连形态。 */
+export function prependAskRescueEvent(outDir: string, data: Record<string, unknown>): void {
+  try {
+    const file = path.join(outDir, "events.jsonl");
+    const lines = fs.existsSync(file)
+      ? fs.readFileSync(file, "utf-8").split("\n").filter((l) => l.trim().length > 0)
+      : [];
+    let ts = new Date().toISOString();
+    if (lines.length > 0) {
+      try {
+        ts = (JSON.parse(lines[0]!) as { ts?: string }).ts ?? ts;
+      } catch { /* 首行坏行：用当前时间 */ }
+    }
+    const ev = { seq: 0, ts, name: "lane_rescue", data };
+    fs.writeFileSync(file, [JSON.stringify(ev), ...lines].join("\n") + "\n");
+  } catch { /* 产物不可写：救援事实仍随 AskOutcome 返回（内存态） */ }
 }
 
 /** 域外任务零消耗降级的产物直写（标准格式：journal.jsonl（管道分隔）/
