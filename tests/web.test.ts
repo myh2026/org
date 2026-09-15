@@ -994,3 +994,98 @@ describe("Web providers：车道/服务商面板端点（v0.5.1）", () => {
     }
   }, 30_000);
 });
+
+// ============================================================================
+// v0.5.9：音频工坊（--host 解析 / 音色试听端点 / MIDI 直通）
+// ============================================================================
+
+describe("Web v0.5.9：音频工坊端点（audio-demo / audio .mid / --host）", () => {
+  let srv: ReturnType<typeof startWebServer>;
+  let base: string;
+  let ws2: string;
+
+  beforeAll(() => {
+    ws2 = makeWorkspace("web-audio");
+    srv = startWebServer({ workspace: ws2, port: 0, model: "scripted" });
+    base = `http://127.0.0.1:${srv.port}`;
+  }, 30_000);
+
+  afterAll(() => {
+    srv.stop(true);
+  });
+
+  test("parseWebArgv：--host / ORG_WEB_HOST / 缺省 127.0.0.1", () => {
+    const d1 = parseWebArgv(["--port", "4600"]);
+    expect(d1.host).toBe("127.0.0.1"); // 缺省：本地 GUI 原型只听回环
+    const d2 = parseWebArgv(["--host", "0.0.0.0", "--port", "4601"]);
+    expect(d2.host).toBe("0.0.0.0");
+    const d3 = parseWebArgv(["--port", "4602", "--host"]); // 缺值 → 保缺省
+    expect(d3.host).toBe("127.0.0.1");
+    process.env.ORG_WEB_HOST = "192.168.1.10";
+    try {
+      expect(parseWebArgv(["--port", "4603"]).host).toBe("192.168.1.10");
+      expect(parseWebArgv(["--host", "10.0.0.1"]).host).toBe("10.0.0.1"); // 显式旗标覆盖环境变量
+    } finally {
+      delete process.env.ORG_WEB_HOST;
+    }
+  });
+
+  test("GET /api/audio-demo：200 + RIFF/WAVE + audio/wav；缓存二次命中同长度", async () => {
+    const r1 = await fetch(`${base}/api/audio-demo?timbre=strings&chords=canon`);
+    expect(r1.status).toBe(200);
+    expect(r1.headers.get("content-type")).toBe("audio/wav");
+    const buf1 = Buffer.from(await r1.arrayBuffer());
+    expect(buf1.toString("ascii", 0, 4)).toBe("RIFF");
+    expect(buf1.toString("ascii", 8, 12)).toBe("WAVE");
+    expect(buf1.readUInt16LE(22)).toBe(2); // 双通道
+    // 缓存命中：同参二次请求长度一致（服务端 Map 缓存，同 Buffer）
+    const r2 = await fetch(`${base}/api/audio-demo?timbre=strings&chords=canon`);
+    const buf2 = Buffer.from(await r2.arrayBuffer());
+    expect(buf2.length).toBe(buf1.length);
+    // 琶音变体：不同缓存键 → 仍 200（内容可不同）
+    const r3 = await fetch(`${base}/api/audio-demo?timbre=harpsichord&chords=pop&style=arp`);
+    expect(r3.status).toBe(200);
+    expect(Buffer.from(await r3.arrayBuffer()).toString("ascii", 0, 4)).toBe("RIFF");
+  }, 30_000);
+
+  test("GET /api/audio-demo：非法参数（大写/符号注入）→ 400", async () => {
+    const bad1 = await fetch(`${base}/api/audio-demo?timbre=Strings`);
+    expect(bad1.status).toBe(400);
+    const bad2 = await fetch(`${base}/api/audio-demo?chords=${encodeURIComponent("../etc")}`);
+    expect(bad2.status).toBe(400);
+  });
+
+  test("GET /api/audio：.mid 直通（audio/midi）；.exe 拒绝 400", async () => {
+    // 构造产物目录放一个合法 .mid
+    const runDir = path.join(ws2, "out-audio-mid");
+    fs.mkdirSync(runDir, { recursive: true });
+    const midiBuf = Buffer.from([
+      0x4d, 0x54, 0x68, 0x64, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x01, 0x01, 0xe0,
+      0x4d, 0x54, 0x72, 0x6b, 0x00, 0x00, 0x00, 0x04, 0x00, 0xff, 0x2f, 0x00,
+    ]);
+    fs.writeFileSync(path.join(runDir, "demo.mid"), midiBuf);
+    const ok = await fetch(`${base}/api/audio?dir=out-audio-mid&file=demo.mid`);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("content-type")).toBe("audio/midi");
+    expect(Buffer.from(await ok.arrayBuffer()).length).toBe(midiBuf.length);
+    // 非白名单后缀 → 400
+    const bad = await fetch(`${base}/api/audio?dir=out-audio-mid&file=demo.exe`);
+    expect(bad.status).toBe(400);
+  });
+
+  test("GUI 单页含音频工坊要素（🎵 面板 / 音色网格 / 断连条 / Esc 关闭）", async () => {
+    const html = await (await fetch(`${base}/`)).text();
+    for (const needle of [
+      'id="timbreBtn"', 'id="audioPane"', 'id="audGrid"', 'id="audProg"',
+      "/api/audio-demo", "function openTimbre(", "function playTimbreDemo(",
+      'id="connBar"', "function connSetLost(", "function connRetryNow(",
+      "addEventListener(\"keydown\"", "closeTimbre",
+    ]) {
+      expect(html).toContain(needle);
+    }
+    // 内联脚本自洽
+    const m = html.match(/<script>([\s\S]*?)<\/script>/);
+    expect(m).not.toBeNull();
+    expect(() => new Function(m![1]!)).not.toThrow();
+  });
+});

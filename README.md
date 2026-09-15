@@ -5,7 +5,7 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.5.8_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Status](https://img.shields.io/badge/status-v0.5.9_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
 [![Tests](https://img.shields.io/badge/tests-431%2F431_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.66-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
@@ -19,7 +19,9 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **v0.5.8 当前状态**：可运行实现，**447/447 机制级测试全绿**（26 文件 · 1849 expect）。本版落地**语义检索/RAG**（capabilities #19/#22 双 ⬜→✅）：BM25 + 短语加成 + 中英混合分词（CJK bigram），四入口开袋即食 —— CLI `org search` · Web 顶栏 🔍 面板（点击命中插入 @引用的检索→引用闭环）· `@?查询词` RAG 注入（检索命中自动织入模型上下文）· 工具环 `semantic_search`（ABI 内同构实现，行为对拍钉进 CI）。
+> **v0.5.9 当前状态**：可运行实现，**469/469 机制级测试全绿**（26 文件 · 2042 expect）。本版落地**音频工坊**：8 种乐器音色（谐波表+包络+颤音 FM）× 7 套和弦进行（柱式/琶音）× **MIDI 导出**（SMF 0 可入 DAW）—— 产物从单一正弦 WAV 升级为多乐器 WAV+MIDI 双格式；Web GUI 新增 🎵 音色试听面板（/api/audio-demo 服务端合成+缓存）、直连 t-bot 音频卡（B-18 补齐第三入口收尾钩子）、断连优雅降级（状态条+轮询降频）、Esc 统一关面板。
+
+> **v0.5.8 历史状态**：可运行实现，447/447 机制级测试全绿（26 文件 · 1849 expect）。语义检索/RAG 四入口（BM25+短语加成+中英混合分词）：CLI `org search` · Web 🔍 面板（检索→引用闭环）· `@?查询词` RAG 注入 · 工具环 `semantic_search`（ABI 同构对拍）。
 >
 > **v0.5.7 历史状态**：可运行实现，434/434 机制级测试全绿（25 文件 · 1799 expect）。本版专注 QA 实测双修：**空壳工作区修复**（TaskRunner 先行 mkdir 骗过 ensureWorkspace 存在性检查 → 模板从未复制 → Web GUI 首问必炸 Err；标记物判据 registry/raw/.git 全缺即补模板）· **嵌套专家执行多重优雅降级**（Reuse/Generate/WarmHandoff 三路 dispatch 失败不再硬 Err 炸穿 run —— 失败报告交监督回路有界处理：Revise → 返工 → 强制收货，摘要诚实可见）。
 >

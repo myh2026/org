@@ -297,3 +297,329 @@ describe("audio：e2e 工具环（audio_compose 工具）", () => {
     expect(fs.existsSync(path.join(out, "music.notes.json"))).toBe(false); // 未写工件
   }, 120_000);
 });
+
+// ============================================================================
+// v0.5.9 音频工坊：音色库 × 和弦库 × MIDI 导出
+// ============================================================================
+
+import {
+  TIMBRES,
+  CHORD_QUALITIES,
+  PROGRESSIONS,
+  progressionToNotes,
+  noteNameToMidi,
+  midiToFreq,
+  renderNotesToMidi,
+} from "../lib/audio.ts";
+
+describe("audio v0.5.9：音色库（TIMBRES · 8 种乐器）", () => {
+  test("8 种音色全渲染：RIFF 头合法 + 双通道 + 非静音", () => {
+    const names = Object.keys(TIMBRES);
+    expect(names.length).toBe(8);
+    expect(names).toEqual(expect.arrayContaining(["piano", "strings", "flute", "organ", "harpsichord", "music-box", "guitar", "bell"]));
+    for (const name of names) {
+      const spec = TIMBRES[name]!;
+      expect(spec.partials.length).toBeGreaterThan(0);
+      expect(spec.partials.every((p) => p.ratio > 0 && p.gain > 0)).toBe(true);
+      const r = renderNotesToWav({
+        title: `timbre-${name}`, tempo: 120, timbre: name,
+        notes: [
+          { freq: 261.63, start_beat: 0, beats: 1, gain: 0.7 },
+          { freq: 329.63, start_beat: 1, beats: 1, gain: 0.7 },
+          { freq: 392.0, start_beat: 2, beats: 2, gain: 0.7 },
+        ],
+      });
+      expect(r.ok).toBe(true);
+      expect(r.error).toBeUndefined(); // 无截断/无降级标注
+      const info = wavInfo(r.wav!);
+      expect(info).not.toBeNull();
+      expect(info!.channels).toBe(2);
+      // 非静音：正负峰值都存在（有起有伏，非直流）
+      const buf = r.wav!;
+      let pos = 0, neg = 0;
+      for (let off = 44; off < Math.min(buf.length, 44 + 88200); off += 2) {
+        const v = buf.readInt16LE(off);
+        if (v > 8000) pos++;
+        if (v < -8000) neg++;
+      }
+      expect(pos).toBeGreaterThan(10);
+      expect(neg).toBeGreaterThan(10);
+    }
+  });
+
+  test("音色 vs 田字格波形差异：strings（sustain 0.8 + 颤音）采样不同于无 timbre 基线", () => {
+    const score = {
+      title: "diff", tempo: 90,
+      notes: [{ freq: 220, start_beat: 0, beats: 4, gain: 0.8 }],
+    };
+    const withTimbre = renderNotesToWav({ ...score, timbre: "strings" });
+    const without = renderNotesToWav(score);
+    expect(withTimbre.ok && without.ok).toBe(true);
+    // 谐波表 + 颤音调制 → 两份 WAV 必然不同（字节级）
+    expect(Buffer.compare(withTimbre.wav!, without.wav!)).not.toBe(0);
+  });
+
+  test("未知音色名降级：不炸曲（回退 wave 基础波形）", () => {
+    const r = renderNotesToWav({
+      timbre: "no-such-instrument",
+      notes: [{ freq: 440, start_beat: 0, beats: 1, gain: 0.6, wave: "sine" }],
+    });
+    expect(r.ok).toBe(true); // 降级渲染而非失败
+    expect(wavInfo(r.wav!)).not.toBeNull();
+  });
+
+  test("颤音音色冒烟：strings（5.5Hz FM）渲染成功且耗时受控", () => {
+    const t0 = Date.now();
+    const r = renderNotesToWav({
+      tempo: 60, timbre: "strings",
+      notes: Array.from({ length: 24 }, (_, i) => ({ freq: 220 * Math.pow(2, (i % 7) / 12), start_beat: i, beats: 1.5, gain: 0.4 })),
+    });
+    expect(r.ok).toBe(true);
+    expect(r.durationSec!).toBeGreaterThan(20);
+    expect(Date.now() - t0).toBeLessThan(10_000); // 24 音 < 10s（性能护栏）
+  });
+});
+
+describe("audio v0.5.9：和弦库（11 质量 × 7 进行 + 音名转换）", () => {
+  test("音名 ↔ MIDI ↔ 频率三向转换矩阵", () => {
+    expect(noteNameToMidi("C4")).toBe(60);
+    expect(noteNameToMidi("A4")).toBe(69);
+    expect(noteNameToMidi("F#5")).toBe(78);
+    expect(noteNameToMidi("Bb3")).toBe(58);
+    expect(noteNameToMidi("D#2")).toBe(39);
+    expect(noteNameToMidi("c4")).toBe(60); // 小写宽容
+    expect(noteNameToMidi("X9")).toBeNull();
+    expect(noteNameToMidi("")).toBeNull();
+    expect(noteNameToMidi("C10")).toBeNull(); // 出界（132 > 127）
+    expect(midiToFreq(69)).toBeCloseTo(440, 1);
+    expect(midiToFreq(60)).toBeCloseTo(261.63, 1);
+    expect(Object.keys(CHORD_QUALITIES).length).toBe(11);
+    expect(Object.keys(PROGRESSIONS).length).toBe(7);
+  });
+
+  test("canon 进行：8 和弦 28 音，级数质量正确（I maj / V 7 / vi m7 / iii m7 …）", () => {
+    const p = progressionToNotes("C4", "canon", { style: "block", beatsPerChord: 4 });
+    expect(p.ok).toBe(true);
+    expect(p.degraded).toEqual([]); // 无降级
+    expect(p.chords.length).toBe(8);
+    expect(p.notes.length).toBe(28); // maj3+7(4)+m7(4)+m7(4)+maj3+maj3+maj3+7(4)
+    expect(p.chords[0]).toBe("C4");        // maj 后缀省略
+    expect(p.chords[1]).toBe("G4·7");      // 属七
+    expect(p.chords[2]).toBe("A4·m7");     // vi m7
+    expect(p.chords[3]).toBe("E4·m7");     // iii m7
+    expect(p.chords[4]).toBe("F4");        // IV maj
+    // 柱式：第一和弦 3 音同拍起（start_beat 全 0），时值 4×0.95
+    const first = p.notes.filter((n) => n.start_beat === 0);
+    expect(first.length).toBe(3);
+    expect(first.every((n) => n.beats === 3.8)).toBe(true);
+  });
+
+  test("arp 风格：和弦音滚动起拍 + 尾音交叠（连奏感）", () => {
+    const p = progressionToNotes("C4", "pop", { style: "arp", beatsPerChord: 4 });
+    expect(p.ok).toBe(true);
+    expect(p.notes.length).toBe(14); // pop = 4 和弦 14 音
+    const firstChord = p.notes.filter((n) => n.start_beat < 4).sort((a, b) => a.start_beat - b.start_beat);
+    expect(firstChord.length).toBe(3); // 第一个和弦 I（maj 3 音）在 0..4 拍滚动
+    const starts = firstChord.map((n) => n.start_beat);
+    expect(starts[0]).toBe(0);
+    // 滚动：第 2/3 音起拍递增（4 拍 / 3 音 ≈ 1.333 间隔）
+    expect(starts[1]!).toBeGreaterThan(starts[0]!);
+    expect(starts[2]!).toBeGreaterThan(starts[1]!);
+    // 交叠：首音时值 > 步长（尾音延伸进下一音）
+    expect(firstChord[0]!.beats).toBeGreaterThan(4 / 3);
+  });
+
+  test("非法参数宽容降级：坏根音 → C4 + 降级标注；未注册进行 → canon", () => {
+    const p = progressionToNotes("X9", "nope-prog");
+    expect(p.ok).toBe(true); // 降级后仍有产物
+    expect(p.degraded.join(" ")).toContain("C4");
+    expect(p.degraded.join(" ")).toContain("canon");
+    expect(p.chords.length).toBe(8); // canon 的 8 和弦
+  });
+
+  test("和弦进行可直渲染：progressionToNotes → renderNotesToWav 全链", () => {
+    const p = progressionToNotes("D3", "canon", { style: "block", beatsPerChord: 2 });
+    const r = renderNotesToWav({
+      title: "D 大调卡农进行", tempo: 100, timbre: "harpsichord", export_midi: true, notes: p.notes,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.noteCount).toBe(28);
+    expect(r.durationSec!).toBeGreaterThan(9.5); // 15.9 拍 @100bpm ≈ 9.5s+（尾和弦留缝）
+  });
+});
+
+describe("audio v0.5.9：MIDI 导出（SMF 格式 0）", () => {
+  test("头字节级校验：MThd + fmt 0 + 1 轨 + 480 PPQ + MTrk 长度前缀一致", () => {
+    const m = renderNotesToMidi({
+      tempo: 96, notes: [
+        { freq: 261.63, start_beat: 0, beats: 1, gain: 0.8 },
+        { freq: 329.63, start_beat: 1, beats: 1, gain: 0.6 },
+        { freq: 392.0, start_beat: 2, beats: 2, gain: 0.7 },
+      ],
+    });
+    expect(m.ok).toBe(true);
+    const b = m.midi!;
+    expect(b.toString("ascii", 0, 4)).toBe("MThd");
+    expect(b.readUInt32BE(4)).toBe(6);
+    expect(b.readUInt16BE(8)).toBe(0);   // 格式 0
+    expect(b.readUInt16BE(10)).toBe(1);  // 单轨
+    expect(b.readUInt16BE(12)).toBe(480); // PPQ
+    expect(b.toString("ascii", 14, 18)).toBe("MTrk");
+    const trkLen = b.readUInt32BE(18);
+    expect(b.length).toBe(18 + 4 + trkLen); // 长度前缀与实际一致
+    // tempo meta：track 首事件 = delta(0) + FF 51 03 + 3 字节大端 µs/qn
+    // （96 BPM = 625000 µs = 0x09 89 68；位置 = MThd14 + MTrk4 + len4 + delta1 + meta头3）
+    const usec = (b[26]! << 16) | (b[27]! << 8) | b[28]!;
+    expect(usec).toBe(625000);
+    expect(b[23]).toBe(0xff);
+    expect(b[24]).toBe(0x51);
+    expect(b[25]).toBe(0x03);
+    // 音符数：3 个不同 MIDI 音 → 3 对 note_on/off
+    expect(m.noteCount).toBe(3);
+    // note_on 事件计数（0x90 状态字节）
+    let onCount = 0;
+    for (let i = 22; i < b.length - 4; i++) if (b[i] === 0x90) onCount++;
+    expect(onCount).toBe(3);
+  });
+
+  test("频率 → 最近半音 + 出界夹紧（16Hz→12 · 12000Hz→126）", () => {
+    const m = renderNotesToMidi({
+      notes: [{ freq: 16, start_beat: 0, beats: 1 }, { freq: 12000, start_beat: 1, beats: 1 }],
+    });
+    expect(m.ok).toBe(true);
+    expect(m.noteCount).toBe(2);
+  });
+
+  test("容错同源：结构性错误与 WAV 渲染器同判（notes 缺失 / 空数组 / 全非法）", () => {
+    expect(renderNotesToMidi({}).ok).toBe(false);
+    expect(renderNotesToMidi({ notes: [] }).ok).toBe(false);
+    expect(renderNotesToMidi({ notes: [{ freq: -1, start_beat: 0, beats: 1 }] }).ok).toBe(false);
+  });
+
+  test("renderNotesFileSync：export_midi=true 同写 .mid + artifact 字段；缺省不写", () => {
+    const dir = makeOut("midi-flag");
+    const withMidi = path.join(dir, "a.notes.json");
+    fs.writeFileSync(withMidi, JSON.stringify({
+      title: "midi-on", tempo: 90, export_midi: true,
+      notes: [{ freq: 440, start_beat: 0, beats: 1, gain: 0.6 }],
+    }));
+    const r1 = renderNotesFileSync(withMidi);
+    expect("error" in r1).toBe(false);
+    expect(r1.midiFile).toBe("a.mid");
+    expect(fs.existsSync(path.join(dir, "a.mid"))).toBe(true);
+    expect(fs.readFileSync(path.join(dir, "a.mid")).toString("ascii", 0, 4)).toBe("MThd");
+    expect(r1.wavFile).toBe("a.wav");
+
+    const without = path.join(dir, "b.notes.json");
+    fs.writeFileSync(without, JSON.stringify({
+      title: "midi-off", tempo: 90,
+      notes: [{ freq: 440, start_beat: 0, beats: 1, gain: 0.6 }],
+    }));
+    const r2 = renderNotesFileSync(without);
+    expect("error" in r2).toBe(false);
+    expect(r2.midiFile).toBeUndefined();
+    expect(fs.existsSync(path.join(dir, "b.mid"))).toBe(false);
+  });
+
+  test("timbre 透传：artifact.timbre 报告注册音色名", () => {
+    const dir = makeOut("timbre-attr");
+    const f = path.join(dir, "c.notes.json");
+    fs.writeFileSync(f, JSON.stringify({
+      tempo: 90, timbre: "music-box",
+      notes: [{ freq: 523.25, start_beat: 0, beats: 1, gain: 0.6 }],
+    }));
+    const r = renderNotesFileSync(f);
+    expect("error" in r).toBe(false);
+    expect(r.timbre).toBe("music-box");
+    // 未注册音色名 → 不进 artifact 字段（渲染侧已降级，报告不留假名）
+    const f2 = path.join(dir, "d.notes.json");
+    fs.writeFileSync(f2, JSON.stringify({
+      tempo: 90, timbre: "ghost",
+      notes: [{ freq: 523.25, start_beat: 0, beats: 1, gain: 0.6 }],
+    }));
+    const r2 = renderNotesFileSync(f2);
+    expect("error" in r2).toBe(false);
+    expect(r2.timbre).toBeUndefined();
+  });
+
+  test("scanAndRenderArtifacts 幂等：wav+mid 双新则跳过（mtime 判定）", () => {
+    const dir = makeOut("midi-idem");
+    fs.writeFileSync(path.join(dir, "e.notes.json"), JSON.stringify({
+      export_midi: true, tempo: 90,
+      notes: [{ freq: 330, start_beat: 0, beats: 2, gain: 0.6 }],
+    }));
+    const s1 = scanAndRenderArtifacts(dir);
+    expect(s1.rendered.length).toBe(1);
+    expect(s1.rendered[0]!.midiFile).toBe("e.mid");
+    const s2 = scanAndRenderArtifacts(dir); // 双产物已新 → 幂等跳过
+    expect(s2.rendered.length).toBe(0);
+  });
+});
+
+describe("audio v0.5.9：e2e 工具环和弦车道（timbre + chords 全链）", () => {
+  test("direct 车道：audio_compose {timbre, chords} → 28 音符工件 + WAV + MIDI 三产物", async () => {
+    const fixture = path.join(TEST_RUN, "audio-chord-fixture.json");
+    const doc = {
+      acts: [], reviews: [],
+      tracks: {
+        "direct:notice-parser": [
+          '好的，用羽管键琴写一段卡农琶音。\n<tool>{"name":"audio_compose","args":{"title":"羽管键琴卡农","timbre":"harpsichord","chords":"D3:canon:arp","tempo":100}}</tool>',
+          "最终答案：已创作「羽管键琴卡农」（卡农进行琶音），music.wav 与 music.mid 已渲染。",
+        ],
+      },
+    };
+    fs.writeFileSync(fixture, JSON.stringify(doc));
+    const out = path.join(WS, "out-tool-chords");
+    const r = runOrg([
+      "ask", "notice-parser", "用羽管键琴写一段卡农琶音",
+      "--workspace", WS,
+      "--fixture", fixture,
+      "--out", out,
+    ], { ORG_TOOLS: "write" });
+    expect(r.ok).toBe(true);
+    expect(r.stdout).toContain("♪ 音频产物已渲染：music.wav");
+    // 工件：音色 + MIDI 声明 + 28 音符（canon 8 和弦）
+    const notesJson = JSON.parse(fs.readFileSync(path.join(out, "music.notes.json"), "utf-8")) as {
+      timbre?: string; export_midi?: boolean; notes: unknown[];
+    };
+    expect(notesJson.timbre).toBe("harpsichord");
+    expect(notesJson.export_midi).toBe(true);
+    expect(notesJson.notes.length).toBe(28);
+    // 双产物：WAV（RIFF）+ MIDI（MThd）
+    expect(fs.readFileSync(path.join(out, "music.wav")).toString("ascii", 0, 4)).toBe("RIFF");
+    const mid = fs.readFileSync(path.join(out, "music.mid"));
+    expect(mid.toString("ascii", 0, 4)).toBe("MThd");
+    expect(mid.readUInt16BE(8)).toBe(0);
+    expect(mid.readUInt16BE(12)).toBe(480);
+    // 观测：CLI 收尾输出附 MIDI 文件名
+    expect(r.stdout).toContain("music.mid");
+  }, 120_000);
+
+  test("和弦车道宽容形态：对象参数 {root, name, style} 同样可用", async () => {
+    const fixture = path.join(TEST_RUN, "audio-chord-obj-fixture.json");
+    const doc = {
+      acts: [], reviews: [],
+      tracks: {
+        "direct:notice-parser": [
+          '<tool>{"name":"audio_compose","args":{"name":"lullaby","title":"八音盒摇篮曲","timbre":"music-box","chords":{"root":"C4","name":"romance","style":"arp","beats_per_chord":2}}}</tool>',
+          "最终答案：八音盒摇篮曲已完成。",
+        ],
+      },
+    };
+    fs.writeFileSync(fixture, JSON.stringify(doc));
+    const out = path.join(WS, "out-tool-chords-obj");
+    const r = runOrg([
+      "ask", "notice-parser", "来一段摇篮曲",
+      "--workspace", WS,
+      "--fixture", fixture,
+      "--out", out,
+    ], { ORG_TOOLS: "write" });
+    expect(r.ok).toBe(true);
+    // 注意工件名区分：args 顶层 name=工件名（lullaby）≠ chords.name=进行名（romance）
+    const notesJson = JSON.parse(fs.readFileSync(path.join(out, "lullaby.notes.json"), "utf-8")) as { notes: Array<{ start_beat: number }> };
+    expect(notesJson.notes.length).toBe(14); // romance 4 和弦 14 音
+    expect(notesJson.notes.some((n) => n.start_beat > 0 && n.start_beat < 2)).toBe(true); // 琶音滚动（bpc=2）
+    expect(fs.existsSync(path.join(out, "lullaby.mid"))).toBe(true);
+    expect(fs.existsSync(path.join(out, "lullaby.wav"))).toBe(true);
+  }, 120_000);
+});

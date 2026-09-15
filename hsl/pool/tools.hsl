@@ -85,7 +85,7 @@ export fn tools_prompt(mode: ToolMode) -> String {
         out.push_str("- fs_edit {\"path\":\"...\",\"old\":\"exact unique text\",\"new\":\"replacement\"} — precise edit (may require approval)\n");
         out.push_str("- shell_run {\"cmd\":\"git status\"} — run an allowlisted command (may require approval)\n");
         out.push_str("- agent_spawn {\"goal\":\"...\",\"mode\":\"run\"|\"ask\",\"expert\":\"name\"} — spawn a sub-organization (team mission via org run, or direct expert via org ask). Depth-governed recursion: use it ONLY when the task genuinely needs multi-step decomposition or another expert's specialty; for trivial lookups use fs_read/fs_list first. The child inherits your model lane.\n");
-        out.push_str("- audio_compose {\"title\":\"...\",\"tempo\":72,\"notes\":[{\"freq\":261.63,\"start_beat\":0,\"beats\":1,\"gain\":0.6,\"wave\":\"sine\"}]} — compose music as structured score; the engine renders a playable .wav alongside your reply (deliverable = audio, not sheet).\n");
+        out.push_str("- audio_compose {\"timbre\":\"strings\",\"chords\":\"D3:canon:arp\",\"tempo\":90} — compose from chord progression + timbre (8 instruments: piano/strings/flute/organ/harpsichord/music-box/guitar/bell; 7 progressions: canon/pop/epic/circle/jazz/blues/romance); or explicit notes [{\"freq\":261.63,\"start_beat\":0,\"beats\":1}]. Engine renders playable .wav + .mid alongside your reply (deliverable = audio, not sheet).\n");
     }
     out.push_str("After a tool call you will receive a <tool_result> message; use it and continue. When you have the final answer, reply WITHOUT any <tool> tags.\n");
     out
@@ -546,11 +546,81 @@ async fn tool_agent_spawn(args: String) -> String {
 
 /// 音频作曲（直连车道）：写 <name>.notes.json 工件 —— 引擎收尾扫描渲染
 /// 同名 .wav（开袋即食：交付物是音频不是乐谱）。参数宽容（多形态别名）。
+/// v0.5.9：timbre 音色（8 种乐器）/ chords 和弦进行（7 套预设，可代 notes）/
+/// export_midi（缺省 true —— audio_compose 显式调用，MIDI 顺手交付）。
 fn tool_audio_compose(args: String) -> String {
     native typescript {
         try {
             const a = JSON.parse(args);
             let notes = a.notes;
+            let chordsUsed = "";
+            // v0.5.9：和弦进行车道 —— 无 notes 时用 chords/progression 生成
+            // 宽容形态："canon" | "D3:canon" | "D3:canon:arp" | {root,name,style,beats_per_chord}
+            // （与 lib/audio.ts progressionToNotes 同构：音名/音级质量/进行表同参，保持对拍）
+            let progSpec = a.chords ?? a.progression ?? null;
+            if ((!notes || (Array.isArray(notes) && notes.length === 0)) && progSpec) {
+                let root = "C4", progName = "canon", style = "block", bpc = 4;
+                if (typeof progSpec === "string") {
+                    const parts = String(progSpec).split(":").map((s) => s.trim()).filter(Boolean);
+                    for (const p of parts) {
+                        if (/^[A-Ga-g][#b♯♭]?-?\d+$/.test(p) && p === parts[0]) root = p;
+                        else if (p === "arp") style = "arp";
+                        else progName = p.toLowerCase();
+                    }
+                } else if (progSpec && typeof progSpec === "object") {
+                    root = String(progSpec.root || "C4");
+                    progName = String(progSpec.name || progSpec.prog || "canon").toLowerCase();
+                    style = String(progSpec.style) === "arp" ? "arp" : "block";
+                    bpc = Number(progSpec.beats_per_chord ?? progSpec.beatsPerChord ?? 4) || 4;
+                }
+                // ---- 同构内联（lib/audio.ts 的 ABI 镜像）----
+                const PROGS = {
+                    canon: [0, 7, 9, 4, 5, 0, 5, 7], pop: [0, 7, 9, 5], epic: [9, 5, 0, 7],
+                    circle: [0, 5, 7, 0], jazz: [2, 7, 0],
+                    blues: [0, 0, 0, 0, 5, 5, 0, 0, 7, 5, 0, 0], romance: [0, 9, 5, 7],
+                };
+                const QUAL = {
+                    maj: [0, 4, 7], min: [0, 3, 7], dim: [0, 3, 6], "7": [0, 4, 7, 10],
+                    m7: [0, 3, 7, 10],
+                };
+                const diatonic = (off) => {
+                    const v = ((off % 12) + 12) % 12;
+                    if (v === 2 || v === 4 || v === 9) return "m7";
+                    if (v === 11) return "dim";
+                    if (v === 7) return "7";
+                    return "maj";
+                };
+                const nameToMidi = (nm) => {
+                    const m = /^([A-Ga-g])([#b♯♭]?)(-?\d+)$/.exec(String(nm).trim());
+                    if (!m) return 60;
+                    const BASE = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+                    const acc = m[2] === "#" || m[2] === "♯" ? 1 : m[2] === "b" || m[2] === "♭" ? -1 : 0;
+                    const midi = (Number(m[3]) + 1) * 12 + BASE[m[1].toUpperCase()] + acc;
+                    return Math.max(0, Math.min(127, midi));
+                };
+                const f2 = (m) => 440 * Math.pow(2, (m - 69) / 12);
+                const steps = PROGS[progName] || PROGS.canon;
+                const LETTERS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+                const rootMidi = nameToMidi(root);
+                const gen = [];
+                const chordNames = [];
+                const g = Math.max(0.05, Math.min(1, Number(a.gain ?? 0.6) || 0.6));
+                steps.forEach((step, i) => {
+                    const q = diatonic(step);
+                    const ivs = QUAL[q] || QUAL.maj;
+                    const rn = rootMidi + step;
+                    chordNames.push(LETTERS[((rn % 12) + 12) % 12] + (Math.floor(rn / 12) - 1) + (q === "maj" ? "" : q));
+                    ivs.forEach((iv, j) => {
+                        if (style === "block") gen.push({ freq: f2(rn + iv), start_beat: i * bpc, beats: bpc * 0.95, gain: g, channel: "both" });
+                        else {
+                            const sb = bpc / ivs.length;
+                            gen.push({ freq: f2(rn + iv), start_beat: i * bpc + j * sb, beats: sb * 1.4, gain: g, channel: "both" });
+                        }
+                    });
+                });
+                notes = gen;
+                chordsUsed = chordNames.join(" ");
+            }
             // 宽容形态：单个音符对象 / score 简谱串（"261.63:1, 293.66:1, 329.63:2"）
             if (!Array.isArray(notes)) {
                 if (notes && typeof notes === "object") notes = [notes];
@@ -562,7 +632,7 @@ fn tool_audio_compose(args: String) -> String {
                 } else notes = null;
             }
             if (!notes || !Array.isArray(notes) || notes.length === 0) {
-                return JSON.stringify({ tool: "audio_compose", ok: false, error: "args.notes 必填（[{freq,start_beat,beats,gain,wave}] 或 score 简谱串）" });
+                return JSON.stringify({ tool: "audio_compose", ok: false, error: "args.notes 必填（[{freq,start_beat,beats,gain,wave}] 或 score 简谱串或 chords 和弦进行）" });
             }
             let beat = 0;
             const clean = notes.slice(0, 20000).map((n) => {
@@ -583,19 +653,25 @@ fn tool_audio_compose(args: String) -> String {
                 return JSON.stringify({ tool: "audio_compose", ok: false, error: "notes 不含任何合法音符（freq/beats 必须为正数）" });
             }
             const name = String(a.name || a.file || "music").replace(/[^A-Za-z0-9_-]/g, "-") || "music";
+            // v0.5.9：音色透传（未注册名保留 —— lib 侧降级到 wave 波形并留痕）
+            const timbre = typeof a.timbre === "string" ? a.timbre : undefined;
             const doc = {
                 title: String(a.title || "audio_compose"),
                 tempo: Number(a.tempo || 90),
                 sample_rate: 44100,
+                ...(timbre ? { timbre: timbre } : {}),
+                export_midi: a.export_midi !== false, // 显式 false 才关（缺省交付）
                 notes: clean,
             };
             $host.artifacts.write(name + ".notes.json", JSON.stringify(doc, null, 2));
             const totalBeats = clean.reduce((m, n) => Math.max(m, n.start_beat + n.beats), 0);
             return JSON.stringify({
                 tool: "audio_compose", ok: true, notes: clean.length,
-                artifact: name + ".notes.json", wav: name + ".wav",
+                artifact: name + ".notes.json", wav: name + ".wav", mid: name + ".mid",
+                ...(timbre ? { timbre: timbre } : {}),
+                ...(chordsUsed ? { chords: chordsUsed.slice(0, 120) } : {}),
                 duration_hint: Math.round(totalBeats * 60 / doc.tempo) + "s",
-                note: "引擎收尾自动渲染同名 .wav（本次运行产物目录）",
+                note: "引擎收尾自动渲染同名 .wav 与 .mid（本次运行产物目录）",
             });
         } catch (e) {
             return JSON.stringify({ tool: "audio_compose", ok: false, error: String(e && e.message || e) });

@@ -29,8 +29,9 @@ enum ComposerSignal {
 }
 
 /// 判定节点提示词（专家私有静态资源：乐谱 JSON 创作）。
+/// v0.5.9：timbre 音色字段（8 种乐器）+ export_midi（引擎顺手交付 .mid）。
 const COMPOSE_PROMPT: String = String::from(
-    "你是古典音乐作曲家。为给定任务创作一段乐谱，输出严格 JSON（不要 markdown 围栏、不要解释文字）：\n{\"title\":\"标题\",\"tempo\":72,\"notes\":[{\"freq\":261.63,\"start_beat\":0,\"beats\":1,\"gain\":0.6,\"wave\":\"sine\",\"channel\":\"both\"}]}\n字段约束：freq 为频率 Hz（20..4000）；start_beat/beats 为拍位与时值（正数）；gain 0..1；wave 可选 sine/triangle/saw/square；channel 可选 both/left/right。作曲要求：使用和声进行（如 D-A-Bm-F#m-G-D-G-A 卡农进行）；至少两个声部层次（低音分解和弦 + 上方旋律长音）；tempo 60..120；16..96 个音符；总长 8..48 拍。只输出 JSON。"
+    "你是古典音乐作曲家。为给定任务创作一段乐谱，输出严格 JSON（不要 markdown 围栏、不要解释文字）：\n{\"title\":\"标题\",\"tempo\":72,\"timbre\":\"strings\",\"export_midi\":true,\"notes\":[{\"freq\":261.63,\"start_beat\":0,\"beats\":1,\"gain\":0.6,\"channel\":\"both\"}]}\n字段约束：freq 为频率 Hz（20..4000）；start_beat/beats 为拍位与时值（正数）；gain 0..1；channel 可选 both/left/right；timbre 可选 piano/strings/flute/organ/harpsichord/music-box/guitar/bell（缺省 strings；按作品气质选巴洛克羽管键琴、浪漫弦乐、八音盒等）；export_midi 缺省 true（同时交付 MIDI）。作曲要求：使用和声进行（如 D-A-Bm-F#m-G-D-G-A 卡农进行）；至少两个声部层次（低音分解和弦 + 上方旋律长音）；tempo 60..120；16..96 个音符；总长 8..48 拍。只输出 JSON。"
 );
 
 /// 专家入口 graph（信封契约）。
@@ -165,10 +166,15 @@ fn normalize_score(raw: String) -> (String, bool) {
             })).filter((n) => Number.isFinite(n.freq) && n.freq > 0
                 && Number.isFinite(n.beats) && n.beats > 0);
             if (clean.length === 0) throw new Error("no valid notes");
+            // v0.5.9：音色透传（合法注册名才带；export_midi 缺省 true）
+            const TIMBRES = ["piano", "strings", "flute", "organ", "harpsichord", "music-box", "guitar", "bell"];
+            const timbre = o && TIMBRES.includes(String(o.timbre)) ? String(o.timbre) : undefined;
             return [JSON.stringify({
                 title: String((o && o.title) || "untitled"),
                 tempo: Number((o && o.tempo) || 90),
                 sample_rate: 44100,
+                ...(timbre ? { timbre: timbre } : {}),
+                export_midi: (o && o.export_midi) !== false,
                 notes: clean,
             }, null, 2), false];
         } catch (e) {
@@ -218,6 +224,8 @@ fn canon_fallback() -> String {
             title: "D 大调卡农（降级内置）",
             tempo: 72,
             sample_rate: 44100,
+            timbre: "strings", // v0.5.9：降级曲也用弦乐音色（比裸 sine 更有质感）
+            export_midi: true,
             notes: notes,
         }, null, 2);
     };

@@ -52,6 +52,10 @@
     ],
     "handoff:notice-parser": [
       "一句话版：公告按「=== NOTICE」切块，取标题/日期/部门三字段，分类看标题关键词，日期归一化为 ISO 8601（解析不了就保留原文并标注 unparsed）。"
+    ],
+    "direct:composer": [
+      "好的，我来创作一段古典风格的卡农。\n<tool>{\"name\":\"audio_compose\",\"args\":{\"name\":\"music\",\"title\":\"GUI 演示 · D 大调卡农（弦乐）\",\"timbre\":\"strings\",\"chords\":\"D3:canon:arp\",\"tempo\":80}}</tool>",
+      "已创作「GUI 演示 · D 大调卡农（弦乐）」：D 大调卡农进行（D-A-Bm-F#m-G-D-G-A），弦乐音色琶音风格，80 BPM。music.wav（开袋即听）与 music.mid（可导入 DAW）已随产物交付。"
     ]
   }
 }

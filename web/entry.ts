@@ -73,6 +73,7 @@ export interface WebParsed {
   workspace: string;
   model: string;
   port: number;
+  host: string;
   gateway: string;
 }
 
@@ -81,6 +82,7 @@ export function parseWebArgv(argv: string[]): WebParsed {
     workspace: process.env.ORG_WORKSPACE ?? DEFAULT_WORKSPACE,
     model: "scripted",
     port: DEFAULT_PORT,
+    host: process.env.ORG_WEB_HOST ?? "127.0.0.1", // 默认只听回环（本地 GUI 原型）；ORG_WEB_HOST=0.0.0.0 可远程/容器访问
     gateway: process.env.DHV_LLM_GATEWAY ?? "",
   };
   for (let i = 0; i < argv.length; i++) {
@@ -88,6 +90,7 @@ export function parseWebArgv(argv: string[]): WebParsed {
     if (a === "--workspace" || a === "-w") p.workspace = path.resolve(argv[++i] ?? p.workspace);
     else if (a === "--model" || a === "-m") p.model = argv[++i] ?? "scripted";
     else if (a === "--port" || a === "-p") p.port = Number(argv[++i] ?? DEFAULT_PORT) || DEFAULT_PORT;
+    else if (a === "--host") p.host = argv[++i] ?? p.host;
     else if (a === "--gateway" || a === "-g") p.gateway = argv[++i] ?? "";
   }
   return p;
@@ -131,10 +134,14 @@ import {
 import { expandMentions } from "../lib/mentions.ts"; // @文件引用（v0.5.3）
 import { listMemories, addMemory, removeMemory, allMemories } from "../lib/memories.ts"; // 长期记忆（v0.5.3）
 import { semanticSearch } from "../lib/search.ts"; // 语义检索（v0.5.8 · capabilities #19/#22）
+import { scanAndRenderArtifacts } from "../lib/audio.ts"; // 音频收尾（v0.5.9：GUI 直连车道的三入口同钩子）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
 
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+// v0.5.9：音色试听样本缓存（timbre|chords|style → WAV Buffer；64 条粗上限）
+const audioDemoCache = new Map<string, Buffer>();
 
 function sessionFile(ws: string, expert: string, session: string): string | null {
   if (!SAFE_NAME.test(expert) || !SAFE_NAME.test(session)) return null;
@@ -177,6 +184,8 @@ export interface AskOutcome {
   durationMs: number | null;
   turn: number | null;
   logs: string;
+  /** v0.5.9：直连车道的音频产物（out-ask 的 audio_rendered 事实；无则缺省）。 */
+  audio?: Array<{ wavFile: string; midiFile?: string; timbre?: string; durationSec: number; notes: number; title: string }>;
 }
 
 /** 解析 direct.hsl 的 stdout：[direct] 行 → 回答正文（多行）→ [ctx] 行 →
@@ -393,11 +402,33 @@ async function askStreamOnce(
       streamTailer.flush(); // 收尾冲刷：退出与最后一帧增量之间的竞态窗口补齐
       runningProc = null;
     }
-    return parseAskOut(chunks.join(""));
+    return withAskAudio(parseAskOut(chunks.join("")), path.join(ws, "out-ask"));
   }
   // 进程内车道：无增量输出，走 dhvRun 拿最终结果
   const r = await dhvRun(args, env);
-  return parseAskOut(r.out);
+  return withAskAudio(parseAskOut(r.out), path.join(ws, "out-ask"));
+}
+
+/** v0.5.9：直连产物音频附面（开袋即食的直连版）。
+ * 背景：GUI 直连直接 spawn dhv 解释器，绕过 cli runHsl / lib/engine 的
+ * 收尾钩子 → 此前三入口中唯独 Web 直连不渲染音频。这里补齐第三份钩子：
+ * scanAndRenderArtifacts(out-ask)（幂等：mtime 判定，重跑不重复渲染）。
+ * 容错：渲染/读失败静默降级为无音频（产物事实不改变问答语义）。 */
+function withAskAudio(outcome: AskOutcome, outDir: string): AskOutcome {
+  try {
+    const r = scanAndRenderArtifacts(outDir);
+    if (r.rendered.length > 0) {
+      outcome.audio = r.rendered.map((a) => ({
+        wavFile: a.wavFile,
+        ...(a.midiFile ? { midiFile: a.midiFile } : {}),
+        ...(a.timbre ? { timbre: a.timbre } : {}),
+        durationSec: a.durationSec,
+        notes: a.notes,
+        title: a.title,
+      }));
+    }
+  } catch { /* 渲染失败 → 无音频面（不改变问答语义） */ }
+  return outcome;
 }
 
 /** llm-stream.jsonl 尾随泵（v0.4.15）：宿主流式车道的逐 token 增量 →
@@ -610,7 +641,7 @@ function sseAsk(
 }
 
 /** 起服务（可编程入口：测试用 port 0 随机高端口 + server.stop()）。 */
-export function startWebServer(opts: { workspace: string; port: number; model: string; taskRunner?: boolean }): Bun.Server {
+export function startWebServer(opts: { workspace: string; port: number; host?: string; model: string; taskRunner?: boolean }): Bun.Server {
   const ws = opts.workspace;
   // v0.5.2：内嵌任务执行器（org web 即守护进程 —— 与 org taskd 二选一，
   // runner lock 跨进程互斥；抢不到锁 = taskd 在跑，Web 只读任务状态）。
@@ -627,7 +658,7 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
   }
   const server = Bun.serve({
     port: opts.port,
-    hostname: "127.0.0.1", // 本地 GUI 原型：只听回环（演示场景够用）
+    hostname: opts.host ?? "127.0.0.1", // 默认只听回环；org web --host 0.0.0.0 / ORG_WEB_HOST 可远程（容器/云端浏览器 QA）
     async fetch(req): Promise<Response> {
       const url = new URL(req.url);
       const route = `${req.method} ${url.pathname}`;
@@ -993,21 +1024,64 @@ export function startWebServer(opts: { workspace: string; port: number; model: s
         }
         if (route === "GET /api/audio") {
           // v0.5.6：音频产物直通（开袋即食的 Web 面 —— <audio> 播放/下载）。
-          // dir 同 /api/run 的 run 目录名；file 限 [A-Za-z0-9_.-]+ 且必为 .wav。
+          // v0.5.9：允许 .mid（MIDI 下载）；dir 同 /api/run 的 run 目录名；
+          // file 限 [A-Za-z0-9_.-]+ 且必为 .wav/.mid。
           const name = url.searchParams.get("dir") ?? "";
           const file = url.searchParams.get("file") ?? "";
           if (!SAFE_NAME.test(name)) return json({ error: "run 目录名不合法" }, 400);
-          if (!/^[A-Za-z0-9_.-]+\.wav$/.test(file) || file.includes("..")) {
+          if (!/^[A-Za-z0-9_.-]+\.(wav|mid)$/.test(file) || file.includes("..")) {
             return json({ error: "音频文件名不合法" }, 400);
           }
           const p = path.join(readWorkspaceOf(ws), name, file);
           if (!fs.existsSync(p)) return json({ error: `找不到音频产物：${name}/${file}` }, 404);
           return new Response(Bun.file(p), {
             headers: {
-              "Content-Type": "audio/wav",
+              "Content-Type": file.endsWith(".mid") ? "audio/midi" : "audio/wav",
               "Cache-Control": "no-store",
               "Content-Disposition": 'inline; filename="' + file + '"',
             },
+          });
+        }
+        if (route === "GET /api/audio-demo") {
+          // v0.5.9：音色试听（音频工坊的样本车道）：timbre × chords → 服务端
+          // 合成 2 和弦短样本（约 4s）；内存缓存（同参只渲染一次）。
+          // 参数宽容：未注册 timbre → strings；未注册 chords → canon。
+          const timbre = url.searchParams.get("timbre") ?? "strings";
+          const chords = url.searchParams.get("chords") ?? "canon";
+          const arp = url.searchParams.get("style") === "arp";
+          if (!/^[a-z0-9-]{1,24}$/.test(timbre) || !/^[a-z0-9-]{1,24}$/.test(chords)) {
+            return json({ error: "参数不合法" }, 400);
+          }
+          const cacheKey = `${timbre}|${chords}|${arp ? "arp" : "block"}`;
+          const hit = audioDemoCache.get(cacheKey);
+          if (hit) {
+            return new Response(new Uint8Array(hit), {
+              headers: { "Content-Type": "audio/wav", "Cache-Control": "no-store" },
+            });
+          }
+          const { progressionToNotes, TIMBRES, renderNotesToWav } = await import("../lib/audio.ts");
+          const tim = TIMBRES[timbre] ?? TIMBRES["strings"]!;
+          const prog = progressionToNotes("C4", chords, {
+            style: arp ? "arp" : "block",
+            beatsPerChord: 4,
+            gain: 0.7,
+          });
+          // 2 和弦样本（约 8 拍 @ 96bpm ≈ 5s）：覆盖进行前两级，音色/风格差异可听
+          const sampleNotes = prog.notes.filter((n) => n.start_beat < 8);
+          const outcome = renderNotesToWav({
+            title: `${tim.label} · ${chords}${arp ? " 琶音" : ""}`,
+            tempo: 96,
+            sample_rate: 44100,
+            timbre: TIMBRES[timbre] ? timbre : "strings",
+            notes: sampleNotes,
+          });
+          if (!outcome.ok || !outcome.wav) {
+            return json({ error: outcome.error ?? "样本合成失败" }, 500);
+          }
+          if (audioDemoCache.size > 64) audioDemoCache.clear(); // 粗上限防膨胀
+          audioDemoCache.set(cacheKey, outcome.wav);
+          return new Response(new Uint8Array(outcome.wav), {
+            headers: { "Content-Type": "audio/wav", "Cache-Control": "no-store" },
           });
         }
         if (route === "GET /api/run") {
@@ -1270,14 +1344,14 @@ export async function webMain(argv: string[]): Promise<number> {
   }
   let server: Bun.Server;
   try {
-    server = startWebServer({ workspace: p.workspace, port: p.port, model: p.model, taskRunner: true });
+    server = startWebServer({ workspace: p.workspace, port: p.port, host: p.host, model: p.model, taskRunner: true });
   } catch (err) {
     process.stderr.write(`✗ Web 服务启动失败：${(err as Error).message}\n`);
     process.stderr.write(`  （端口 ${p.port} 被占用？--port N 换一个）\n`);
     return 2;
   }
   console.log(`ORG web · v${VERSION} · 工作区 ${p.workspace}`);
-  console.log(`  GUI        http://127.0.0.1:${server.port}/`);
+  console.log(`  GUI        http://${p.host}:${server.port}/`);
   console.log(`  只读面     GET /api/status · /api/sessions?expert=… · /api/session/<专家>/<会话>`);
   console.log(`  会话管理   DELETE /api/session/<E>/<S>（删除）· PATCH（重命名 body {to}）`);
   console.log(`  交互面     POST /api/ask-stream（SSE 流式）· POST /api/ask（JSON 整轮）`);
@@ -2019,6 +2093,59 @@ function renderIndexHtml(): string {
         font: 10px/1.6 var(--mono); color: var(--dim); }
   .schfoot b { color: var(--muted); font-weight: 600; }
 
+  /* v0.5.9：面板关闭钮（检索/音色面板共用） */
+  .schclose { flex: none; margin-left: 8px; padding: 2px 9px; border: 1px solid var(--border);
+        background: transparent; color: var(--dim); font: 12px/1.4 var(--mono);
+        cursor: pointer; border-radius: 4px; }
+  .schclose:hover { color: var(--fg); border-color: var(--muted); }
+
+  /* v0.5.9：断连状态条（api 连续失败 ≥3 → 显示；恢复自动消失） */
+  #connBar { display: none; flex: none; padding: 5px 14px; gap: 8px; align-items: center;
+        background: rgba(217,119,6,.12); border-bottom: 1px solid rgba(217,119,6,.35);
+        font: 11px/1.6 var(--mono); color: #d97706; }
+  #connBar.on { display: flex; }
+  #connBar .dot { width: 8px; height: 8px; border-radius: 50%; background: #d97706;
+        animation: connpulse 1.2s ease-in-out infinite; }
+  @keyframes connpulse { 0%,100% { opacity: .35 } 50% { opacity: 1 } }
+  #connBar .retry { margin-left: auto; padding: 1px 10px; border: 1px solid rgba(217,119,6,.5);
+        background: transparent; color: #d97706; font: 10px/1.6 var(--mono); cursor: pointer;
+        border-radius: 4px; }
+  #connBar .retry:hover { background: rgba(217,119,6,.15); }
+
+  /* v0.5.9：音频工坊面板（8 音色网格 + 试听） */
+  #audioPane { display: none; position: fixed; top: 10vh; left: 50%; transform: translateX(-50%);
+        width: min(640px, 94vw); max-height: 80vh; z-index: 40;
+        background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+        box-shadow: 0 18px 60px rgba(0,0,0,.45); flex-direction: column; }
+  #audioPane.on { display: flex; }
+  #audioPane .schhead { padding: 12px 14px; display: flex; align-items: center;
+        border-bottom: 1px solid var(--border); }
+  #audioPane .schhead .tt { font: 600 13px/1.4 var(--mono); color: var(--fg); }
+  .audbody { flex: 1; overflow-y: auto; padding: 12px 14px; }
+  .audgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+        gap: 8px; }
+  .audcard { padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px;
+        cursor: pointer; transition: border-color .12s, background .12s; }
+  .audcard:hover { border-color: var(--muted); background: rgba(255,255,255,.025); }
+  .audcard.playing { border-color: var(--greenb); background: rgba(16,185,129,.07); }
+  .audcard .nm { font: 600 12px/1.5 var(--mono); color: var(--fg); display: flex;
+        align-items: center; gap: 6px; }
+  .audcard .nm .ic { font-size: 14px; }
+  .audcard .ds { margin-top: 2px; font: 10px/1.6 var(--mono); color: var(--dim); }
+  .audcard .tg { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px; }
+  .audcard .tg span { font: 9px/1.6 var(--mono); padding: 0 6px; border-radius: 3px;
+        border: 1px solid var(--border); color: var(--muted); }
+  .audctl { flex: none; display: flex; gap: 8px; align-items: center; padding: 10px 14px;
+        border-top: 1px solid var(--border); font: 11px/1.6 var(--mono); color: var(--muted); }
+  .audctl select { background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+        border-radius: 4px; padding: 3px 6px; font: 11px var(--mono); }
+  .audctl button { padding: 3px 12px; border: 1px solid var(--border); background: transparent;
+        color: var(--muted); font: 11px var(--mono); cursor: pointer; border-radius: 4px; }
+  .audctl button:hover { color: var(--fg); border-color: var(--muted); }
+  .audctl button.on { color: var(--greenb); border-color: var(--greenb); }
+  .audnote { padding: 8px 14px; border-top: 1px solid var(--border);
+        font: 10px/1.7 var(--mono); color: var(--dim); }
+
   /* 移动端：侧栏改抽屉（≤720px，issue #13 —— 不再 display:none 直接消失） */
   #backdrop { display: none; position: fixed; inset: 34px 0 0 0;
            background: rgba(0,0,0,.5); z-index: 25; }
@@ -2066,8 +2193,16 @@ function renderIndexHtml(): string {
   <button id="searchBtn" class="rchip" type="button" title="语义检索（BM25 · 中英混合）—— 检索工作区语料，点击命中可插入 @引用">
     <span class="rc-label">🔍 检索</span>
   </button>
+  <button id="timbreBtn" class="rchip" type="button" title="音频工坊（v0.5.9）— 8 种乐器音色试听 · 7 套和弦进行 · 柱式/琶音；派单作曲任务时在问题里写明音色即可">
+    <span class="rc-label">🎵 音色</span>
+  </button>
   <span class="tstats" id="topStats"></span>
 </header>
+<div id="connBar" role="status" aria-live="polite">
+  <span class="dot" aria-hidden="true"></span>
+  <span>与服务断开连接（服务器停止或网络中断）· 轮询已降频，恢复后自动重连</span>
+  <button class="retry" type="button" onclick="connRetryNow()">立即重试</button>
+</div>
 <div id="backdrop" aria-hidden="true"></div>
 <div id="reviewScrim" aria-hidden="true"></div>
 <div id="reviewPane" role="dialog" aria-modal="true" aria-labelledby="rvTitle"></div>
@@ -2087,6 +2222,7 @@ function renderIndexHtml(): string {
 <div id="searchPane" role="dialog" aria-modal="true" aria-labelledby="schTitle">
   <div class="schhead">
     <div class="tt" id="schTitle">🔍 语义检索 — 工作区语料 BM25</div>
+    <button class="schclose" type="button" onclick="closeSearch()" title="关闭（Esc）" aria-label="关闭检索面板">✕</button>
     <div class="schbar">
       <input id="schQuery" type="text" placeholder="查询词（中英混合 · 回车检索 · 如「审计 制度」「date format」）" autocomplete="off" aria-label="检索查询">
       <select id="schK" aria-label="命中数">
@@ -2102,6 +2238,30 @@ function renderIndexHtml(): string {
 点击命中路径可把 <b>@路径</b> 插入问题输入框（检索→引用闭环）。</div>
   </div>
   <div class="schfoot">RAG 注入：问题里写 <b>@?查询词</b> —— 检索命中自动织入模型上下文（org ask / 直连车道）· 语料降级：超限/二进制文件跳过不连坐</div>
+</div>
+<div id="audioScrim" aria-hidden="true"></div>
+<div id="audioPane" role="dialog" aria-modal="true" aria-labelledby="audTitle">
+  <div class="schhead">
+    <div class="tt" id="audTitle">🎵 音频工坊 — 乐器音色试听</div>
+    <button class="schclose" type="button" onclick="closeTimbre()" title="关闭（Esc）" aria-label="关闭音色面板">✕</button>
+  </div>
+  <div class="audbody">
+    <div class="audgrid" id="audGrid"></div>
+  </div>
+  <div class="audctl">
+    <label for="audProg">和弦进行</label>
+    <select id="audProg" aria-label="和弦进行">
+      <option value="canon" selected>卡农 I-V-vi-iii-IV-I-IV-V</option>
+      <option value="pop">流行 I-V-vi-IV</option>
+      <option value="epic">史诗 vi-IV-I-V</option>
+      <option value="circle">五度圈 I-IV-V-I</option>
+      <option value="jazz">爵士 ii-V-I</option>
+      <option value="blues">十二小节布鲁斯</option>
+      <option value="romance">浪漫 I-vi-IV-V</option>
+    </select>
+    <button id="audStyle" type="button" title="柱式和弦与琶音滚动切换">琶音</button>
+  </div>
+  <div class="audnote">作曲任务用法：团队/直连派单时在问题里写明音色与进行，如「用弦乐音色写一段卡农进行」或直连 composer/audio_compose 工具（timbre + chords 参数）。产物 = .wav（开袋即食）+ .mid（可导入 DAW/打谱软件）。</div>
 </div>
 <div class="app">
   <aside>
@@ -2171,8 +2331,37 @@ function esc(s) {
     return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
   });
 }
+// v0.5.9：断连优雅降级 —— 连续失败 ≥3 显示状态条 + 轮询降频（每 2 次跳 1 次），
+// 恢复自动消失。此前的行为是控制台「Failed to fetch」刷屏（跨轮会话累积噪音）。
+var connFail = 0;
+var connLost = false;
+function connSetLost(v) {
+  if (v === connLost) return;
+  connLost = v;
+  document.getElementById("connBar").classList.toggle("on", v);
+}
+function connRetryNow() {
+  connFail = 0;
+  connSetLost(false);
+  notifyBadgeRefresh();
+  approvalChipRefresh();
+  loadRuns();
+}
+/** 断连时轮询闸门：降频一半（调用处 setInterval 内统一过闸）。 */
+function connGate(tick) {
+  return !connLost || tick % 2 === 0;
+}
+var connTick = 0;
 function api(path, opts) {
-  return fetch(path, opts).then(function (r) { return r.json(); });
+  return fetch(path, opts).then(function (r) {
+    connFail = 0;
+    connSetLost(false);
+    return r.json();
+  }).catch(function (e) {
+    connFail++;
+    if (connFail >= 3) connSetLost(true); // 偶发单次失败不扰动，连续才断言
+    throw e;
+  });
 }
 function relTime(iso) {
   var d = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -2597,9 +2786,12 @@ function renderRun(m) {
     h += '<div class="revt ' + cls + '">' + esc(n.text) + '</div>';
   });
   // v0.5.6：音频产物行（♪ 开袋即食；播放器在 done 段 —— dir 在终帧才确定）
+  // v0.5.9：音色徽标（timbre 命中注册表时）+ MIDI 同行提示
   m.audio.forEach(function (a) {
     h += '<div class="revt nv-ok">♪ 音频产物 ' + esc(a.wavFile) +
-         ' · ' + esc(a.title) + ' · ' + a.durationSec + 's · ' + a.notes + ' 音符</div>';
+         ' · ' + esc(a.title) + ' · ' + a.durationSec + 's · ' + a.notes + ' 音符' +
+         (a.timbre ? ' · <b>' + esc(a.timbre) + '</b> 音色' : '') +
+         (a.midiFile ? ' · 附 MIDI' : '') + '</div>';
   });
   m.audioFailures.forEach(function (f) {
     h += '<div class="revt nv-warn">♪ 渲染失败 ' + esc(f.file) + '：<span class="dim">' + esc(f.error) + '</span></div>';
@@ -2657,9 +2849,11 @@ function runDoneHtml(x) {
       var src = "/api/audio?dir=" + encodeURIComponent(dirName) + "&file=" + encodeURIComponent(a.wavFile || a.file);
       h += '<div class="raud">' +
            '<span class="dim">♪ ' + esc(a.title || a.wavFile || a.file) + ' · ' +
-           (a.durationSec || 0) + 's</span>' +
+           (a.durationSec || 0) + 's' + (a.timbre ? ' · ' + esc(a.timbre) : '') + '</span>' +
            '<audio controls preload="none" src="' + esc(src) + '"></audio>' +
            '<a class="dim" download href="' + esc(src) + '">下载</a>' +
+           (a.midiFile ? '<a class="dim" download href="/api/audio?dir=' + encodeURIComponent(dirName) +
+             '&file=' + encodeURIComponent(a.midiFile) + '">MIDI</a>' : '') +
            '</div>';
     });
   }
@@ -2854,7 +3048,10 @@ function openTasks() {
   renderTasksPane();
   loadTasks();
   if (tasksTimer) clearInterval(tasksTimer);
-  tasksTimer = setInterval(loadTasks, 3000); // 打开期间 3s 自动刷新（含 schedules）
+  tasksTimer = setInterval(function () {
+    connTick++;
+    if (connGate(connTick)) loadTasks();
+  }, 3000); // 打开期间 3s 自动刷新（含 schedules；断连时降频）
 }
 
 function closeTasks() {
@@ -3276,6 +3473,134 @@ document.getElementById("searchBtn").onclick = function () {
   if ((document.getElementById("schQuery") || { value: "" }).value.trim()) runSearch();
 };
 document.getElementById("searchScrim").onclick = closeSearch;
+
+// ---- 音频工坊面板（v0.5.9：8 音色试听 × 7 进行 × 柱式/琶音） ----
+
+/** 音色元数据（与服务端 lib/audio.ts TIMBRES 同源镜像；图标 + 一句话特质 + 标签）。 */
+var TIMBRE_META = [
+  { id: "piano", icon: "🎹", label: "钢琴 Piano", desc: "谐波衰减 · 温暖木质", tags: ["衰减包络", "4 分音"] },
+  { id: "strings", icon: "🎻", label: "弦乐 Strings", desc: "弓弦持续 · 柔和揉弦颤音", tags: ["持续音", "颤音 5.5Hz"] },
+  { id: "flute", icon: "🪈", label: "长笛 Flute", desc: "气声正弦 · 奇次谐波", tags: ["慢起音", "清亮"] },
+  { id: "organ", icon: "🎼", label: "管风琴 Organ", desc: "泛音列 · 教堂式持续", tags: ["6 分音", "平坦"] },
+  { id: "harpsichord", icon: "🪕", label: "羽管键琴 Harpsichord", desc: "高次谐波 · 拨弦瞬态", tags: ["巴洛克", "快衰减"] },
+  { id: "music-box", icon: "🎁", label: "八音盒 Music Box", desc: "非整数泛音 · 金属质感", tags: ["3.98× 泛音", "梦幻"] },
+  { id: "guitar", icon: "🎸", label: "吉他 Guitar", desc: "拨弦 · 中速衰减", tags: ["民谣", "4 分音"] },
+  { id: "bell", icon: "🔔", label: "钟琴 Bell", desc: "钟声泛音 · 长衰减", tags: ["2.76× 泛音", "空灵"] },
+];
+
+var audAudioEl = null;   // 当前播放的 Audio（切卡片先停）
+var audPlayingId = "";
+
+function openTimbre() {
+  renderTimbreGrid();
+  document.getElementById("audioPane").classList.add("on");
+  document.getElementById("audioScrim").classList.add("on");
+}
+
+function closeTimbre() {
+  stopTimbreDemo();
+  document.getElementById("audioPane").classList.remove("on");
+  document.getElementById("audioScrim").classList.remove("on");
+}
+
+function stopTimbreDemo() {
+  if (audAudioEl) {
+    audAudioEl.pause();
+    audAudioEl.src = "";
+    audAudioEl = null;
+  }
+  audPlayingId = "";
+  var cur = document.querySelector(".audcard.playing");
+  if (cur) cur.classList.remove("playing");
+}
+
+function renderTimbreGrid() {
+  var grid = document.getElementById("audGrid");
+  grid.innerHTML = TIMBRE_META.map(function (t) {
+    return '<div class="audcard" data-timbre="' + t.id + '" role="button" tabindex="0" ' +
+      'title="试听 ' + t.label + '（卡农进行前两小节样本）">' +
+      '<div class="nm"><span class="ic">' + t.icon + "</span>" + t.label + "</div>" +
+      '<div class="ds">' + t.desc + "</div>" +
+      '<div class="tg">' + t.tags.map(function (x) { return "<span>" + x + "</span>"; }).join("") + "</div>" +
+      "</div>";
+  }).join("");
+  Array.prototype.forEach.call(grid.querySelectorAll(".audcard"), function (card) {
+    card.onclick = function () { playTimbreDemo(card.dataset.timbre, card); };
+    card.onkeydown = function (ev) {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); playTimbreDemo(card.dataset.timbre, card); }
+    };
+  });
+}
+
+function playTimbreDemo(timbre, card) {
+  var prog = (document.getElementById("audProg") || { value: "canon" }).value || "canon";
+  var arp = (document.getElementById("audStyle") || { classList: { contains: function () { return false; } } }).classList.contains("on");
+  if (audPlayingId === timbre && audAudioEl && !audAudioEl.paused) {
+    stopTimbreDemo(); // 再点同卡片 = 停止
+    return;
+  }
+  stopTimbreDemo();
+  card.classList.add("playing");
+  audPlayingId = timbre;
+  fetch("/api/audio-demo?timbre=" + encodeURIComponent(timbre) +
+    "&chords=" + encodeURIComponent(prog) + (arp ? "&style=arp" : ""))
+    .then(function (r) {
+      if (!r.ok) throw new Error("样本合成失败（" + r.status + "）");
+      return r.blob();
+    })
+    .then(function (blob) {
+      if (audPlayingId !== timbre) return; // 已切走：丢弃
+      var url = URL.createObjectURL(blob);
+      audAudioEl = new Audio(url);
+      audAudioEl.onended = function () { stopTimbreDemo(); URL.revokeObjectURL(url); };
+      audAudioEl.onerror = function () { stopTimbreDemo(); URL.revokeObjectURL(url); flashHint("样本播放失败"); };
+      audAudioEl.play().catch(function () { stopTimbreDemo(); flashHint("浏览器阻止了自动播放 —— 再点一次"); });
+    })
+    .catch(function (e) {
+      stopTimbreDemo();
+      flashHint("试听失败：" + e);
+    });
+}
+
+document.getElementById("timbreBtn").onclick = openTimbre;
+document.getElementById("audioScrim").onclick = closeTimbre;
+(function () {
+  var styleBtn = document.getElementById("audStyle");
+  if (!styleBtn) return;
+  styleBtn.onclick = function () {
+    styleBtn.classList.toggle("on");
+    styleBtn.textContent = styleBtn.classList.contains("on") ? "琶音 ✓" : "琶音";
+    stopTimbreDemo();
+  };
+  var progSel = document.getElementById("audProg");
+  if (progSel) progSel.onchange = function () { stopTimbreDemo(); };
+})();
+
+// ---- Esc 关闭当前面板（v0.5.9：所有 dialog/scrim 类面板统一口径） ----
+// 顺序：最后打开的先关（栈式）。输入框内 Esc 已有既有语义（停止运行）的
+// 不受影响 —— 这里只处理「有面板打开」的情形。
+document.addEventListener("keydown", function (ev) {
+  if (ev.key !== "Escape") return;
+  var panes = [
+    { pane: "searchPane", close: closeSearch },
+    { pane: "audioPane", close: closeTimbre },
+    { pane: "tasksPane", close: closeTasks },
+    { pane: "schedPane", close: closeSched },
+    { pane: "notifyPane", close: closeNotify },
+    { pane: "memoryPane", close: closeMemory },
+    { pane: "providersPane", close: closeProviders },
+    { pane: "approvalPane", close: closeApprovals },
+  ];
+  for (var i = 0; i < panes.length; i++) {
+    var el = document.getElementById(panes[i].pane);
+    if (el && el.classList.contains("on")) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      panes[i].close();
+      return;
+    }
+  }
+}, true); // 捕获阶段：先于输入框的 esc 停止语义（有面板时面板优先）
 (function () {
   var inp = document.getElementById("schQuery");
   if (!inp) return;
@@ -3300,7 +3625,10 @@ document.getElementById("schedScrim").onclick = closeSched;
 document.getElementById("notifyBtn").onclick = openNotify;
 document.getElementById("notifyScrim").onclick = closeNotify;
 notifyBadgeRefresh();
-setInterval(notifyBadgeRefresh, 5000); // 铃铛徽标 5s 轮询
+setInterval(function () {
+  connTick++;
+  if (connGate(connTick)) notifyBadgeRefresh();
+}, 5000); // 铃铛徽标 5s 轮询（断连时降频一半）
 
 // ---- 模型车道/服务商面板（v0.5.1：org providers / org config 的 GUI 面） ----
 
@@ -3534,6 +3862,8 @@ function decideApproval(id, allow, always) {
 function startApprovalPoll() {
   approvalChipRefresh();
   setInterval(function () {
+    connTick++;
+    if (!connGate(connTick)) return;
     approvalChipRefresh();
     if (document.getElementById("approvalPane").classList.contains("on")) renderApprovalPane();
   }, 4000);
@@ -4030,7 +4360,23 @@ function ask(text, isRetry) {
     }
   }
 
-  function finalize(outcome, errMsg, aborted, queuedCancel) {
+  /** v0.5.9：直连 t-bot 的音频产物卡（与团队运行卡 .raud 同款；dir 固定 out-ask）。 */
+function askAudioHtml(audio) {
+  var dirName = "out-ask";
+  return audio.map(function (a) {
+    var src = "/api/audio?dir=" + encodeURIComponent(dirName) + "&file=" + encodeURIComponent(a.wavFile || a.file);
+    return '<div class="raud">' +
+      '<span class="dim">♪ ' + esc(a.title || a.wavFile || a.file) + ' · ' +
+      (a.durationSec || 0) + 's' + (a.timbre ? ' · ' + esc(a.timbre) : '') + '</span>' +
+      '<audio controls preload="none" src="' + esc(src) + '"></audio>' +
+      '<a class="dim" download href="' + esc(src) + '">下载</a>' +
+      (a.midiFile ? '<a class="dim" download href="/api/audio?dir=' + encodeURIComponent(dirName) +
+        '&file=' + encodeURIComponent(a.midiFile) + '">MIDI</a>' : '') +
+      '</div>';
+  }).join("");
+}
+
+function finalize(outcome, errMsg, aborted, queuedCancel) {
     if (settled) return;
     settled = true;
     stopSpin();
@@ -4045,6 +4391,7 @@ function ask(text, isRetry) {
       chat.insertAdjacentHTML("beforeend",
         '<div class="t-bot"><div class="who">' + esc(meta) + '</div>' +
         '<div class="body md">' + renderMd(outcome.answer || "（无回答）") + '</div>' +
+        (outcome.audio && outcome.audio.length > 0 ? askAudioHtml(outcome.audio) : "") +
         '<div class="obs">' + meterHtml(outcome.ctxLine) +
         '<span>ledger 已落盘</span></div>' +
         mactsHtml(true) +
@@ -4386,10 +4733,12 @@ api("/api/status").then(function (r) {
   }
 });
 setInterval(function () {
+  connTick++;
+  if (!connGate(connTick)) return;
   api("/api/status").then(function (r) {
     state.usages = r.usages || [];
     renderTop();
-  });
+  }).catch(function () { /* 断连：状态条已由 api() 层呈现 */ });
 }, 15000);
 </script>
 </body>

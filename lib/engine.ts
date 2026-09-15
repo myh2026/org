@@ -72,7 +72,7 @@ export interface RunResult {
   metrics: RunMetrics | null;
   directTurns?: DirectTurn[];
   /** v0.5.6 音频产物：本 run 渲染出的 .wav（开袋即食交付物）。 */
-  audioRendered?: Array<{ wavFile: string; bytes: number; durationSec: number; notes: number; title: string }>;
+  audioRendered?: Array<{ wavFile: string; midiFile?: string; timbre?: string; bytes: number; durationSec: number; notes: number; title: string }>;
   /** 音频渲染失败项（观察面：不影响 run 语义）。 */
   audioFailures?: Array<{ file: string; error: string }>;
 }
@@ -1188,7 +1188,7 @@ export function startRun(opts: RunOptions): RunHandle {
     // v0.5.6 音频产物通道：扫描产物目录的 *.notes.json → 同名 .wav
     // （「产物开袋即食」—— 古典音乐的交付物是可播放音频，不是乐谱）。
     // 渲染失败不改变 run 结果（观测面记录 failure），绝不炸穿收尾。
-    let audioRendered: Array<{ wavFile: string; bytes: number; durationSec: number; notes: number; title: string }> = [];
+    let audioRendered: Array<{ wavFile: string; midiFile?: string; timbre?: string; bytes: number; durationSec: number; notes: number; title: string }> = [];
     let audioFailures: Array<{ file: string; error: string }> = [];
     try {
       // 两处扫描：run 产物目录（静态/工具环车道）+ work-out（磁盘专家车道）
@@ -1197,7 +1197,10 @@ export function startRun(opts: RunOptions): RunHandle {
       audio.rendered.push(...workOut.rendered);
       audio.failures.push(...workOut.failures);
       audioRendered = audio.rendered.map((a) => ({
-        wavFile: a.wavFile, bytes: a.bytes, durationSec: a.durationSec, notes: a.notes, title: a.title,
+        wavFile: a.wavFile,
+        ...(a.midiFile ? { midiFile: a.midiFile } : {}), // v0.5.9：MIDI 同行交付
+        ...(a.timbre ? { timbre: a.timbre } : {}),     // v0.5.9：音色徽标
+        bytes: a.bytes, durationSec: a.durationSec, notes: a.notes, title: a.title,
       }));
       audioFailures = audio.failures;
       if (audioRendered.length > 0) {

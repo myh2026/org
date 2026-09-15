@@ -1,5 +1,65 @@
 # CHANGELOG
 
+## v0.5.9（2026-09-16）—— 音频工坊（音色库 × 和弦库 × MIDI 导出）
+
+「古典音乐 = 音频」的乐器面与交换格式一次补齐：**8 种乐器音色**
+（谐波表 + 包络特征 + 颤音 FM 合成）、**7 套和弦进行预设**（卡农/流行/
+史诗/五度圈/爵士/布鲁斯/浪漫，柱式与琶音双风格）、**MIDI 导出**
+（SMF 格式 0，可导入 DAW/打谱软件）—— 产物从「单一正弦 WAV」升级为
+「多乐器 WAV + MIDI 双格式」。Web GUI 同步交付**音频工坊面板**
+（🎵 音色试听）与断连优雅降级。469/469 机制级测试全绿（26 文件 ·
+2042 expect，+22 例）。
+
+### 音色库（lib/audio.ts · TIMBRES）
+
+- 8 种乐器：`piano / strings / flute / organ / harpsichord / music-box /
+  guitar / bell` —— 每种 = 谐波表（非整数 ratio 造金属/钟质感）+ 包络
+  特征（起音/衰减渐近 sustain/释放）+ 颤音（相位积分 FM，5.5Hz 揉弦）；
+- 协议：notes.json 顶层 `timbre` 字段（音符级 wave 仍可覆盖）；未注册
+  名降级到基础波形不炸曲；notes.json 顶层 `export_midi: true` 同写
+  `.mid`（opt-in；audio_compose 显式调用缺省开）。
+
+### 和弦库（CHORD_QUALITIES × PROGRESSIONS）
+
+- 11 种和弦质量（maj/min/dim/aug/sus4/sus2/7/maj7/m7/m7b5/6）×
+  7 套进行预设（级数半音 + 自然音级自动配质：I maj / V 7 / ii vi m7）；
+- `progressionToNotes(root, prog, {style: block|arp, beatsPerChord,
+  gain, octave})`：音名/MIDI/频率三向转换（C4=60 · A4=440Hz），
+  柱式（同拍起拍留缝 0.95）与琶音（滚动起拍尾音交叠 1.4× 连奏感）；
+- 参数宽容：坏根音降级 C4、未注册进行降级 canon —— degraded 标注可观测。
+
+### MIDI 导出（SMF 格式 0）
+
+- `renderNotesToMidi`：MThd + MTrk · 480 PPQ · tempo meta · note_on/off；
+  频率 → 最近半音（±50 音分内人耳无感，和弦/旋律语义保真）；
+- 同音重叠区间合并（note_off 不提前掐断前音）；导出失败不影响 WAV
+  主产物（降级不报错）；
+- 三入口同钩子：cli runHsl / lib/engine / **web 直连车道（B-18 补齐）**
+  —— `scanAndRenderArtifacts` 幂等（wav+mid 双新跳过）。
+
+### 工具环与专家（audio_compose · composer.hsl）
+
+- `audio_compose` 新参数：`timbre`（音色透传）+ `chords`（和弦进行车道，
+  可代 notes：宽容形态 `"canon"` / `"D3:canon:arp"` / `{root,name,style,
+  beats_per_chord}`，ABI 内同构实现与 lib 对拍）+ `export_midi` 缺省 true；
+- composer 专家提示词升级（音色/和声语义）；降级内置曲改弦乐音色；
+  STOCK 剧本新增 `direct:composer` 轨道（GUI 开箱可演示）。
+
+### Web GUI
+
+- **🎵 音频工坊面板**：8 音色卡片（图标+特质+标签）网格 · 7 进行下拉 +
+  柱式/琶音切换 · 点击试听（`/api/audio-demo` 服务端合成 2 和弦样本，
+  内存缓存 64 条）· 再点同卡停止；
+- **直连 t-bot 音频卡**（B-18）：直连回答内联 .raud 播放器 + 下载 +
+  MIDI 链接 —— 与团队运行卡同款交互；
+- **断连优雅降级**：api() 连续失败 ≥3 → 顶部琥珀状态条（脉动点 +
+  立即重试）+ 轮询降频一半；恢复自动消失。此前是控制台 Failed to
+  fetch 刷屏（跨轮会话累积噪音）；
+- **Esc 关闭全部面板**（search/audio/tasks/sched/notify/memory/
+  providers/approval 统一口径）+ 面板 ✕ 关闭钮；
+- `--host` / `ORG_WEB_HOST` 参数（缺省仍只听 127.0.0.1；容器/远程/
+  云端浏览器场景 opt-in 绑 0.0.0.0）。
+
 ## v0.5.8（2026-09-16）—— 语义检索 / RAG 注入（capabilities #19/#22 双 ⬜→✅）
 
 「语义代码搜索 + RAG 向量检索」两 ⬜ 一次落地：工作区语料的 **BM25 词频

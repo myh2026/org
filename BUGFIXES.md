@@ -383,3 +383,23 @@
 - **教训**：QA 要用真实入口（浏览器驱动 GUI）打全链路——本 bug 的三层链
   （后台组件副作用 → 初始化短路 → 硬失败传播）任何单层单测都发现不了；
   降级设计要覆盖「铸出来的专家自己跑挂」这最后一公里，不能只给铸造失败降级。
+
+## B-18（ORG 修复，v0.5.9）Web 直连车道绕过音频收尾钩子：GUI 直连作曲只出 notes.json 不出 WAV/MIDI
+
+- **现象**：GUI 直连 composer 作曲（ORG_TOOLS=write），t-bot 正常回复
+  「music.wav 已交付」，但 out-ask 产物目录只有 music.notes.json ——
+  没有 WAV、没有 MIDI、没有 audio_rendered 事件。同一任务 CLI
+  `org ask` 正常渲染（music.wav + music.mid 双产物）。
+- **根因**：音频收尾钩子有两份（cli/org.ts runHsl 与 lib/engine.ts
+  finish），但 Web 的 `askStreamOnce` **直接 spawn dhv 解释器**（不走
+  CLI 也不走 engine）—— 三个直连入口中唯独 Web 缺第三份钩子。
+  工具环 audio_compose 写的 notes.json 工件落在 out-ask 后无人扫描。
+- **修复**（web/entry.ts `withAskAudio`）：直连 done 前调
+  `scanAndRenderArtifacts(out-ask)`（lib/audio.ts 幂等实现，mtime 判定
+  wav+mid 双新跳过）—— 渲染结果并入 AskOutcome.audio，t-bot 内联
+  .raud 播放器 + 下载 + MIDI 链接（与团队运行卡同款交互）。
+- **测试**：web.test.ts v0.5.9 组（端点 + GUI 要素）；GUI 实测直连
+  composer → 音频卡 + WAV 播放器 + MIDI 下载全链通过。
+- **教训**：「三入口同钩子」的完整性要按入口逐一核对——入口分叉时，
+  收尾增强（产物渲染/事件落盘）最容易在某个分叉被绕过；本次用
+  「同一任务 CLI 与 GUI 产物对拍」暴露差异。

@@ -2023,8 +2023,9 @@ export async function orgMain(): Promise<number> {
       dhv check 全部 HSL 源码（hsl/ 源码 + dist/ 产物中的铸出专家）
   org tui [--workspace DIR] [":demo"|":replay out-…"]
       组织驾驶舱（OpenCode 级终端前端）：三区布局 · 事件卡片流 · 四态裁决徽标
-  org web [--port N] [--workspace DIR]
-      Web GUI 原型（Bun.serve 零依赖，默认 4600）：专家卡 + 会话侧栏 + 对话
+  org web [--port N] [--host H] [--workspace DIR]
+      Web GUI 原型（Bun.serve 零依赖，默认 4600，--host/ORG_WEB_HOST 默认只听
+      127.0.0.1，容器/远程场景可 0.0.0.0）：专家卡 + 会话侧栏 + 对话
       视图（观测元数据 tokens/耗时/ctx 窗口计量；scripted 占位剧本秒回）
   org config [list|get|set|unset|preset|presets|lane/use/keys/auto|path|test]
       用户模型/API 配置（~/.org/config.json，跨版本持久）：20 家服务商
