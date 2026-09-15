@@ -5,7 +5,7 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.5.9_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Status](https://img.shields.io/badge/status-v0.5.10_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
 [![Tests](https://img.shields.io/badge/tests-431%2F431_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.66-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
@@ -19,7 +19,9 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **v0.5.9 当前状态**：可运行实现，**469/469 机制级测试全绿**（26 文件 · 2042 expect）。本版落地**音频工坊**：8 种乐器音色（谐波表+包络+颤音 FM）× 7 套和弦进行（柱式/琶音）× **MIDI 导出**（SMF 0 可入 DAW）—— 产物从单一正弦 WAV 升级为多乐器 WAV+MIDI 双格式；Web GUI 新增 🎵 音色试听面板（/api/audio-demo 服务端合成+缓存）、直连 t-bot 音频卡（B-18 补齐第三入口收尾钩子）、断连优雅降级（状态条+轮询降频）、Esc 统一关面板。
+> **v0.5.10 当前状态**：可运行实现，**484/484 机制级测试全绿**（27 文件 · 2096 expect）。本版落地**scripted 车道域外任务语义地板 + 跨车道救援**（B-19）：团队模式发域外任务（如「请创作一首古典风格的卡农」）不再套用公告流水线答非所问 —— 注册表专家命中即**跨车道转直连**（⇄ 卡片可观测，audio_compose 开箱即用，同一 run 交付 WAV+MIDI）；无命中则**零消耗诚实降级**（不跑流水线，标准产物 + 建议出口）。GUI 直连默认开工具环（v0.5.9 演示缺口补齐）。
+
+> **v0.5.9 历史状态**：可运行实现，**469/469 机制级测试全绿**（26 文件 · 2042 expect）。本版落地**音频工坊**：8 种乐器音色（谐波表+包络+颤音 FM）× 7 套和弦进行（柱式/琶音）× **MIDI 导出**（SMF 0 可入 DAW）—— 产物从单一正弦 WAV 升级为多乐器 WAV+MIDI 双格式；Web GUI 新增 🎵 音色试听面板（/api/audio-demo 服务端合成+缓存）、直连 t-bot 音频卡（B-18 补齐第三入口收尾钩子）、断连优雅降级（状态条+轮询降频）、Esc 统一关面板。
 
 > **v0.5.8 历史状态**：可运行实现，447/447 机制级测试全绿（26 文件 · 1849 expect）。语义检索/RAG 四入口（BM25+短语加成+中英混合分词）：CLI `org search` · Web 🔍 面板（检索→引用闭环）· `@?查询词` RAG 注入 · 工具环 `semantic_search`（ABI 同构对拍）。
 >

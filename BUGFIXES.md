@@ -403,3 +403,31 @@
 - **教训**：「三入口同钩子」的完整性要按入口逐一核对——入口分叉时，
   收尾增强（产物渲染/事件落盘）最容易在某个分叉被绕过；本次用
   「同一任务 CLI 与 GUI 产物对拍」暴露差异。
+
+## B-19（ORG 修复，v0.5.10）scripted 团队车道域外任务答非所问：语义地板 + 跨车道救援
+
+- **现象**（agent-browser 驱动 Web GUI 团队模式 QA 实测）：发「请创作一首
+  古典风格的卡农」，run ok=true 但交付的是**公告解析表格** —— STOCK 剧本
+  的 fetch+parse+validate 流水线无条件跑完交差。用户拿到驴唇不对马嘴的
+  结果还以为成功了；v0.5.7 修复的「空壳工作区不炸」掩盖了这层语义错配。
+- **根因**：scripted 车道的 decompose 消费静态剧本，对任务域零感知 ——
+  任何任务都套用 STOCK 公告流水线；v0.5.9 加的 direct:composer 轨道只有
+  直连车道能消费，团队车道根本路由不到。
+- **修复**（预检三段式，CLI cmdRun / engine startRun 双入口同构）：
+  1. `stockAffinityOf` 语义地板（0.15 + 命中数护持 ≥2 放行）：域内任务
+     行为零变化；
+  2. 域外 → `rescueExpertOf` 注册表专家评分（manifest + direct: 轨道语料
+     取 max，前置校验 direct: 轨道存在）：命中 → **同一 run 跨车道转直连**
+     （lane_rescue 事件可观测 + ORG_TOOLS 默认 write + 会话账本落盘）；
+  3. 无命中 → **零消耗诚实降级**：不跑流水线，直写标准产物 + 建议出口。
+- **伴生修复**：GUI 直连（askOnce/askStreamOnce）从未注入 ORG_TOOLS ——
+  v0.5.9 的「GUI 开箱演示」实际只有纯文本（`<tool>` 标记原样输出、无 WAV）。
+  现默认 `ORG_TOOLS=write`（用户显式设置优先；audio_compose 是 Full 即门
+  类开箱即用，fs_write 仍审批在环）。
+- **实现踩坑两枚（测试锚定）**：① `[...arr.join(" ")]` 字符串展开把 CJK
+  连续段拆成单字（bigram 全灭，域内任务实测只剩尾字「格」命中 0.08）→
+  数组展开；② 超短护栏阈值 <4 会误放 3-token 西文任务（quantum braiding
+  simulation 直接跑流水线）→ 收紧到 <2。两者均有回归测试锚。
+- **测试**：tests/rescue.test.ts 15 例（R1-R7：定标/评分/双入口 e2e/域内
+  与显式 fixture 零影响）；degrade T2 适配（卡农任务移交 rescue 领地，
+  原意图用域内任务保持）。全量 484/484。

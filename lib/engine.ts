@@ -28,6 +28,7 @@ import { ROOT } from "./root.ts";
 import { readSession as libReadSession } from "./sessions.ts";
 import { prepareLlmEnv } from "./router.ts";
 import { scanAndRenderArtifacts } from "./audio.ts";
+import { tokenize } from "./search.ts"; // v0.5.10：语义地板分词（中英混合 bigram）
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const STOCK_FIXTURE = path.join(ROOT, "fixtures/run-notices.json");
@@ -1164,6 +1165,185 @@ async function runInproc(
   return code;
 }
 
+// ---------- v0.5.10：scripted 车道域外任务语义地板 + 跨车道救援 ----------
+// QA 实测（BUGFIXES B-19，agent-browser 驱动 Web GUI）：scripted 团队车道对
+// 域外任务（「请创作一首古典风格的卡农」）零语义重合时，decompose 仍套用
+// STOCK 公告流水线跑完交差 —— run ok=true、交付公告表格，答非所问比诚实
+// 降级更糟（用户以为成功了）。v0.5.7 修的是「空壳工作区不炸」，本层修的是
+// 「有模板但任务域外」的语义错配。预检三段式（仅 scripted + 团队 entry +
+// 未显式指定 fixture 时介入；真实 LLM 车道动态分解天然域感知，不经过这里）：
+//   ① 任务与 STOCK 剧本域内文本（decompose 目标 + clarify）词面重合 ≥ 地板
+//      → 原行为（零影响）；
+//   ② 域外 → 注册表专家救援评分（manifest + direct: 轨道语料）：命中 →
+//      跨车道转直连（同一 run / 同一 outDir / direct 会话账本照常落盘 ——
+//      「调度权可绕，知情权与记账权不可绕」）；
+//   ③ 无命中 → 零消耗诚实降级：不跑流水线，直写标准产物（journal/events/
+//      report/run.json，Web 回放与 org score 无缝消费）+ 建议出口。
+
+/** 语义地板：任务词覆盖率（或 ≥2 个实义命中）视为域内。
+ *  实测定标（中英混合 bigram 分词）：
+ *  「请创作一首古典风格的卡农」0.00 ｜「写一首关于秋天的现代诗」0.00 ｜
+ *  「抓取近一周公告并输出表格」0.08（命中「一周/公告」2 实义词）｜
+ *  「解析公告文件为结构化记录」0.08（多命中）→ 地板 0.15 + 命中数护持。 */
+export const SEMANTIC_FLOOR = 0.15;
+
+/** 任务 token 对语料的词覆盖率（0-1；空任务返回 1 = 信息不足不拦）。 */
+export function tokenOverlap(task: string, corpus: string): number {
+  const tt = [...new Set(tokenize(task))];
+  if (tt.length === 0) return 1;
+  const ct = new Set(tokenize(corpus));
+  let hit = 0;
+  for (const t of tt) if (ct.has(t)) hit++;
+  return hit / tt.length;
+}
+
+/** STOCK 剧本域内亲和度：词覆盖率 + 命中数护持。bigram 碎片化会把明确的
+ *  域内任务（「抓取近一周公告并输出表格」）稀释到 0.08，但它命中了
+ *  「一周/公告」两个实义 token —— ≥2 命中即按地板放行（域内）。
+ *  剧本不可读 / 超短任务（<4 token）→ 1（信息不足，保守放行原行为）。 */
+export function stockAffinityOf(task: string, fixturePath: string): number {
+  try {
+    const obj = JSON.parse(fs.readFileSync(fixturePath, "utf-8")) as { tracks?: Record<string, string[]> };
+    const tr = obj.tracks ?? {};
+    // 注意：数组展开（非字符串展开 —— [...str.join(" ")] 会把字符串拆成
+    // 单字符数组，CJK 连续段被空格打散成单字，bigram 全灭，实测仅剩尾字命中）
+    const inDomain = [
+      ...(tr["decompose"] ?? []),
+      ...(tr["clarify"] ?? []),
+    ].join(" ");
+    const tt = [...new Set(tokenize(task))];
+    // 超短任务（<2 token，如「公告」「hi」）信息不足 → 保守放行（原行为）。
+    // 阈值不能高：西文任务 token 天然少（「quantum braiding simulation」
+    // 仅 3 token，4 的阈值会把它误放行回 STOCK 流水线 —— 实测踩过）。
+    if (tt.length < 2) return 1;
+    const ct = new Set(tokenize(inDomain));
+    let hit = 0;
+    for (const t of tt) if (ct.has(t)) hit++;
+    if (hit >= 2) return Math.max(hit / tt.length, SEMANTIC_FLOOR);
+    return hit / tt.length;
+  } catch {
+    return 1;
+  }
+}
+
+export interface RescuePick {
+  expert: string;
+  score: number;         // 综合分（manifest 与 direct: 轨道取 max）
+  manifestScore: number; // manifest 词面分（诊断观测）
+  fixture: string;       // direct: 轨道所在剧本（含 direct:<name> 键）
+}
+
+/** 域外救援专家评分：manifest（name+description+capabilities）+ direct: 轨道
+ *  语料（预录回复往往复述任务域词汇，是最强领域信号）。前置条件：fixture
+ *  含 direct:<name> 轨道 —— 否则直连车道消费不到轨道（FIXTURE_EXHAUSTED），
+ *  该专家不可救援。 */
+export function rescueExpertOf(task: string, ws: string): RescuePick | null {
+  let best: RescuePick | null = null;
+  for (const m of loadRegistryIndex(ws)) {
+    const rec = m as Record<string, unknown>;
+    const name = String(rec["name"] ?? "");
+    if (!name) continue;
+    const manifestCorpus = [
+      name,
+      String(rec["description"] ?? ""),
+      ...(Array.isArray(rec["capabilities"]) ? rec["capabilities"].map(String) : []),
+    ].join(" ");
+    let score = tokenOverlap(task, manifestCorpus);
+    const manifestScore = score;
+    const fixture = expertFixtureOf(ws, name) ?? STOCK_FIXTURE;
+    try {
+      const obj = JSON.parse(fs.readFileSync(fixture, "utf-8")) as { tracks?: Record<string, string[]> };
+      const dirTrack = obj.tracks?.[`direct:${name}`];
+      if (!Array.isArray(dirTrack) || dirTrack.length === 0) continue; // 无直连轨道 → 不可救援
+      score = Math.max(score, tokenOverlap(task, dirTrack.join(" ")));
+    } catch {
+      continue; // 剧本不可读 → 不可救援
+    }
+    if (score >= SEMANTIC_FLOOR && (!best || score > best.score)) {
+      best = { expert: name, score, manifestScore, fixture };
+    }
+  }
+  return best;
+}
+
+/** lane_rescue 引擎事件（桥层注入，非解释器事件 —— 与 audio_rendered 同模式；
+ *  seq=0 先于解释器事件，卡片叙事里救援判定先于任务树出现）。 */
+function laneRescueEvent(d: {
+  mode: "reroute" | "degrade";
+  expert?: string;
+  score?: number;
+  stockScore: number;
+}): EngineEvent {
+  const r2 = (x: number): number => Math.round(x * 100) / 100;
+  return {
+    kind: "unknown", seq: 0, ts: new Date().toISOString(), name: "lane_rescue",
+    data: {
+      mode: d.mode,
+      ...(d.expert ? { expert: d.expert } : {}),
+      ...(d.score !== undefined ? { score: r2(d.score) } : {}),
+      stockScore: r2(d.stockScore),
+      floor: SEMANTIC_FLOOR,
+    },
+  };
+}
+
+/** 域外任务零消耗降级的产物直写（标准格式：journal.jsonl（管道分隔）/
+ *  events.jsonl（归一化事件）/ report.md / run.json —— 回放面板与评分卡
+ *  零适配消费）。语义：run ok=true（这不是失败，是诚实的「车道不服务」）。 */
+export function writeOutOfDomainRun(outDir: string, task: string, stockScore: number): void {
+  fs.mkdirSync(outDir, { recursive: true });
+  const ts = new Date().toISOString();
+  const pct = (x: number): string => (Math.round(x * 100) / 100).toFixed(2);
+  const reason =
+    `任务与团队剧本域内文本词面重合 ${pct(stockScore)} < 地板 ${SEMANTIC_FLOOR}` +
+    `（scripted 车道是静态剧本，无法服务该任务域 —— 保持零消耗，未跑流水线）`;
+  const remedies = [
+    "切换直连车道指定专家（GUI 派单模式切「直连」/ CLI org ask <专家> \"问题\"）",
+    "org run --model <车道> 配置真实模型（动态分解，域感知；org config 可设默认车道）",
+    "org search \"关键词\" 语义检索工作区，确认在岗专家与语料",
+  ];
+  const rows: Array<[number, string, string, string, string, string]> = [
+    [1, ts, "0:gate", "kernel", "open", task],
+    [2, ts, "0:gate", "kernel", "lane-rescue", `域外判定：${reason}`],
+    [3, ts, "0:gate", "kernel", "degrade", `remedy: ${remedies.join("；")}`],
+  ];
+  fs.writeFileSync(path.join(outDir, "journal.jsonl"), rows.map((r) => r.join("|")).join("\n") + "\n");
+  const events = [
+    { seq: 1, ts, name: "journal", data: { name: "open", detail: task } },
+    { seq: 2, ts, name: "journal", data: { name: "lane-rescue", detail: `域外判定：${reason}` } },
+    { seq: 3, ts, name: "journal", data: { name: "degrade", detail: `remedy: ${remedies.join("；")}` } },
+    {
+      seq: 4, ts, name: "lane_rescue",
+      data: { mode: "degrade", stockScore: Math.round(stockScore * 100) / 100, floor: SEMANTIC_FLOOR },
+    },
+    { seq: 5, ts, name: "run_end", data: { ok: true, elapsed_ms: 0 } },
+  ];
+  fs.writeFileSync(path.join(outDir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+  fs.writeFileSync(path.join(outDir, "report.md"), [
+    "# ORG Run Report",
+    "",
+    "## 车道判定（v0.5.10 语义地板）",
+    "",
+    `- 任务：${task}`,
+    `- 判定：${reason}`,
+    "- 处置：零消耗降级（流水线未启动 —— 与其套用域外剧本答非所问，不如诚实报告）",
+    "",
+    "## 建议出口",
+    "",
+    ...remedies.map((r) => `- ${r}`),
+    "",
+    "---",
+    "",
+    `mission: ${task}`,
+    `lane: degraded-out-of-domain`,
+    `accepted 0 / 0 subtasks（零消耗）`,
+  ].join("\n") + "\n");
+  fs.writeFileSync(path.join(outDir, "run.json"), JSON.stringify({
+    ts, ok: true, elapsed_ms: 0, model: "scripted", task, events: events.length,
+    lane: "degraded-out-of-domain", reason, remedies,
+  }, null, 2) + "\n");
+}
+
 // ---------- startRun ----------
 
 function makeOutDir(workspace: string, explicit?: string): string {
@@ -1238,6 +1418,34 @@ export function startRun(opts: RunOptions): RunHandle {
       // scripted 与未知名零影响（幂等，测试环境零外联不变）。
       await prepareLlmEnv(opts.model, opts.workspace);
       fs.mkdirSync(outDir, { recursive: true });
+      // v0.5.10：scripted 团队车道域外任务语义地板（B-19）。仅 scripted +
+      // 团队 entry + 未显式指定 fixture 时介入；真实 LLM 车道动态分解天然
+      // 域感知。预检通过改写 opts（entry/expert/fixture）实现跨车道救援 ——
+      // 下游（args 组装 / env / finish 的 readDirectTurns）全部自动正确。
+      let rescued = false;
+      if (opts.entry === "org" && opts.model === "scripted" && !opts.fixture) {
+        const stockScore = stockAffinityOf(opts.task, STOCK_FIXTURE);
+        if (stockScore < SEMANTIC_FLOOR) {
+          const pick = rescueExpertOf(opts.task, opts.workspace);
+          if (pick) {
+            opts.entry = "direct";
+            opts.expert = pick.expert;
+            opts.session = opts.session ?? "default";
+            rescued = true;
+            q.push(laneRescueEvent({
+              mode: "reroute", expert: pick.expert, score: pick.score, stockScore,
+            }));
+          } else {
+            writeOutOfDomainRun(outDir, opts.task, stockScore);
+            q.push({ kind: "journal", seq: 1, ts: new Date().toISOString(),
+              phase: "0:gate", actor: "kernel", action: "open", detail: opts.task });
+            q.push(laneRescueEvent({ mode: "degrade", stockScore }));
+            q.push({ kind: "run_end", seq: 3, ts: new Date().toISOString(), ok: true, elapsed_ms: 0 });
+            finish(true);
+            return;
+          }
+        }
+      }
       const entryFile = opts.entry === "direct" ? DIRECT_ENTRY : HSL_ENTRY;
       // 直连剧本自动发现：导入 harness 自带占位剧本（manifest.fixture）——
       // TUI ?专家 不传 fixture 也能立即 scripted 问答（零摩擦消费链）
@@ -1271,6 +1479,11 @@ export function startRun(opts: RunOptions): RunHandle {
         envExtra.ORG_ASK_SESSION = opts.session ?? "default";
         envExtra.ORG_ASK_QUESTION = opts.task;
       }
+      // v0.5.10：跨车道救援默认开启工具环（audio_compose 作曲 / fs_write
+      // 工件交付需要；Full 模式即门类工具开箱即用，写类仍走审批在环 ——
+      // Web/TUI 团队车道本就 approval:true，GUI 审批卡承接）。用户显式
+      // 设置的 ORG_TOOLS 优先（不覆盖用户意图）。
+      if (rescued) envExtra.ORG_TOOLS = process.env.ORG_TOOLS || "write";
       // 直连环境变量必须同时进入两条车道：bun 子进程车道（B.spawn env）与
       // 进程内车道（runInproc envExtra）。历史 bug：子进程车道漏合并 envExtra
       // → TUI `?专家 问题?` 在有 bun 的机器上以 usage 错误失败（进程内车道

@@ -267,6 +267,11 @@ async function askOnce(
     ORG_ASK_EXPERT: req.expert,
     ORG_ASK_SESSION: req.session,
     ORG_ASK_QUESTION: question,
+    // v0.5.10：GUI 直连默认开工具环（B-19 伴生：直连 t-bot 的
+    // audio_compose/fs_write 此前因 ORG_TOOLS 缺省 Off 而不执行 ——
+    // v0.5.9 的 GUI 开箱演示实际只有纯文本；Full 即门类即用，写类
+    // 仍审批在环；用户显式设置优先）
+    ORG_TOOLS: process.env.ORG_TOOLS || "write",
   };
   // 剧本自动发现（与 cmdAsk 同规则）：导入 harness 自带占位剧本
   // （manifest.fixture）——不传 fixture 也能立即 scripted 问答
@@ -338,6 +343,8 @@ async function askStreamOnce(
     ORG_ASK_EXPERT: req.expert,
     ORG_ASK_SESSION: req.session,
     ORG_ASK_QUESTION: question,
+    // v0.5.10：GUI 直连默认开工具环（与 askOnce 同规则，B-19 伴生）
+    ORG_TOOLS: process.env.ORG_TOOLS || "write",
   };
   let fixture = STOCK_FIXTURE;
   const found = expertFixtureOf(ws, req.expert);
@@ -532,6 +539,7 @@ function sseRun(ws: string, req: { task: string; model: string }): Response {
                 elapsed_ms: res.elapsed_ms, error: res.error ?? null,
                 metrics: res.metrics ?? null,
                 runJson: res.runJson ?? null,
+                directTurns: res.directTurns ?? null,
                 audioRendered: res.audioRendered ?? [],
                 audioFailures: res.audioFailures ?? [],
               });
@@ -2610,6 +2618,7 @@ function newRunModel(task, model) {
     crystals: [], scores: [], caps: [], others: [], shadows: [], notices: [],
     approvals: [], noise: 0,
     drift: 0, mined: 0, ctx: null, factoryNodes: [],
+    rescues: [],
     audio: [], audioFailures: [],
     runOk: null, elapsed: 0
   };
@@ -2636,6 +2645,7 @@ function applyFact(m, fact) {
         if (m.qa[i].a === undefined) { m.qa[i].a = fact.a; break; }
       }
       break;
+    case "rescue": m.rescues.push(fact); break;
     case "route": {
       var s1 = subOf(m, fact.id);
       s1.role = fact.role; s1.route = fact.route; s1.channel = fact.channel;
@@ -2724,6 +2734,18 @@ function renderRun(m) {
        '</span><span style="margin-left:auto" id="runStatus' + m.id + '">运行中…</span></div>';
   h += '<div class="rcbody">';
   if (m.mission) h += '<div class="rc-mission">' + esc(m.mission) + '</div>';
+  // v0.5.10：车道救援判定行（语义地板 —— 先于任务树，用户第一眼看到车道决策）
+  m.rescues.forEach(function (r) {
+    if (r.mode === "reroute") {
+      h += '<div class="revt nv-ok">⇄ 跨车道救援 → <b>' + esc(r.expert || "?") + '</b>' +
+           '<span class="dim">（任务域外：与团队剧本重合 ' + r.stockScore + ' &lt; ' + r.floor +
+           ' 地板 · 直连车道接管 · 专家评分 ' + r.score + '）</span></div>';
+    } else {
+      h += '<div class="revt nv-warn">◌ 域外任务 · 零消耗降级' +
+           '<span class="dim">（与团队剧本重合 ' + r.stockScore + ' &lt; ' + r.floor +
+           ' 地板，流水线未启动 —— 不套用域外剧本答非所问）建议：切「直连」模式选专家，或配置真实模型车道获得动态分解</span></div>';
+    }
+  });
   m.qa.forEach(function (p) {
     h += '<div class="revt"><span class="dim">澄清 </span>' + esc(p.q) + '</div>';
     if (p.a !== undefined) h += '<div class="revt"><span class="dim">答复 </span>' + esc(p.a) + '</div>';
@@ -2897,6 +2919,18 @@ function runTeam(task) {
         outDir: lastRunDone.outDir, outDirName: lastRunDone.outDirName,
         audio: lastRunDone.audioRendered,
       });
+      // v0.5.10：跨车道救援（reroute）后 direct 轮次的回答以对话气泡呈现 ——
+      // 团队派单卡讲「为什么换了车道」，气泡讲「专家答了什么」
+      if (lastRunDone && lastRunDone.directTurns && lastRunDone.directTurns.length > 0) {
+        var lastTurn = lastRunDone.directTurns[lastRunDone.directTurns.length - 1];
+        var rescuedBy = (m.rescues && m.rescues[0] && m.rescues[0].expert) || "?";
+        var tHtml = '<div class="t-bot"><div class="who">org · ' + esc(rescuedBy) +
+          ' · turn ' + (lastTurn.turn || 1) + ' · ' + (lastTurn.tokens || 0) +
+          ' tok <span style="opacity:.6">（跨车道救援直连）</span></div>' +
+          '<div class="body md">' + renderMd(lastTurn.answer || "（空回答）") + '</div></div>';
+        document.getElementById("chat").insertAdjacentHTML("beforeend", tHtml);
+        scrollDown(false);
+      }
     }
     loadRuns();
     refreshReviewChip();

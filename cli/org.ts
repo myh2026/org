@@ -34,6 +34,7 @@ import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          latestHarnessRunDir, reviewCandidates, applyReview,
          forkSession, revertExpert, archivedVersions, renameSession, deleteSession } from "../lib/engine.ts";
 import { readCostTimeline, renderCostTimeline, latestScorecardDir } from "../lib/engine.ts";
+import { stockAffinityOf, rescueExpertOf, writeOutOfDomainRun, SEMANTIC_FLOOR } from "../lib/engine.ts"; // v0.5.10 语义地板（B-19）
 import { scanAndRenderArtifacts } from "../lib/audio.ts"; // v0.5.6 音频产物通道（CLI 车道）
 import { semanticSearch } from "../lib/search.ts"; // v0.5.8 语义检索（capabilities #19/#22）
 import { listApprovals, decideApproval, clearGranted } from "../lib/approvals.ts";
@@ -258,9 +259,40 @@ async function cmdRun(a: Args): Promise<number> {
   if (a.approval) env.ORG_APPROVAL = "1";
   // v0.5.6：递归派生深度透传（agent_spawn 工具链：子组织的工具环须知道自己在第几层）
   if (a.spawnDepth > 0) env.ORG_SPAWN_DEPTH = String(a.spawnDepth);
-  const r = await runHsl(HSL_ENTRY, {
-    workspace: a.workspace, task: a.task, model: a.model,
-    fixture: a.fixture, out, env,
+  // v0.5.10：scripted 团队车道域外任务语义地板（B-19，与 lib/engine.ts
+  // startRun 预检同构 —— Web/TUI 走 startRun，CLI run 在此）。仅 scripted +
+  // 未显式指定 fixture 时介入：域内放行 / 注册表专家跨车道救援转直连 /
+  // 零消耗诚实降级（不套用域外剧本答非所问）。
+  let entry = HSL_ENTRY;
+  let fixture = a.fixture;
+  if (a.model === "scripted" && !a.fixtureExplicit) {
+    const stockScore = stockAffinityOf(a.task, STOCK_FIXTURE);
+    if (stockScore < SEMANTIC_FLOOR) {
+      const pick = rescueExpertOf(a.task, a.workspace);
+      if (pick) {
+        entry = DIRECT_ENTRY;
+        fixture = pick.fixture;
+        Object.assign(env, {
+          ORG_ASK_EXPERT: pick.expert,
+          ORG_ASK_SESSION: "default",
+          ORG_ASK_QUESTION: a.task,
+          // v0.5.10：救援默认开工具环（audio_compose 即门即用；fs_write 走
+          // 审批在环 —— CLI org approvals --watch 放行；用户显式设置优先）
+          ORG_TOOLS: process.env.ORG_TOOLS || "write",
+        });
+        console.log(`⇄ 跨车道救援：任务域外（与团队剧本重合 ${stockScore.toFixed(2)} < ${SEMANTIC_FLOOR}）→ 直连 ${pick.expert}（评分 ${pick.score.toFixed(2)}）`);
+      } else {
+        writeOutOfDomainRun(out, a.task, stockScore);
+        console.log(`◌ 域外任务 · 零消耗降级（与团队剧本重合 ${stockScore.toFixed(2)} < ${SEMANTIC_FLOOR}，流水线未启动）`);
+        console.log(`  建议出口：org ask <专家> "问题"（直连）· org run --model <车道>（真实模型动态分解）· org search "关键词"（找在岗专家）`);
+        console.log(`  产物：${path.join(out, "report.md")}`);
+        return 0;
+      }
+    }
+  }
+  const r = await runHsl(entry, {
+    workspace: a.workspace, task: entry === DIRECT_ENTRY ? `(direct) ${a.task}` : a.task, model: a.model,
+    fixture, out, env,
   });
   process.stdout.write(r.out);
   // 运行收尾：把「本次产出的候选怎么处置」交回用户（工厂产物默认候选，

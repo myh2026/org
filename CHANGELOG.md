@@ -1,5 +1,75 @@
 # CHANGELOG
 
+## v0.5.10（2026-09-16）—— scripted 车道语义地板 + 跨车道救援
+
+QA 实测（agent-browser 驱动 Web GUI 团队模式）发现 B-19：发域外任务
+「请创作一首古典风格的卡农」，scripted 车道套用 STOCK 公告流水线跑完
+交差 —— run ok=true、交付公告表格，**答非所问比诚实降级更糟**（用户以为
+成功了）。v0.5.7 修的是「空壳工作区不炸」，本版修「有模板但任务域外」的
+语义错配：**语义地板预检三段式** —— 域内放行 / 注册表专家**跨车道救援**
+转直连 / **零消耗诚实降级**。484/484 机制级测试全绿（27 文件 · 2096
+expect，+15 例）。
+
+### 语义地板（lib/engine.ts，CLI cmdRun / engine startRun 双入口同构）
+
+- `stockAffinityOf`：任务与 STOCK 剧本域内文本（decompose 目标 + clarify）
+  的词面重合 —— 复用 v0.5.8 语义检索的中英混合分词（CJK bigram + 西文
+  词元）；**命中数护持**（≥2 实义 token 命中即按地板放行 —— bigram 碎片化
+  会把「抓取近一周公告并输出表格」稀释到 0.33，明确域内不能误拦）；
+- `SEMANTIC_FLOOR = 0.15`（实测定标：卡农/写诗 0.00 ｜ 公告类 0.33-0.58）；
+  超短任务（<2 token）/ 剧本不可读 → 保守放行（原行为兜底）；
+- 介入条件：scripted + 团队 entry + **未显式指定 fixture**（--fixture 显式
+  传参 = 用户意图优先，跳过预检；真实 LLM 车道动态分解天然域感知）。
+
+### 跨车道救援（reroute）
+
+- `rescueExpertOf`：注册表专家评分 = manifest（name+description+
+  capabilities）与 **direct: 轨道语料**取 max（预录回复复述任务域词汇，
+  是最强领域信号 —— 卡农任务 composer 综合分 0.75 vs manifest 分 0.17）；
+  前置校验 fixture 含 `direct:<name>` 轨道（否则直连 FIXTURE_EXHAUSTED，
+  不可救援）；
+- 命中 → 同一 run 转直连（entry/expert/fixture 改写，Web/TUI/CLI 三端）：
+  `lane_rescue` 事件先于解释器事件注入卡片流（⇄ 跨车道救援 → 专家（评分
+  可见））；**ORG_TOOLS 默认 write**（audio_compose 是 Full 即门类工具，
+  开箱即用无需审批；fs_write 仍审批在环 —— 团队车道本就 approval:true，
+  GUI 审批卡承接；用户显式设置优先）；direct 会话账本照常落盘（记账权
+  不可绕）；
+- STOCK 剧本补 `direct:bard` 轨道（写诗演示）：第一轮 fs_write poem.md
+  工件 + 第二轮**附诗文全文**（审批缺席时交付不丢失 —— 优雅降级）。
+
+### 零消耗诚实降级（degrade）
+
+- 无专家命中 → **不跑流水线**：直写标准产物四件套（journal.jsonl 管道
+  分隔 / events.jsonl 归一化事件 / report.md / run.json `lane:
+  degraded-out-of-domain` + remedies）—— Web 回放面板与 org score 零适配
+  消费；GUI 渲染 ◌ 域外降级卡（建议出口：切直连 / 配真实模型 / org search）。
+
+### GUI 直连工具环缺口补齐（B-19 伴生）
+
+- v0.5.9 的「GUI 开箱演示」实际只有纯文本：直连 t-bot 从未注入
+  ORG_TOOLS（缺省 Off），audio_compose/fs_write 一律不执行（`<tool>` 标记
+  原样输出）。askOnce/askStreamOnce 现默认 `ORG_TOOLS=write`（用户显式
+  设置优先）。
+
+### 观测与契约
+
+- `runCards.ts` 新增 `rescue` 事实（mode/expert/score/stockScore/floor）；
+  Web runCard 渲染 ⇄/◌ 行（先于任务树 —— 车道决策第一眼可见）+ done 帧
+  directTurns 透传（救援回答以对话气泡呈现：团队卡讲「为什么换车道」，
+  气泡讲「专家答了什么」）；
+- degrade 路径的事件流合成（journal open → lane_rescue → run_end →
+  run_result），回放与实时卡片同源。
+
+### 测试（tests/rescue.test.ts，15 例）
+
+- R1 地板数值定标（含西文护栏回归锚：quantum 3 token 曾被 <4 阈值误放）
+  / R2 救援评分（卡农→composer、写诗→bard、无轨道不可救援）/ R3 CLI
+  reroute e2e（WAV+MID+会话账本）/ R4 startRun 事件流契约（lane_rescue +
+  directTurns + audioRendered）/ R5 degrade e2e（产物四件套 + 零消耗）/
+  R6 域内零影响 / R7 显式 fixture 零影响；
+- degrade T2 适配：原用例「卡农」任务现被预检改道（reroute 是 rescue.test
+  的领地），改域内任务保持「空壳修复 → 模板补全 → parse 复用」意图。
+
 ## v0.5.9（2026-09-16）—— 音频工坊（音色库 × 和弦库 × MIDI 导出）
 
 「古典音乐 = 音频」的乐器面与交换格式一次补齐：**8 种乐器音色**

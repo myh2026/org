@@ -187,6 +187,9 @@ export type RunFact =
   | { t: "approval"; id: string; capability: string; action: string; detail: string; tone: "warn"; text: string }
   /** v0.5.6：音频产物渲染完成（引擎桥收尾注入 —— 并非解释器事件） */
   | { t: "audio"; files: Array<{ wavFile: string; bytes: number; durationSec: number; notes: number; title: string }>; failures: Array<{ file: string; error: string }> }
+  /** v0.5.10：scripted 车道域外任务语义地板判定（引擎桥预检注入）：
+   *  reroute = 跨车道救援转直连（专家/评分可见）；degrade = 零消耗诚实降级。 */
+  | { t: "rescue"; mode: "reroute" | "degrade"; expert?: string; score: number; stockScore: number; floor: number }
   | { t: "other"; name: string; action: string; detail: string };
 
 /**
@@ -243,6 +246,18 @@ export function classifyRunEvent(ev:
     case "run_end":
       return { t: "runEnd", ok: ev.ok, elapsed_ms: ev.elapsed_ms };
     case "unknown":
+      // v0.5.10：引擎桥预检注入的车道救援判定（语义地板 B-19）
+      if (ev.name === "lane_rescue") {
+        const d = (ev.data ?? {}) as Record<string, unknown>;
+        return {
+          t: "rescue",
+          mode: d["mode"] === "degrade" ? "degrade" : "reroute",
+          ...(d["expert"] !== undefined ? { expert: String(d["expert"]) } : {}),
+          score: Number(d["score"] ?? 0),
+          stockScore: Number(d["stockScore"] ?? 0),
+          floor: Number(d["floor"] ?? 0),
+        };
+      }
       // v0.5.6：引擎桥收尾注入的音频渲染事实（notes.json → wav 开袋即食）
       if (ev.name === "audio_rendered") {
         const files = Array.isArray(ev.data?.["files"])

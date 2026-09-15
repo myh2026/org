@@ -68,8 +68,11 @@ describe("v0.5.7 空壳工作区修复（ensureWorkspace 标记物判据）", ()
   test("T2 GUI 复现场景（端到端）：空壳工作区首问不再 Err，parse 走 B:reuse", () => {
     const ws = bareWorkspace("degrade-gui-repro");
     const out = path.join(ws, "out-t2");
+    // v0.5.10 起域外任务（原用例「请创作一首古典风格的卡农」）在 CLI 桥层
+    // 被语义地板拦截改道（reroute 直连 composer）—— 那是 rescue.test.ts 的
+    // 领地；本用例的意图是「空壳修复 → 模板补全 → parse 复用」，用域内任务。
     const r = runOrg([
-      "run", "--task", "请创作一首古典风格的卡农",
+      "run", "--task", "抓取近一周公告并输出表格",
       "--workspace", ws, "--out", out,
     ]);
     // 修复前：ok=false（minted 专家执行失败 → 硬 Err 炸穿 run）
