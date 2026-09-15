@@ -1,0 +1,104 @@
+// ============================================================================
+// org/fixtures/turing/rule110.hsl — HSL 图灵完备实证 I：Rule 110 元胞自动机
+// ----------------------------------------------------------------------------
+// Rule 110 元胞自动机已被证明图灵完备（Cook 2004）。本程序用 HSL 语言本身的
+// 循环（for）、分支（if/match）、Vec 内存结构实现宽度 79、周期边界的演化，
+// 单点种子（中心 39 列），打印 30 代 + 种子共 31 行（'#' 活 / '.' 死）。
+//
+// 规则表（左中右三元组 → 新值，左为高位）：
+//   111→0 110→1 101→1 100→0 011→1 010→1 001→1 000→0
+// 手工验证锚点（宽度 79，种子在第 39 列）：
+//   第 0 行：39 列单个 '#'（其余 '.'）
+//   第 1 行：38、39 列两个 '#'（邻域 001→1、010→1、100→0）
+//
+// 全程无 native 块 —— 图灵完备证明只用 HSL 原语
+// （let/mut/for/if/match/Vec/println!/format!）。
+//
+// 运行：bun toolchain/dhv-ts/src/main.ts run fixtures/turing/rule110.hsl --quiet
+// 投射：python（4 文件 + 跨文件 import 接线）/ rust（单文件）/ cpp（单文件）
+// ============================================================================
+
+/// Rule 110 局部转移函数：三元组 (left,center,right) → 0/1。
+/// 用 match 字面量分支显式编码规则表（穷尽 + `_` 兜底）。
+export fn rule110_cell(left: i32, center: i32, right: i32) -> i32 {
+    let idx = left * 4 + center * 2 + right;
+    match idx {
+        7 => 0,   // 111 → 0
+        6 => 1,   // 110 → 1
+        5 => 1,   // 101 → 1
+        4 => 0,   // 100 → 0
+        3 => 1,   // 011 → 1
+        2 => 1,   // 010 → 1
+        1 => 1,   // 001 → 1
+        _ => 0,   // 000 → 0
+    }
+}
+
+/// 一代演化：周期边界（第 -1 列 = 第 78 列，第 79 列 = 第 0 列）。
+/// 结果向量的长度与 cells 相同（先克隆占位再逐位覆写，读旧写新分离）。
+export fn step(cells: Vec<i32>) -> Vec<i32> {
+    let mut next = cells.clone();
+    for i in 0..cells.len() {
+        let mut left = 0;
+        let mut center = 0;
+        let mut right = 0;
+        center = cells[i];
+        if i == 0 {
+            left = cells[cells.len() - 1];
+        } else {
+            left = cells[i - 1];
+        }
+        if i == cells.len() - 1 {
+            right = cells[0];
+        } else {
+            right = cells[i + 1];
+        }
+        next[i] = rule110_cell(left, center, right);
+    }
+    next
+}
+
+/// 渲染一代为可读行：1 → '#'，0 → '.'。
+export fn render(cells: Vec<i32>) -> String {
+    let mut line = String::from("");
+    for i in 0..cells.len() {
+        if cells[i] == 1 {
+            line = format!("{}{}", line, "#");
+        } else {
+            line = format!("{}{}", line, ".");
+        }
+    }
+    line
+}
+
+/// 入口：宽度 79、单点种子（第 39 列）、打印种子 + 30 代演化。
+export fn main() -> i32 {
+    let mut cells = vec![0];
+    for _i in 0..78 {
+        cells.push(0);
+    }
+    cells[39] = 1;
+    for _gen in 0..31 {
+        println!("{}", render(cells.clone()));
+        cells = step(cells);
+    }
+    0
+}
+
+project {
+    // python：一项一文件（跨文件 import 由 emit 自动接线）
+    rule110_cell -> "rule110_cell.py" : python,
+    step         -> "step.py"         : python,
+    render       -> "render.py"       : python,
+    main         -> "main.py"         : python,
+    // rust：单文件（rustc 单文件编译，无跨文件模块接线）
+    rule110_cell -> "rule110.rs" : rust,
+    step         -> "rule110.rs" : rust,
+    render       -> "rule110.rs" : rust,
+    main         -> "rule110.rs" : rust,
+    // cpp：单文件（g++ 单翻译单元）
+    rule110_cell -> "rule110.cpp" : cpp,
+    step         -> "rule110.cpp" : cpp,
+    render       -> "rule110.cpp" : cpp,
+    main         -> "rule110.cpp" : cpp,
+}

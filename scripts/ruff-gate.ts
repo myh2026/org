@@ -26,6 +26,9 @@ const CORPUS: Array<{ hsl: string; note: string }> = [
   { hsl: "hsl/org.hsl", note: "ORG 内核（graph 投射 · python 车道 v0.5.4）" },
   { hsl: "fixtures/ruff-corpus/kernel-tour.hsl", note: "ORG 自有全特性语料（复合赋值/闭包/递归/Result 模式/实参括号）" },
   { hsl: "toolchain/dhv-ts/examples/pattern-tour.hsl", note: "模式全家族（match/if-let/while-let · Ok/Err/Some 桩）" },
+  { hsl: "fixtures/turing/rule110.hsl", note: "图灵完备实证 I：Rule 110 元胞自动机（Cook 2004 TC 证明）" },
+  { hsl: "fixtures/turing/busy-beaver.hsl", note: "图灵完备实证 II：图灵机执行器（BB(3)：13 转移/14 构型/6 个 1）" },
+  { hsl: "fixtures/turing/bf.hsl", note: "图灵完备实证 III：Brainfuck 解释器（906 指令 Hello World）" },
 ];
 
 function findRuff(): string {

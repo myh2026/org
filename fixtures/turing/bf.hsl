@@ -1,0 +1,144 @@
+// ============================================================================
+// org/fixtures/turing/bf.hsl — HSL 图灵完备实证 III：Brainfuck 解释器
+// ----------------------------------------------------------------------------
+// Brainfuck 是极简图灵完备语言（8 指令）。本程序用 HSL 实现 BF 解释器
+// 并运行经典的 Hello World 程序 —— 「用图灵完备的语言解释图灵完备的语言」，
+// 是图灵完备性最强的可执行证据（解释器本身的循环/分支/内存结构全在 HSL）。
+//
+// 指令集：+ - > < [ ] . （, 输入指令本程序不消费 —— 无输入场景）
+// 方括号配对用**运行时深度扫描**实现（前向找 ] / 后向找 [），不预建表
+// —— 证明 HSL 的循环与条件足以承载任意控制流。
+//
+// 全程无 native 块。
+//
+// 运行：bun toolchain/dhv-ts/src/main.ts run fixtures/turing/bf.hsl --quiet
+// ============================================================================
+
+/// BF 输出字符表（本用例仅用到 Hello World 的 10 个字符 + 换行）。
+/// 说明：HSL 无 int→char 原语，输出字符经此表映射（诚实标注）。
+fn code_to_char(code: i32) -> String {
+    match code {
+        72 => String::from("H"),
+        101 => String::from("e"),
+        108 => String::from("l"),
+        111 => String::from("o"),
+        32 => String::from(" "),
+        87 => String::from("W"),
+        114 => String::from("r"),
+        100 => String::from("d"),
+        33 => String::from("!"),
+        10 => String::from("\n"),
+        _ => String::from("?"),
+    }
+}
+
+/// BF 解释器主循环：tape + 指针 + 程序计数器 + 括号深度扫描。
+export fn main() -> i32 {
+    // 经典 BF Hello World（维基百科词条原程序）
+    let prog = String::from("++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++.");
+    let expected = String::from("Hello World!\n");
+
+    let mut tape = vec![0];
+    for _i in 0..63 {
+        tape.push(0);
+    }
+    let mut ptr: i32 = 0;
+    let mut pc: i32 = 0;
+    let mut out = String::from("");
+    let mut exec_count: i32 = 0;
+    let n = prog.len() as i32;
+
+    loop {
+        if pc >= n {
+            break;
+        }
+        if exec_count > 100000 {
+            println!("SAFE GUARD: over 100000 executed instructions (bug)");
+            break;
+        }
+        let ch = prog.char_at(pc as usize);
+        if ch == String::from("+") {
+            let idx = ptr as usize;
+            tape[idx] = tape[idx] + 1;
+        } else if ch == String::from("-") {
+            let idx = ptr as usize;
+            tape[idx] = tape[idx] - 1;
+        } else if ch == String::from(">") {
+            ptr = ptr + 1;
+            if ptr as usize >= tape.len() {
+                tape.push(0);
+            }
+        } else if ch == String::from("<") {
+            if ptr > 0 {
+                ptr = ptr - 1;
+            }
+        } else if ch == String::from(".") {
+            let idx = ptr as usize;
+            out = format!("{}{}", out, code_to_char(tape[idx]));
+        } else if ch == String::from("[") {
+            let idx = ptr as usize;
+            if tape[idx] == 0 {
+                // 前向深度扫描：跳过匹配的 ]（含嵌套）
+                let mut depth = 0;
+                loop {
+                    if pc >= n {
+                        break;
+                    }
+                    let c2 = prog.char_at(pc as usize);
+                    if c2 == String::from("[") {
+                        depth = depth + 1;
+                    }
+                    if c2 == String::from("]") {
+                        depth = depth - 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    pc = pc + 1;
+                }
+            }
+        } else if ch == String::from("]") {
+            let idx = ptr as usize;
+            if tape[idx] != 0 {
+                // 后向深度扫描：回到匹配的 [（含嵌套）
+                let mut depth = 0;
+                loop {
+                    if pc < 0 {
+                        break;
+                    }
+                    let c2 = prog.char_at(pc as usize);
+                    if c2 == String::from("]") {
+                        depth = depth + 1;
+                    }
+                    if c2 == String::from("[") {
+                        depth = depth - 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    pc = pc - 1;
+                }
+            }
+        } else {
+            // 其余字符（含 ,）本用例不消费
+        }
+        exec_count = exec_count + 1;
+        pc = pc + 1;
+    }
+
+    println!("BF says: {}", out);
+    println!("executed={} instructions", exec_count);
+    if out == expected {
+        println!("BF VERIFIED: brainfuck hello-world matches expected output");
+    } else {
+        println!("BF MISMATCH: expected Hello World!");
+    }
+    0
+}
+
+project {
+    code_to_char -> "bf.py" : python,
+    main         -> "bf.py" : python,
+    code_to_char -> "bf.rs" : rust,
+    main         -> "bf.rs" : rust,
+}
