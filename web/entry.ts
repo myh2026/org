@@ -167,6 +167,10 @@ import { cloudProbeAll, probeDocker, probeSsh, probeK8s, probeTerraform, probeCl
          dockerRun, dockerBuild, dockerfileFor, composeFor, dockerPlan,
          sshRun, scpUpload, sshConfigTemplate, sshPlan, k8sRun, k8sManifestFor, terraformPlan } from "../lib/cloud.ts"; // v0.5.17 云生态统一模块（#67/#68/#72/#74）
 import { suggestBreakpoints, debugPlan, dapSelfTest } from "../lib/debug.ts"; // v0.5.17 断点/调试建议（#108）
+import { probeMobile, mobileDevices, mobileLogcat, mobileDebugPlan, mobileSelfTest, MOBILE_PLAN_PLATFORMS } from "../lib/mobile.ts"; // v0.5.18 移动端调试（#117）
+import { probeRemote, loadRemoteHosts, findRemoteHost, remotePing, remoteDeployPlan,
+         REMOTE_HOSTS_FILE } from "../lib/remote.ts"; // v0.5.18 远程 Agent 簇（#133 —— 会话/部署/计划层，与 cloud_ssh 互补）
+import { iacParseFile, iacGraph, iacPlan, iacGenerate, probeIac, iacValidate } from "../lib/iac.ts"; // v0.5.18 IaC 深度实现层（#44）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
 
@@ -1699,6 +1703,201 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
           }
           return json({ ok: false, error: `未知 action：${action || "（空）"}（docker/ssh/k8s）` }, 400);
         }
+        // v0.5.18 📱 移动端调试（#117）：GET ?action=probe|devices|logcat|plan
+        // [selftest]。只读四动作 + 自检。与 CLI org mobile / 工具环 mobile_* 同源
+        // lib/mobile.ts（单一实现防口径漂移）。执行车道全只读 —— forward/apk 的
+        // 深层探测在 CLI（Web 面保持只读四动作）。
+        if (route === "GET /api/govex/mobile") {
+          const action = String(url.searchParams.get("action") ?? "probe").trim();
+          try {
+            if (action === "probe") {
+              const p = probeMobile();
+              const face = (f: typeof p.adb) => ({ available: f.available, version: f.version, ...(f.reason ? { reason: f.reason } : {}) });
+              return json({
+                ok: true, took_ms: p.tookMs,
+                adb: { ...face(p.adb), android_home: p.androidHome },
+                aapt: face(p.aapt), aapt2: face(p.aapt2), scrcpy: face(p.scrcpy),
+                ideviceinstaller: face(p.ideviceinstaller), idevice_id: face(p.ideviceId),
+                flutter: face(p.flutter),
+                android_home: p.androidHome, summary: p.summary,
+                hint: "工具缺席不是失败 —— org mobile plan（纯函数保底）与 APK 魔数车道（org mobile apk）恒可用",
+              });
+            }
+            if (action === "devices") {
+              const r = mobileDevices();
+              return json({
+                ok: r.ok, ...(r.kind ? { kind: r.kind } : {}), ...(r.reason ? { reason: r.reason } : {}),
+                argv: r.argv, devices: r.devices, ready: r.ready, ios: r.ios, took_ms: r.tookMs,
+                hint: "unauthorized/offline 是设备清单的诚实状态而非失败（解锁屏幕点「允许」/重插）",
+              });
+            }
+            if (action === "logcat") {
+              const linesParam = url.searchParams.get("lines");
+              const lines = linesParam !== null ? Math.max(1, Math.floor(Number(linesParam) || 0)) : undefined;
+              const r = mobileLogcat({
+                ...(lines ? { lines } : {}),
+                ...(url.searchParams.get("tag") ? { tag: String(url.searchParams.get("tag")) } : {}),
+                ...(url.searchParams.get("level") ? { level: String(url.searchParams.get("level")) } : {}),
+                ...(url.searchParams.get("serial") ? { serial: String(url.searchParams.get("serial")) } : {}),
+                ...(url.searchParams.get("package") ? { package: String(url.searchParams.get("package")) } : {}),
+              });
+              return json({
+                ok: r.ok, ...(r.kind ? { kind: r.kind } : {}), ...(r.reason ? { reason: r.reason } : {}),
+                argv: r.argv,
+                entries: r.entries.slice(0, 200).map((e) => ({ time: e.time, pid: e.pid, tid: e.tid, level: e.level, tag: e.tag, message: e.message.slice(0, 200) })),
+                count: r.entries.length, skipped: r.skipped, truncated: r.truncated, took_ms: r.tookMs,
+                hint: "-d 是一次性 dump（流式尾随是路线图）；复现一次目标操作后再抓最完整",
+              });
+            }
+            if (action === "plan") {
+              const platform = String(url.searchParams.get("platform") ?? "android");
+              const symptom = String(url.searchParams.get("symptom") ?? "crash");
+              if (!(MOBILE_PLAN_PLATFORMS as readonly string[]).includes(platform)) {
+                return json({ ok: false, error: `platform 须为 ${MOBILE_PLAN_PLATFORMS.join("/")}` }, 400);
+              }
+              const p = mobileDebugPlan(platform, symptom);
+              return json({ ok: true, platform: p.platform, symptom: p.symptom, steps: p.steps, note: p.note });
+            }
+            if (action === "selftest" || action === "self-test") {
+              const t = mobileSelfTest();
+              return json({ ok: t.ok, passed: t.passed, total: t.total, checks: t.checks });
+            }
+            return json({ ok: false, error: `未知 action：${action || "（空）"}（probe/devices/logcat/plan/selftest —— 只读动作；forward/apk 深层探测走 CLI org mobile）` }, 400);
+          } catch (err) {
+            return json({ ok: false, error: (err as Error).message }, 500);
+          }
+        }
+        if (route === "GET /api/govex/remote") {
+          const action = String(url.searchParams.get("action") ?? "probe").trim();
+          const rws = readWorkspaceOf(ws);
+          try {
+            if (action === "probe") {
+              const p = probeRemote();
+              return json({
+                ok: true,
+                ssh: { available: p.available, version_raw: p.versionRaw, open_ssh: p.openSsh },
+                rsync: { available: p.rsyncAvailable, ...(p.rsyncVersion ? { version: p.rsyncVersion } : {}) },
+                scp: { available: p.scpAvailable },
+                ssh_keygen: { available: p.sshKeygenAvailable },
+                agent_forwarding: p.agentForwarding,
+                ...(p.reason ? { reason: p.reason } : {}),
+                hint: "工具缺席不是失败 —— org remote plan（部署计划纯函数）恒可用；主机档案 remote-hosts.json 是 host 寻址的门控源",
+              });
+            }
+            if (action === "hosts") {
+              const report = loadRemoteHosts(rws);
+              return json({
+                ok: true, file: report.file, exists: report.exists, count: report.hosts.length,
+                hosts: report.hosts, errors: report.errors,
+                ...(report.hosts.length === 0 ? { note: `档案为空或未创建 —— host 寻址一律拒绝（安全缺省）。创建：<ws>/${REMOTE_HOSTS_FILE} 数组 [{name, host, user, port?, identity?}]（identity 只接受路径，私钥内容/密码字段会被校验拒绝）` } : {}),
+              });
+            }
+            if (action === "plan") {
+              const mode = String(url.searchParams.get("mode") ?? "all");
+              const hostParam = String(url.searchParams.get("host") ?? "").trim();
+              // host 在档案 → 实参化（user/host 就位）；不在档案也照出计划（占位形态）
+              const entry = hostParam ? findRemoteHost(rws, hostParam).entry : null;
+              const p = remoteDeployPlan({
+                host: entry ? entry.host : hostParam,
+                user: entry ? entry.user : String(url.searchParams.get("user") ?? "").trim(),
+                mode,
+              });
+              return json({ ok: true, mode: p.mode, target: p.target, ...(entry ? { roster_host: entry.name } : {}), phases: p.phases });
+            }
+            if (action === "ping") {
+              const host = String(url.searchParams.get("host") ?? "").trim();
+              if (!host) return json({ ok: false, error: "host 必填（且须在 <工作区>/remote-hosts.json 档案内）" }, 400);
+              const roundsParam = url.searchParams.get("rounds");
+              const rounds = roundsParam !== null ? Math.max(1, Math.floor(Number(roundsParam) || 0)) : undefined;
+              const r = remotePing(rws, { host, ...(rounds ? { rounds } : {}) });
+              return json({
+                ok: r.ok, ...(r.kind ? { kind: r.kind } : {}), ...(r.reason ? { reason: r.reason } : {}),
+                host, rounds: r.rounds, failures: r.failures,
+                ...(r.stats ? { stats: r.stats, times: r.times } : {}),
+              });
+            }
+            return json({ ok: false, error: `未知 action：${action || "（空）"}（probe/hosts/plan/ping —— 只读四动作；执行车道走工具环 remote_exec / CLI org remote exec）` }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
+        // v0.5.18 ⚒ IaC 深度（#44）：GET ?action=parse|plan|graph&file=… | generate&manifest=<JSON 串>
+        // | probe | validate&dir=…。与 CLI org iac / 工具环 iac_* 同源 lib/iac.ts
+        // （内置 HCL 子集解析器主车道；probe 探测 terraform/tofu/tflint，缺席诚实降级）。
+        // 只读面（generate 只返回文本不写盘）—— file/dir 过 lib/iac.ts 内置监狱。
+        if (route === "GET /api/govex/iac") {
+          const action = String(url.searchParams.get("action") ?? "").trim();
+          const rws = readWorkspaceOf(ws);
+          try {
+            if (action === "parse" || action === "plan" || action === "graph") {
+              const file = String(url.searchParams.get("file") ?? "").trim();
+              if (!file) return json({ ok: false, error: "file 必填（工作区相对的 .tf 路径）" }, 400);
+              const r = iacParseFile(rws, file);
+              if (!r.ok) return json({ ok: false, kind: r.kind, reason: r.reason, file: r.file }, 400);
+              if (action === "parse") {
+                const render = (blocks: import("../lib/iac.ts").IacBlock[]): unknown => blocks.map((b) => ({
+                  type: b.type, labels: b.labels, line: b.line, attrs: b.attrs.map((x) => x.name), blocks: render(b.blocks),
+                }));
+                return json({ ok: true, file: r.file, took_ms: r.tookMs, lane: "builtin", blocks: r.ast.length, ast: render(r.ast) });
+              }
+              if (action === "graph") {
+                const g = iacGraph(r.ast);
+                return json({
+                  ok: g.ok, ...(g.reason ? { reason: g.reason } : {}), file: r.file,
+                  nodes: g.nodes, edges: g.edges, order: g.order,
+                  ...(g.cycles.length > 0 ? { cycles: g.cycles } : {}),
+                  undeclared_refs: g.undeclaredRefs, summary: g.summary,
+                });
+              }
+              const p = iacPlan(r.ast);
+              return json({
+                ok: p.ok, ...(p.reason ? { reason: p.reason } : {}), file: r.file, lane: p.lane,
+                summary: p.summary, order: p.order, notes: p.notes,
+                ...(p.cycles ? { cycles: p.cycles } : {}), text: p.text,
+              });
+            }
+            if (action === "generate") {
+              // manifest 走查询参数（URL 编码的 JSON 串 —— 与 lsp 的 name= 同模式）；
+              // 长清单建议走 CLI/工具环（面板输入是短清单场景）
+              const raw = String(url.searchParams.get("manifest") ?? "").trim();
+              if (!raw) return json({ ok: false, error: "manifest 必填（JSON 串：{provider, resources:[{type,name,attrs}]}）" }, 400);
+              let manifest: unknown;
+              try {
+                manifest = JSON.parse(raw);
+              } catch (e) {
+                return json({ ok: false, error: `manifest 不是合法 JSON：${(e as Error).message}` }, 400);
+              }
+              const r = iacGenerate(manifest as Parameters<typeof iacGenerate>[0]);
+              if (!r.ok) return json({ ok: false, errors: r.errors, reason: r.errors[0] ?? "manifest 校验失败" }, 400);
+              return json({
+                ok: true, tf: r.tf, provider: r.provider, resources: r.resources,
+                variables: r.variables, warnings: r.warnings, notes: r.notes, round_trip: r.roundTrip,
+              });
+            }
+            if (action === "probe") {
+              const p = probeIac();
+              return json({
+                ok: true, took_ms: p.tookMs,
+                terraform: p.terraform, tofu: p.tofu, tflint: p.tflint,
+                lane: p.lane, suggestion: p.suggestion,
+              });
+            }
+            if (action === "validate") {
+              const dir = String(url.searchParams.get("dir") ?? ".").trim();
+              const r = iacValidate(rws, dir);
+              return json({
+                ok: r.ok, ...(r.kind ? { kind: r.kind } : {}), lane: r.lane,
+                ...(r.reason ? { reason: r.reason } : {}),
+                bin: r.bin, argv: r.argv, exit_code: r.exitCode, valid: r.valid,
+                diagnostics: r.diagnostics, stdout: r.stdout.slice(0, 4096), stderr: r.stderr.slice(0, 4096),
+                took_ms: r.tookMs,
+              });
+            }
+            return json({ ok: false, error: "action 须为 parse / plan / graph / generate / probe / validate" }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
         if (route === "GET /api/spawns") {
         // v0.5.11：派生池（agent_spawn 池化重档的观测面）。
           // 数据源三层：① <ws>/spawn/pool.json 登记（v0.5.11 起每次派生回写）；
@@ -2216,6 +2415,9 @@ export async function webMain(argv: string[]): Promise<number> {
   console.log(`  停止       POST /api/abort（运行轮 SIGKILL / body{id} 取消排队轮）`);
   console.log(`  协作面     GET/POST /api/govex/collab（v0.5.17 #87：threads/feed/users/summary/whoami + post/comment/user/bridge）`);
   console.log(`  云生态     GET/POST /api/govex/cloud（v0.5.17 #67/#68/#72/#74：probe 全景/dockerfile/compose/manifest/terraform 模板 + docker/ssh/k8s 白名单执行）`);
+  console.log(`  移动端     GET /api/govex/mobile（v0.5.18 #117：probe 三面探测/devices 设备清单/logcat dump 五元组/plan 计划保底 + selftest —— 只读动作）`);
+  console.log(`  远程 Agent  GET /api/govex/remote（v0.5.18 #133：probe 四工具探测/hosts 主机档案/plan 部署计划四式/ping 心跳 —— 只读四动作）`);
+  console.log(`  IaC 深度   GET /api/govex/iac（v0.5.18 #44：HCL 解析/依赖图/人读 Plan/manifest 逆向生成 + probe 五面探测；与 iacscan 扫描互补）`);
   console.log(`  模型       ${p.model}（GUI 可切 scripted/deepseek，请求体可逐次覆盖）`);
   // v0.4.13：网关三件套可见性 —— 直连服务商（DeepSeek 等）的鉴权/模型/超时
   // 经环境变量注入（spawn 车道继承 process.env），横幅回显防「配了没生效」。
@@ -3257,7 +3459,7 @@ function renderIndexHtml(): string {
   <button id="toolboxBtn" class="rchip" type="button" title="工具箱（v0.5.15）— 🗄 SQLite 查询 · 🔎 符号跳转 · 🛡 密钥扫描 · 📦 审计导出 · 📋 SBOM · 👥 评审推荐">
     <span class="rc-label">🧰 工具箱</span>
   </button>
-  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16+）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🐞 LSP/DAP 调试 · 🌿 merge/rebase · 👥 团队协作 · ☁ 云生态">
+  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16+）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🐞 LSP/DAP 调试 · 🌿 merge/rebase · 👥 团队协作 · ☁ 云生态 · 📱 移动端调试 · ⚒ IaC深度 · 🛰 远程 Agent">
     <span class="rc-label">🛡 治理与扩展</span>
   </button>
   <span class="tstats" id="topStats"></span>
@@ -3397,7 +3599,7 @@ function renderIndexHtml(): string {
 <div id="govexScrim" aria-hidden="true"></div>
 <div id="govexPane" role="dialog" aria-modal="true" aria-labelledby="gxTitle">
   <div class="schhead">
-    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git · 👥 协作 · ☁ 云生态（v0.5.16+）</div>
+    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git · 👥 协作 · ☁ 云生态 · 📱 移动端 · ⚒ IaC深度 · 🛰 远程（v0.5.16+）</div>
     <button class="schclose" type="button" onclick="closeGovex()" title="关闭（Esc）" aria-label="关闭治理与扩展面板">✕</button>
     <div class="tbtabs" role="tablist">
       <button class="tbtab on" id="gxTabIac" type="button" role="tab" onclick="gxTab('iac')">🛡 IaC</button>
@@ -3411,6 +3613,9 @@ function renderIndexHtml(): string {
       <button class="tbtab" id="gxTabGit" type="button" role="tab" onclick="gxTab('git')">🌿 git</button>
       <button class="tbtab" id="gxTabCollab" type="button" role="tab" onclick="gxTab('collab')">👥 协作</button>
       <button class="tbtab" id="gxTabCloud" type="button" role="tab" onclick="gxTab('cloud')">☁ 云生态</button>
+      <button class="tbtab" id="gxTabMobile" type="button" role="tab" onclick="gxTab('mobile')">📱 移动端</button>
+      <button class="tbtab" id="gxTabIacx" type="button" role="tab" onclick="gxTab('iacx')">⚒ IaC深度</button>
+      <button class="tbtab" id="gxTabRemote" type="button" role="tab" onclick="gxTab('remote')">🛰 远程 Agent</button>
     </div>
   </div>
 
@@ -3584,9 +3789,79 @@ function renderIndexHtml(): string {
       </div>
       <div class="tbout" id="gxCloudRunOut"><div class="schempty">执行车道：docker/kubectl 子命令白名单（破坏性命令一律拒绝，拒绝先于 spawn）· ssh host 门控（ssh-hosts.allow）· 数组参数零 shell 面 · 路径过工作区监狱。CLI 同款 org cloud docker/ssh/k8s。</div></div>
     </section>
+
+    <section class="tbsec" id="gxSecMobile" hidden>
+      <div class="tbbar">
+        <button type="button" onclick="gxMobileProbe()">📱 工具链探测</button>
+        <button type="button" onclick="gxMobileDevices()">📲 设备清单</button>
+        <button type="button" onclick="gxMobileSelftest()">🧪 自检</button>
+        <span class="tbmeta" id="gxMobileMeta"></span>
+      </div>
+      <div class="tbout" id="gxMobileOut" style="margin-bottom:10px"><div class="schempty">移动端调试（#117）：Android/iOS/跨端三面探测（adb/aapt/scrcpy/idevice/flutter，缺席诚实降级）· 设备清单（adb devices -l 解析 · 未授权/offline 是诚实状态非失败 + iOS 面 UDID）。CLI 同款 org mobile probe/devices。</div></div>
+      <div class="tbbar">
+        <input id="gxMobTag" type="text" placeholder="tag（如 chromium/AndroidRuntime）" autocomplete="off" aria-label="logcat tag" style="max-width:190px">
+        <input id="gxMobLines" type="text" placeholder="行数（帽 2000）" autocomplete="off" aria-label="logcat 行数" style="max-width:90px">
+        <button type="button" onclick="gxMobileLogcat()">📜 logcat dump</button>
+        <span class="tbmeta">-d 快照（非尾随）· 五元组（时间/进程/级别/tag/消息）</span>
+      </div>
+      <div class="tbout" id="gxMobLogcatOut" style="margin-bottom:10px"><div class="schempty">logcat dump：adb logcat -d -t N 快照 + 五元组结构化（时间/进程/级别/tag/消息）· tag 过滤（-s TAG）· 行数钳 1..2000。无 adb/无设备 → 诚实降级 + 指引。CLI 同款 org mobile logcat。</div></div>
+      <div class="tbbar">
+        <select id="gxMobPlat" aria-label="计划平台" style="max-width:110px">
+          <option value="android">android</option><option value="ios">ios</option><option value="both">both</option>
+        </select>
+        <select id="gxMobSym" aria-label="症状" style="max-width:130px">
+          <option value="crash">crash 崩溃</option><option value="白屏">白屏</option><option value="network">network 网络</option><option value="卡顿">performance 卡顿</option><option value="build">build 构建</option><option value="装不上">install 安装</option><option value="webview">webview</option>
+        </select>
+        <button type="button" onclick="gxMobilePlan()">📋 调试计划</button>
+        <span class="tbmeta">纯函数保底（零外部依赖永远可用）</span>
+      </div>
+      <div class="tbout" id="gxMobPlanOut" style="max-height:320px"><div class="schempty">调试计划：平台 × 症状矩阵 → 步骤化计划（每步 = 可粘贴命令 + 预期 + 降级指引）。工具缺席环境的主交付 —— 无 adb/无真机也永远可用。CLI 同款 org mobile plan。</div></div>
+    </section>
   </div>
 
-  <div class="spwfoot">治理与扩展面板与 CLI / 工具环同源（lib/dbdiag · gitmerge · rbac · iacscan · plugins · openapi · browser · completion · rename · lsp · debug · collab · cloud 单一实现三端消费）—— v0.5.16 「每个功能都有对应操作页面」的延续。</div>
+  <div class="spwfoot">治理与扩展面板与 CLI / 工具环同源（lib/dbdiag · gitmerge · rbac · iacscan · plugins · openapi · browser · completion · rename · lsp · debug · collab · cloud · mobile 单一实现三端消费）—— v0.5.16 「每个功能都有对应操作页面」的延续。</div>
+    <section class="tbsec" id="gxSecIacx" hidden>
+      <div class="tbbar">
+        <input id="gxIacFile" type="text" placeholder=".tf 文件（工作区相对，如 infra/main.tf）" autocomplete="off" aria-label="IaC 文件">
+        <button type="button" onclick="gxIacParse()">🧱 解析</button>
+        <button type="button" onclick="gxIacPlan()">📋 计划</button>
+        <button type="button" onclick="gxIacGraph()">🕸 依赖图</button>
+        <span class="tbmeta" id="gxIacMeta"></span>
+      </div>
+      <div class="tbout" id="gxIacOut" style="margin-bottom:10px"><div class="schempty">IaC 深度（#44，与 🛡 IaC 扫描互补）：内置 HCL 子集解析器（block/label/属性/插值/heredoc/注释 —— 行号级诚实报错）→ 资源依赖图（拓扑序 + 环检测）→ 人读 Plan（to create N resources 风格，与真 terraform plan 差异诚实标注）。CLI 同款 org iac parse/plan/graph。</div></div>
+      <div class="tbbar">
+        <button type="button" onclick="gxIacProbe()">🔎 工具链探测</button>
+        <span class="tbmeta">terraform / tofu / tflint 三面 which 探测 —— 缺席 = 内置车道为主车道（诚实降级）</span>
+      </div>
+      <div class="tbout" id="gxIacProbeOut" style="margin-bottom:10px"><div class="schempty">五面探测：terraform · tofu · tflint · 车道判定（builtin 恒在 / cli 在场时 validate 可用）· 建议。在场时可跑 <code>terraform validate -json</code>（只读）；缺席 → 内置静态车道，绝不假装跑过 terraform。</div></div>
+      <div class="tbbar">
+        <input id="gxIacManifest" type="text" placeholder='manifest JSON：{"provider":"aws","resources":[{"type":"aws_instance","name":"web","attrs":{"ami":"ami-1"}}]}' autocomplete="off" aria-label="manifest JSON" style="max-width:520px">
+        <button type="button" onclick="gxIacGenerate()">⚙ 生成 .tf</button>
+      </div>
+      <div class="tbout" id="gxIacGenOut" style="max-height:320px"><div class="schempty">JSON manifest → 合法 .tf（terraform/provider 块 + variable 提取（$ref 自动补声明）+ resource 块 + output）；生成结果可被本面板解析器再解析（往返自洽）。只返回文本不写盘 —— 采纳时复制保存。</div></div>
+    </section>
+
+    <section class="tbsec" id="gxSecRemote" hidden>
+      <div class="tbbar">
+        <button type="button" onclick="gxRemoteProbe()">🛰 工具链探测</button>
+        <button type="button" onclick="gxRemoteHosts()">📇 主机档案</button>
+        <span class="tbmeta" id="gxRemoteMeta"></span>
+      </div>
+      <div class="tbout" id="gxRemoteOut" style="margin-bottom:10px"><div class="schempty">远程 Agent（#133）：ssh/scp/rsync/ssh-keygen 四工具探测（OpenSSH 版本解析 + SSH_AUTH_SOCK agent 环境，缺席诚实降级）· 主机档案 remote-hosts.json（name→host/user/port/identity，host 不在档案 = 拒绝不猜默认）。CLI 同款 org remote probe/hosts。</div></div>
+      <div class="tbbar">
+        <input id="gxRmtHost" type="text" placeholder="主机名（须在 remote-hosts.json 档案）" autocomplete="off" aria-label="远程主机名" style="max-width:210px">
+        <button type="button" onclick="gxRemotePing()">📡 心跳</button>
+        <select id="gxRmtPlanMode" aria-label="部署模式" style="max-width:130px">
+          <option value="all">plan: all</option><option value="git">plan: git</option><option value="rsync">plan: rsync</option><option value="container">plan: container</option>
+        </select>
+        <button type="button" onclick="gxRemotePlan()">📋 部署计划</button>
+        <span class="tbmeta">计划是纯函数（工具缺席也交付）</span>
+      </div>
+      <div class="tbout" id="gxRmtPlanOut" style="max-height:320px"><div class="schempty">部署计划：目标机摸底（bun/git/磁盘/端口）→ 部署三式（git clone / rsync 工作区 / 容器）→ run 队列远程化（org web + 网关模型）→ 回滚。心跳 = ssh echo 往返 min/avg/max。CLI 同款 org remote ping/plan。执行车道（remote exec）走工具环/CLI（process_spawn 门 + 审批在环）。</div></div>
+    </section>
+  </div>
+
+  <div class="spwfoot">治理与扩展面板与 CLI / 工具环同源（lib/dbdiag · gitmerge · rbac · iacscan · plugins · openapi · browser · completion · rename · lsp · debug · collab · cloud · iac 单一实现三端消费）—— v0.5.16 「每个功能都有对应操作页面」的延续。</div>
 </div>
 <div id="voiceScrim" aria-hidden="true"></div>
 <div id="voicePane" role="dialog" aria-modal="true" aria-labelledby="voTitle">
@@ -5233,7 +5508,81 @@ function closeGovex() {
   document.getElementById("govexPane").classList.remove("on");
   document.getElementById("govexScrim").classList.remove("on");
 }
-var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Lsp", "lsp"], ["Git", "git"], ["Collab", "collab"], ["Cloud", "cloud"]];
+// ---- 🛰 远程 Agent 面板（v0.5.18：#133 —— 工具链探测 · 主机档案 · 心跳 · 部署计划，只读四动作） ----
+function gxRemoteProbe() {
+  const out = document.getElementById("gxRemoteOut"), meta = document.getElementById("gxRemoteMeta");
+  out.innerHTML = '<div class="schempty">探测中…（ssh which + -V 探活 + OpenSSH 版本解析；缺席诚实降级）</div>';
+  fetch("/api/govex/remote?action=probe").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    meta.textContent = "ssh/scp/rsync/ssh-keygen + agent 环境";
+    let h = "";
+    const row = function (icon, name, ok, extra) {
+      return '<div class="tbrow">' + icon + " <b>" + name + "</b> " + (ok ? '<span class="spwc">✓ 在场' + (extra ? "（" + esc(String(extra).slice(0, 64)) + "）" : "") + "</span>" : "⬜ 缺席") + "</div>";
+    };
+    h += row("🔐", "ssh", j.ssh.available, j.ssh.available ? (j.open_ssh ? "OpenSSH " + j.open_ssh.major + "." + j.open_ssh.minor : j.ssh.version_raw) : "");
+    h += row("📤", "rsync", j.rsync.available, j.rsync.available ? j.rsync.version : "");
+    h += row("📥", "scp", j.scp.available, j.scp.available ? "rsync 缺席时的降级车道" : "");
+    h += row("🔑", "ssh-keygen", j.ssh_keygen.available, j.ssh_keygen.available ? "密钥生成指引可行" : "");
+    h += '<div class="tbrow">🔁 agent ' + (j.agent_forwarding ? '<span class="spwc">✓ SSH_AUTH_SOCK 在场</span>（BatchMode 下 agent 密钥可用；socket 路径绝不回显）' : "✗ 无 agent 转发环境") + "</div>";
+    if (j.reason) h += '<div class="tbmeta">⚠ ' + esc(String(j.reason).slice(0, 160)) + "</div>";
+    h += '<div class="tbrow" style="margin-top:4px">💡 ' + esc(j.hint) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxRemoteHosts() {
+  const out = document.getElementById("gxRemoteOut"), meta = document.getElementById("gxRemoteMeta");
+  out.innerHTML = '<div class="schempty">读取档案中…</div>';
+  fetch("/api/govex/remote?action=hosts").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    meta.textContent = j.exists ? j.count + " 个主机在册" : "档案未创建";
+    let h = '<div class="tbmeta">' + esc(j.file) + (j.exists ? "" : " —— 缺席 = host 寻址一律拒绝（安全缺省）") + "</div>";
+    if (!(j.hosts || []).length) { h += '<div class="schempty">（空 —— ' + esc(j.note || "创建档案后 host 寻址放行") + "）</div>"; }
+    for (const e of j.hosts || []) {
+      h += '<div class="tbrow">🛰 <b>' + esc(e.name) + "</b> → " + esc(e.user) + "@" + esc(e.host) + ":" + (e.port || 22) + (e.identity ? ' · <span class="tbmeta">key ' + esc(e.identity) + "</span>" : "") + "</div>";
+    }
+    for (const e of j.errors || []) h += '<div class="tbrow">⚠ ' + esc(e) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxRemotePing() {
+  const host = document.getElementById("gxRmtHost").value.trim();
+  const out = document.getElementById("gxRmtPlanOut");
+  if (!host) { out.innerHTML = '<div class="schempty">先输入主机名（须在 remote-hosts.json 档案内 —— 不在档案 = 拒绝不猜默认）</div>'; return; }
+  out.innerHTML = '<div class="schempty">心跳中…（ssh echo 往返计时，缺省 4 轮）</div>';
+  fetch("/api/govex/remote?action=ping&host=" + encodeURIComponent(host)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) {
+      const kindText = { "host-not-found": "host 未在档案（不猜默认）", "tool-absent": "ssh CLI 缺席", refused: "拒连/不可达" };
+      out.innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(kindText[j.kind] || "") + " —— " + esc(String(j.reason || j.error || "").split("\\n")[0].slice(0, 200)) + "</div>";
+      return;
+    }
+    let h = '<div class="tbsym">📡 ' + esc(j.host) + "：" + j.rounds + " 轮 echo 往返（失败 " + j.failures + " 轮）</div>";
+    h += '<div class="tbrow">延迟 min/avg/max = <b>' + j.stats.min + "/" + j.stats.avg + "/" + j.stats.max + "</b> ms" + (j.failures > 0 ? "（部分降级：统计只计成功轮）" : "") + "</div>";
+    h += '<div class="tbmeta">逐轮：' + esc((j.times || []).map(function (t) { return t + "ms"; }).join(" · ")) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxRemotePlan() {
+  const host = document.getElementById("gxRmtHost").value.trim();
+  const mode = document.getElementById("gxRmtPlanMode").value;
+  const out = document.getElementById("gxRmtPlanOut");
+  out.innerHTML = '<div class="schempty">生成计划中…（纯函数 —— 不 spawn 不落盘）</div>';
+  let url = "/api/govex/remote?action=plan&mode=" + encodeURIComponent(mode);
+  if (host) url += "&host=" + encodeURIComponent(host);
+  fetch(url).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    let h = '<div class="tbsym">📋 部署计划（模式 ' + esc(j.mode) + " · 目标 " + esc(j.target) + (j.roster_host ? " · 档案 " + esc(j.roster_host) : "（占位 —— 未在档案实参化）") + "）</div>";
+    for (const ph of j.phases || []) {
+      h += '<div class="tbmeta" style="margin-top:8px">' + esc(ph.title) + "</div>";
+      for (const [i, s] of (ph.steps || []).entries()) {
+        h += '<div class="tbrow">' + (i + 1) + ". <code>" + esc(s.cmd.split("\\n")[0].slice(0, 150)) + "</code></div>";
+        h += '<div class="tbmeta">　# ' + esc(s.note) + (s.expect ? " ▸ " + esc(s.expect) : "") + "</div>";
+      }
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+
+var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Lsp", "lsp"], ["Git", "git"], ["Collab", "collab"], ["Cloud", "cloud"], ["Mobile", "mobile"], ["Iacx", "iacx"], ["Remote", "remote"]];
 function gxTab(sec) {
   for (const [k, id] of GX_TABS) {
     document.getElementById("gxTab" + k).classList.toggle("on", id === sec);
@@ -5746,6 +6095,195 @@ function gxCloudRun(lane) {
     if (so) h += '<pre style="margin:6px 0 0;white-space:pre-wrap;font:11px/1.5 var(--mono)">' + esc(so.slice(0, 6000)) + "</pre>";
     const se = String(j.stderr || "").trim();
     if (se) h += '<div class="tbmeta">（stderr）' + esc(se.slice(0, 1500)) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+// ---- 📱 移动端面板（v0.5.18：#117 —— 三面探测 · 设备清单 · logcat dump · 调试计划，只读动作） ----
+function gxMobileProbe() {
+  const out = document.getElementById("gxMobileOut"), meta = document.getElementById("gxMobileMeta");
+  out.innerHTML = '<div class="schempty">探测中…（adb/aapt/scrcpy/idevice/flutter 五工具 which + 版本探活；缺席诚实降级）</div>';
+  fetch("/api/govex/mobile?action=probe").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    const s = j.summary || {};
+    meta.textContent = j.took_ms + "ms · Android " + (s.androidFace ? "✓" : "✗") + " · APK " + (s.apkFace ? "✓" : "✗") + " · iOS " + (s.iosFace ? "✓" : "✗") + " · 跨端 " + (s.crossFace ? "✓" : "✗");
+    let h = "";
+    const row = function (icon, name, f) {
+      h += '<div class="tbrow">' + icon + " <b>" + name + "</b> " + (f.available ? '<span class="spwc">✓ 在场' + (f.version ? "（" + esc(String(f.version).slice(0, 40)) + "）" : "") + "</span>" : "⬜ 缺席") + (f.reason ? ' · <span class="tbmeta">' + esc(String(f.reason).slice(0, 110)) + "</span>" : "") + "</div>";
+    };
+    row("🤖", "adb", j.adb);
+    row("📦", "aapt", j.aapt);
+    row("📦", "aapt2", j.aapt2);
+    row("🖼", "scrcpy", j.scrcpy);
+    row("🍏", "ideviceinstaller", j.ideviceinstaller);
+    row("🍏", "idevice_id", j.idevice_id);
+    row("🦋", "flutter", j.flutter);
+    h += '<div class="tbrow">SDK 根：' + esc(j.android_home || "未定位（adb 在 PATH 时无需定位）") + "</div>";
+    if (s.facesUp === 0) h += '<div class="tbrow" style="margin-top:4px">⚠ 工具缺席环境 —— 调试计划（下方）是保底车道（纯函数永远可用）</div>';
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxMobileDevices() {
+  const out = document.getElementById("gxMobileOut"), meta = document.getElementById("gxMobileMeta");
+  out.innerHTML = '<div class="schempty">清单中…（adb devices -l · 未授权/offline 是诚实状态非失败）</div>';
+  fetch("/api/govex/mobile?action=devices").then(function (r) { return r.json(); }).then(function (j) {
+    const kindText = { "tool-absent": "adb CLI 缺席（安装指引见探测）", "no-device": "无设备", unauthorized: "未授权", "multi-device": "多设备", timeout: "超时", failed: "执行失败" };
+    if (!j.ok) {
+      out.innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(kindText[j.kind] || "") + " —— " + esc(String(j.reason || j.error || "").split("\\n")[0].slice(0, 200)) + "</div>";
+      return;
+    }
+    meta.textContent = (j.devices || []).length + " 台 · 就绪 " + (j.ready ?? 0);
+    let h = '<div class="tbsym">📱 Android 设备（' + (j.devices || []).length + " 台 · 就绪 " + (j.ready ?? 0) + "）</div>";
+    for (const d of j.devices || []) {
+      const stateCls = d.state === "device" ? "spwc" : "tbmeta";
+      h += '<div class="tbrow"><b>' + esc(d.serial) + '</b> <span class="' + stateCls + '">' + esc(d.state) + "</span> " + esc([d.model, d.product, d.device].filter(Boolean).join(" · ") || "（无 -l 描述 —— 未授权/离线常见）") + (d.transport ? ' · <span class="tbmeta">' + esc(d.transport) + "</span>" : "") + "</div>";
+    }
+    if (!(j.devices || []).length) h += '<div class="schempty">（' + esc(String(j.reason || "无设备连接").slice(0, 200)) + "）</div>";
+    const ios = j.ios || {};
+    h += '<div class="tbmeta" style="margin-top:6px">🍏 iOS 面：' + esc(String(ios.note || "").slice(0, 160)) + "</div>";
+    for (const u of ios.udids || []) h += '<div class="tbrow">　' + esc(u) + "</div>";
+    h += '<div class="tbmeta">argv：' + esc((j.argv || []).join(" ")) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxMobileLogcat() {
+  const out = document.getElementById("gxMobLogcatOut");
+  const tag = document.getElementById("gxMobTag").value.trim();
+  const lines = document.getElementById("gxMobLines").value.trim();
+  let url = "/api/govex/mobile?action=logcat";
+  if (tag) url += "&tag=" + encodeURIComponent(tag);
+  if (lines) url += "&lines=" + encodeURIComponent(lines);
+  out.innerHTML = '<div class="schempty">抓取中…（adb logcat -d 快照 · 五元组解析）</div>';
+  fetch(url).then(function (r) { return r.json(); }).then(function (j) {
+    const kindText = { "tool-absent": "adb CLI 缺席", "no-device": "无设备连接", unauthorized: "设备未授权", "multi-device": "多设备未指定 serial", timeout: "超时", failed: "执行失败" };
+    if (!j.ok) {
+      out.innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(kindText[j.kind] || "") + " —— " + esc(String(j.reason || j.error || "").split("\\n")[0].slice(0, 200)) + "</div>";
+      return;
+    }
+    let h = '<div class="tbsym">📜 logcat dump（' + (j.count ?? 0) + " 条 · 未匹配 " + (j.skipped ?? 0) + (j.truncated ? " · 截断" : "") + "）</div>";
+    h += '<div class="tbmeta">argv：' + esc((j.argv || []).join(" ")) + "</div>";
+    for (const e of (j.entries || []).slice(-25)) {
+      h += '<div class="tbrow"><span class="tbmeta">' + esc(e.time) + "</span>  " + String(e.pid).padStart(6) + "  " + esc(e.level) + " <b>" + esc(e.tag) + "</b>: " + esc(String(e.message).slice(0, 120)) + "</div>";
+    }
+    if (!(j.entries || []).length) h += '<div class="schempty">（空 —— ' + esc(String(j.reason || "无匹配日志行").slice(0, 160)) + "）</div>";
+    else if ((j.entries || []).length > 25) h += '<div class="tbmeta">…（仅示尾 25 条 / 共 ' + j.entries.length + " 条）</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxMobilePlan() {
+  const plat = document.getElementById("gxMobPlat").value;
+  const sym = document.getElementById("gxMobSym").value;
+  const out = document.getElementById("gxMobPlanOut");
+  out.innerHTML = '<div class="schempty">生成中…（纯函数 —— 零外部依赖永远可用）</div>';
+  fetch("/api/govex/mobile?action=plan&platform=" + encodeURIComponent(plat) + "&symptom=" + encodeURIComponent(sym)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    let h = '<div class="tbsym">📋 调试计划（平台 ' + esc(j.platform) + " · 症状 " + esc(j.symptom) + " · " + (j.steps || []).length + " 步）</div>";
+    for (const s of j.steps || []) {
+      h += '<div class="tbrow" style="margin-top:6px">' + s.step + ". <b>" + esc(s.title) + "</b>" + (s.cmd ? ' — <code>' + esc(String(s.cmd).slice(0, 140)) + "</code>" : "") + "</div>";
+      h += '<div class="tbmeta">　▸ 预期：' + esc(s.expect) + "</div>";
+      h += '<div class="tbmeta">　↩ 降级：' + esc(s.degrade) + "</div>";
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxMobileSelftest() {
+  const out = document.getElementById("gxMobileOut"), meta = document.getElementById("gxMobileMeta");
+  out.innerHTML = '<div class="schempty">自检中…（解析器/计划器/魔数/socket 提取 —— 纯内存）</div>';
+  fetch("/api/govex/mobile?action=selftest").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok && !j.checks) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    meta.textContent = j.passed + "/" + j.total + " 通过";
+    let h = '<div class="tbsym">🧪 自检 ' + j.passed + "/" + j.total + "</div>";
+    for (const c of j.checks || []) h += '<div class="tbrow">' + (c.ok ? "✓" : "✗") + " " + esc(c.name) + (c.detail ? ' <span class="tbmeta">（' + esc(c.detail) + "）</span>" : "") + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+// ---- ⚒ IaC 深度区块（v0.5.18 · #44 —— 与 CLI org iac / 工具环 iac_* 同源） ----
+// XSS 纪律：全部动态内容经 esc() 后进 innerHTML（与既有面板同口径）。
+function gxIacFileOf() {
+  return document.getElementById("gxIacFile").value.trim();
+}
+function gxIacRenderBlocks(blocks, depth) {
+  let h = "";
+  for (const b of blocks || []) {
+    h += '<div class="tbrow" style="padding-left:' + (8 + (depth || 0) * 20) + 'px"><b>' + esc(b.type) + "</b>" +
+      (b.labels || []).map(function (l) { return ' <span class="tbmeta">"' + esc(l) + '"</span>'; }).join("") +
+      ' · <span class="tbmeta">第 ' + b.line + ' 行 · ' + (b.attrs || []).length + ' 属性（' + esc((b.attrs || []).join(", ").slice(0, 80)) + '）</span></div>';
+    if ((b.blocks || []).length) h += gxIacRenderBlocks(b.blocks, (depth || 0) + 1);
+  }
+  return h;
+}
+function gxIacParse() {
+  const file = gxIacFileOf();
+  const out = document.getElementById("gxIacOut"), meta = document.getElementById("gxIacMeta");
+  if (!file) { out.innerHTML = '<div class="schempty">先输入 .tf 文件路径（工作区相对）</div>'; return; }
+  out.innerHTML = '<div class="schempty">解析中…（内置 HCL 子集解析器）</div>';
+  fetch("/api/govex/iac?action=parse&file=" + encodeURIComponent(file)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(j.reason || "") + "</div>"; return; }
+    meta.textContent = j.blocks + " 顶层块 · " + j.took_ms + "ms · 车道 " + j.lane;
+    let h = '<div class="tbsym">🧱 ' + esc(j.file) + " —— " + j.blocks + " 顶层块（AST 摘要，嵌套块缩进展示）</div>";
+    h += gxIacRenderBlocks(j.ast, 0);
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxIacPlan() {
+  const file = gxIacFileOf();
+  const out = document.getElementById("gxIacOut"), meta = document.getElementById("gxIacMeta");
+  if (!file) { out.innerHTML = '<div class="schempty">先输入 .tf 文件路径</div>'; return; }
+  out.innerHTML = '<div class="schempty">组织计划中…（依赖图 → 拓扑序 → 人读 Plan）</div>';
+  fetch("/api/govex/iac?action=plan&file=" + encodeURIComponent(file)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.reason || "") + (j.cycles ? "（环：" + esc((j.cycles[0] || []).join(" → ")) + "）" : "") + "</div>"; return; }
+    const s = j.summary || {};
+    meta.textContent = "create " + s.resources + " · data " + s.dataSources + " · vars " + s.variables + " · 车道 " + j.lane;
+    let h = '<pre style="margin:0;white-space:pre-wrap;font:11px/1.5 var(--mono)">' + esc(String(j.text || "").slice(0, 12000)) + "</pre>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxIacGraph() {
+  const file = gxIacFileOf();
+  const out = document.getElementById("gxIacOut"), meta = document.getElementById("gxIacMeta");
+  if (!file) { out.innerHTML = '<div class="schempty">先输入 .tf 文件路径</div>'; return; }
+  out.innerHTML = '<div class="schempty">建图中…（引用级分析：var/local/data/module/资源地址/depends_on）</div>';
+  fetch("/api/govex/iac?action=graph&file=" + encodeURIComponent(file)).then(function (r) { return r.json(); }).then(function (j) {
+    meta.textContent = (j.nodes || []).length + " 节点 · " + (j.edges || []).length + " 边";
+    let h = "";
+    if (!j.ok) {
+      h = '<div class="tbsym">✗ 依赖图有环 —— ' + esc(j.reason || "") + "</div>";
+      for (const c of (j.cycles || []).slice(0, 3)) h += '<div class="tbrow">环：' + esc(c.join(" → ")) + "</div>";
+    } else {
+      h = '<div class="tbsym">🕸 拓扑序（被依赖在前）：' + esc((j.order || []).join(" → ")) + "</div>";
+    }
+    for (const e of (j.edges || []).slice(0, 100)) h += '<div class="tbrow">' + esc(e.from) + " → " + esc(e.to) + ' <span class="tbmeta">（' + esc(e.via) + " · 第 " + e.line + " 行）</span></div>";
+    for (const u of (j.undeclared_refs || []).slice(0, 20)) h += '<div class="tbrow">⚠ ' + esc(u.from) + " → " + esc(u.via) + "（未声明引用 · 第 " + u.line + " 行）</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxIacProbe() {
+  const out = document.getElementById("gxIacProbeOut");
+  out.innerHTML = '<div class="schempty">探测中…（which + version 探活，各 5s 硬超时）</div>';
+  fetch("/api/govex/iac?action=probe").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error || "") + "</div>"; return; }
+    let h = '<div class="tbsym">🔎 ' + (j.lane === "cli" ? "外部 CLI 车道可用 + 内置车道恒在" : "CLI 全缺席 —— 内置静态车道为主车道（诚实降级）") + " · " + j.took_ms + "ms</div>";
+    for (const [name, face] of [["terraform", j.terraform], ["tofu", j.tofu], ["tflint", j.tflint]]) {
+      h += '<div class="tbrow">' + (face.available ? "✓" : "⬜") + " <b>" + name + "</b>" + (face.available ? " v" + esc(face.version || "?") : ' <span class="tbmeta">' + esc(String(face.reason || "").slice(0, 110)) + "</span>") + "</div>";
+    }
+    h += '<div class="tbmeta" style="margin-top:6px">💡 ' + esc(j.suggestion) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxIacGenerate() {
+  const raw = document.getElementById("gxIacManifest").value.trim();
+  const out = document.getElementById("gxIacGenOut");
+  if (!raw) { out.innerHTML = '<div class="schempty">先输入 manifest JSON（{"provider":"aws","resources":[…]}）</div>'; return; }
+  out.innerHTML = '<div class="schempty">生成中…（provider 块 + variable 提取 + resource 块 + output）</div>';
+  fetch("/api/govex/iac?action=generate&manifest=" + encodeURIComponent(raw)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) {
+      let h = '<div class="tbsym">✗ manifest 校验未通过：</div>';
+      for (const e of j.errors || []) h += '<div class="tbrow">· ' + esc(e) + "</div>";
+      out.innerHTML = h;
+      return;
+    }
+    let h = '<div class="tbsym">⚙ ' + esc(j.provider) + " · 资源 " + j.resources + " · 变量 " + (j.variables || []).length + "（" + esc((j.variables || []).join(", ")) + "）· 往返自解析 " + (j.round_trip && j.round_trip.ok ? "✓" : "✗") + "</div>";
+    for (const w of j.warnings || []) h += '<div class="tbrow">⚠ ' + esc(w) + "</div>";
+    h += '<pre style="margin:6px 0 0;white-space:pre-wrap;font:11px/1.5 var(--mono)">' + esc(j.tf) + "</pre>";
     out.innerHTML = h;
   }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
 }

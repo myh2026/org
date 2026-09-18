@@ -86,7 +86,7 @@
 | 41 | 前端/UI 组件生成 | 🟡 | 同 40（文本生成可产出；无预览/验证环） |
 | 42 | API/接口契约设计 | ✅ | 信封契约（TaskSpec/StatusReport/Verdict 类型化接口 + 类型检查闸门） |
 | 43 | 数据库 Schema/迁移 | ✅ | **v0.5.15** lib/db.ts（bun:sqlite 零依赖）：`dbSchema`（表/列/索引/视图/行数抽查）+ `dbApplyMigration` 版本化迁移（_org_migrations 账本 + 伴车 .migrations.json 双写 · dry_run 事务回滚预演 · 坏 SQL 整体回滚 · 冲突诊断）。三端：CLI `org db schema/query/migrate/history` · 工具环 `db_schema/db_query/db_migrate`（写半环审批在环）· Web 🗄 工具箱；tests/db 24 例 |
-| 44 | IaC/基础设施代码 | ⬜ | 未做 |
+| 44 | IaC/基础设施代码 | ✅ | **v0.5.18 深度实现**：lib/iac.ts（与 #147 iacscan 扫描面互补的解析/规划/生成层）—— 内置 HCL 子集解析器（block/label/属性/插值/heredoc/注释，行号级诚实报错；零依赖主车道）+ 资源依赖图（拓扑序/环检测/未声明引用警告 + locals 字面量降粒度）+ 人读 Plan（"to create N resources" 风格，与真 terraform plan 差异诚实标注）+ JSON manifest 逆向生成 .tf（iacParse 往返自洽）；外部车道 terraform/tofu/tflint 探测（在场 validate -json 只读，缺席→内置车道为主车道）。三端：CLI `org iac parse/plan/graph/generate/probe/validate` · 工具环 `iac_parse/iac_plan/iac_graph/iac_generate`（全只读）· Web ⚒ 面板；tests/iac 63 例 |
 | 45 | 注释/文档生成 | ✅ | run 报告（report.md/memory.md/评分卡）+ hsl-mirror 围栏文档 + CHANGELOG 叙事 |
 
 ## 四、编辑与文件操作（46–60）
@@ -184,7 +184,7 @@
 | 114 | 依赖冲突诊断 | ✅ | vendored 漂移守卫（版本比对 + 浅克隆）+ 锁文件纪律 |
 | 115 | 根因分析与验证 | ✅ | 复发计数（跨运行 recurrence.json）→ 补丁提案 → 金丝雀验证闭环 |
 | 116 | 浏览器 DevTools | 🟡 | **v0.5.16 交付可本地化半面**：DOM 快照（标题/正文/链接/图片清单）+ 整页截图 + 引擎探测（lib/browser.ts 多引擎降级，与 #30 同源）；CLI/工具环/Web 三端可用。**console 面板/网络面板/DOM 交互（点击/输入）未做** —— 需要常驻会话型引擎（CDP 协议），是路线图；行按诚实口径定 🟡 |
-| 117 | 移动端调试 | ⬜ | 未做 |
+| 117 | 移动端调试 | ✅ | **v0.5.18**：lib/mobile.ts —— 多重优雅降级全链：devices 三层（adb 缺席→无设备→未授权，devices -l 多设备/offline 诚实入列 + iOS idevice 面）/ logcat 五元组 dump（-d 快照，tag/级别/包名三重过滤）/ forward 四层（adb→设备→/proc/net/unix socket 发现→CDP /json 页面清单，本地 9222 探测）/ apk 两层（aapt badging→PK 魔数）/ plan 纯函数保底（平台×症状矩阵步骤化计划，零外部依赖永远可用）+ mobileSelfTest 自检。三端：CLI `org mobile probe/devices/logcat/forward/apk/plan/self-test` · 工具环 `mobile_devices/mobile_logcat/mobile_plan`（全只读）· Web 📱 面板；tests/mobile 60 例。真机实测是诚实边界（沙箱无真机；外部车道全用假脚本锁定） |
 | 118 | 分布式追踪 | 🟡 | trace 概念在事件 seq/ts 全链贯通；无 APM 接入 |
 | 119 | 监控告警关联 | 🟡 | 漂移告警 + 预算水位 + 通知中心；外部监控未接 |
 | 120 | 故障复现/最小化 | ✅ | scripted 剧本即「可复现的模型响应录制」+ 故障注入第五类 slow/corrupt |
@@ -205,7 +205,7 @@
 | 130 | 工具注册/发现 | ✅ | 工具环注册表 + registry manifest + adapter 登记 |
 | 131 | SDK/API Server | ✅ | cliMain 可编程入口 + startWebServer({port:0}) + $host.dhv 嵌入执行面 |
 | 132 | 插件/规则市场 | ✅ | **v0.5.16** lib/plugins.ts：manifest 契约（name/version/description/entry/permissions）+ **事务性安装**（staging 中转 → 校验 → 同文件系统原子 rename，任何失败整体清理绝不留半成品）+ git 源浅克隆（60s 硬超时，缺席诚实降级 tool-absent）+ 重名冲突双查 + remove/validate（纯只读预览）。**permissions 字段（"tool:shell_run" 形态）与 RBAC 命名空间联动**。诚实边界：只装不执行（entry 仅验存在），插件执行面是路线图。三端：CLI `org plugin list/install/remove/validate` · 工具环 `plugin_list/plugin_install/plugin_remove`（写半环审批在环）· Web 🧩 面板；tests/plugins 15 例 |
-| 133 | 远程 Agent/云执行 | ⬜ | 未做（沙盒本地执行） |
+| 133 | 远程 Agent/云执行 | ✅ | **v0.5.18 会话/部署/计划层**（与 #68 cloud_ssh 单命令执行互补）：lib/remote.ts —— probeRemote 四工具探测 + remote-hosts.json 主机档案（host/user/port/identity 路径——私钥内容 PEM 头混入拒绝 + password 字段拒绝；host 不在档案拒绝不猜默认）+ remoteExec 会话级执行（白名单默认只读九命令 + 元字符拒 + allow_full 显式 + 三类诊断：超时/拒连/鉴权含指纹漂移）+ remoteSync rsync→scp→指引三层降级（local 过 pathjail）+ remotePing 往返三统计 + remoteDeployPlan 四模式（摸底/git/rsync/容器三式/run 队列远程化+回滚）。三端：CLI `org remote probe/hosts/exec/sync/ping/plan` · 工具环 `remote_probe/remote_plan/remote_ping`（只读）+ `remote_exec`（process_spawn 门+审批在环）· Web 🛰 面板；tests/remote 53 例。无真远程机实测是诚实边界（参数构造/输出解析全锁定） |
 | 134 | OpenAPI/GraphQL/gRPC | ✅ | **v0.5.16 OpenAPI 半面**：lib/openapi.ts `parseOpenApiText/File`（OpenAPI 3.x / Swagger 2.0 双识别；2.0 的 basePath/schemes 合成 servers 语义对齐；路径级公共参数并入操作级按 in:name 覆盖；$ref 参数不展开如实标注）+ `suggestToolName`（api_<operationId> 清洗，工具环命名建议）。诚实边界：**GraphQL/gRPC 未做**（路线图）；YAML 不写半吊子 parser（错误附 python3 yaml→JSON 转换指引）；spec 帽 1MB。三端：CLI `org openapi` · 工具环 `openapi_parse`（只读）· Web 🔌 上传/粘贴解析；tests/openapi 16 例 |
 | 135 | 评测/基准平台 | ✅ | **评分卡**（证据归因 + 客观/裁判档权重 + 漂移基线）+ fixture-miner 出题 + 诗歌擂台反哺 |
 
@@ -264,11 +264,22 @@
 | E24 成本限额/多模型 | ✅ | 预算水位 + 21 车道 + key 池轮换 |
 | E25 评测/配置管理 | ✅ | 评分卡归因 + org config v3 |
 
-**统计（v0.5.17 LSP/DAP+协作+云生态三簇交付后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 115 · 🟡 32 · ⬜ 3；专家 25 项 → ✅ 24 · 🟡 1 · ⬜ 0。
+**统计（v0.5.18 终局三 ⬜ 清零批后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 118 · 🟡 32 · ⬜ 0；专家 25 项 → ✅ 24 · 🟡 1 · ⬜ 0。
 
 > v0.5.17 LSP/DAP 深度簇（#26/#108 两项 ⬜→✅）：lib/lsp.ts + lib/debug.ts 单一实现三端消费 —— JSON-RPC 2.0 分帧层（LSP 与 DAP 共用：粘包/半包/多字节字符字节边界精确）+ 构造器全家桶（initialize→initialized→shutdown→exit 生命周期）+ 内置符号索引车道（definition/references/hover，0 基 uri/range + 1 基人读双形）+ 外部 server 车道（detectLspServers 七家 which 探测 + spawnLspServer/LspClient 真协议对话，echo 型假 server 测试锁定全生命周期）+ 断点建议器（符号级入口/启发式级分支/循环/return 前，confidence 双级 + reason）+ DAP 构造器四件套 + 调试计划（步骤化 + 协议就绪消息序列）。CLI +2 命令（org lsp 五子命令 · org debug 三子命令 + breakpoints 别名）、工具环 +6 工具（全只读，native 块动态 import 与 lib 同源，file 过 pathjail）、Web +2 端点（GET /api/govex/lsp 五动作 · GET /api/govex/debug 三动作）+ 🐞 面板 Tab。诚实边界：真编辑器级 LSP 会话（didOpen/didChange 增量同步）与真 debug adapter attach（node --inspect/debugpy/lldb-dap）是路线图；tests/lsp 41 例（分帧/内置车道/假 server 全生命周期/建议器/DAP/jail/CLI+Web+工具环三端冒烟）。
 
 > v0.5.17 云生态簇（#67/#68/#72/#74 四项 ⬜→✅）：lib/cloud.ts 单一实现三端消费 —— 探测（docker/ssh/kubectl/terraform/10 家云 CLI，各带硬超时）→ 白名单真实车道（docker 16 子命令/kubectl 15 子命令 + 数组参数零 shell 面 + 拒绝先于 spawn）→ 模板/计划降级车道（Dockerfile 四型/compose/K8s manifest 五族/terraform 骨架/ssh-config + dockerPlan 五意图）→ 诚实拒绝（host 白名单/路径监狱）。CLI +1 命令（org cloud 十六子命令）、工具环 +6 工具（cloud_probe/cloud_dockerfile/cloud_clis 只读；cloud_docker/cloud_ssh/cloud_k8s 执行车道 process_spawn 门+审批）、Web +2 端点（GET/POST /api/govex/cloud）+ ☁ 面板 Tab（探测全景卡片 + 模板生成器 + 白名单执行）。诚实边界：沙箱无 docker/kubectl/ssh/云 CLI，降级车道是主车道；真实车道代码路径完整但无真实守护进程/集群/远程主机可实测（#68/#72 附诚实注）。
+> v0.5.18 终局三 ⬜ 清零簇（#44/#117/#133 三项 ⬜→✅，主 Agent 矩阵 ⬜ 归零）：三簇各一
+  个单一实现三端消费 —— lib/iac.ts（HCL 子集解析器主车道 + 依赖图/拓扑/环检测 + 人读 Plan +
+  manifest 逆向生成往返自洽；terraform/tofu/tflint 外部探测，在场 validate 只读）·
+  lib/mobile.ts（devices/logcat/forward/apk 四面多级降级 + plan 纯函数保底 + 自检）·
+  lib/remote.ts（remote-hosts.json 档案门 + 白名单只读 exec + rsync→scp→指引三层 sync +
+  ping 三统计 + 部署计划四式；与 cloud_ssh 单命令执行互补的会话层）。CLI +3 命令组
+  （org iac/org mobile/org remote）、工具环 +11 工具（iac×4 + mobile×3 只读；remote×3
+  只读 + remote_exec 走 process_spawn 门+审批在环）、Web +3 端点（GET /api/govex/iac ·
+  /mobile · /remote）+ ⚒/📱/🛰 三面板 Tab。诚实边界：沙箱无真机/真远程机/terraform——
+  外部车道全用假脚本注入锁定（参数构造/输出解析/降级链），纯函数保底车道永远可用。tests
+  iac 63 + mobile 60 + remote 53 例（三簇集成合并后 304 回归全绿）。
 
 > v0.5.17 协作簇首项（#87 团队共享会话/评论 ⬜→✅）：lib/collab.ts 单一实现三端消费 —— append-only JSONL 团队线程 + 回复树 + @mention + 身份层 + 会话账本桥（只镜像不改写）；CLI +1 命令（org collab 九子命令）、工具环 +5 工具、Web +2 端点（GET/POST /api/govex/collab）+ 👥 面板 Tab。诚实边界：本地文件协议，多进程强并发不在面内（单机协作场景）。
 
@@ -288,8 +299,8 @@
 2. **专家即流程**：25 项专家能力中 21 项落地的方式是**结构化**（graph SOP + 闸门 +
    资产沉淀），对照主流「系统提示词 + 工具白名单」的人设式专家——这是 ORG 的
    核心创新点（论文第 4 章主材料）。
-3. **诚实边界**：未做项经 v0.5.15–0.5.17 四批收敛至 3 项（#44 IaC 代码生成、#117 移动端
-   调试、#133 远程 Agent 云执行）——补全/重命名/RBAC/LSP 协议层/断点建议/云生态门控/共享
-   会话已逐一落地；🟡32 是「诚实半面」口径（如 #116 DevTools 交付 DOM 快照面、console/
-   网络面板是路线图）。每项剩余边界都有明确的路线图挂点（上游 IDE、native 逃生舱、网关
-   扩展），这是「知道边界在哪」的工程证据而非缺点。
+3. **诚实边界**：⬜ 未做项经 v0.5.15–0.5.18 五批**清零**（终局三 ⬜：#44 IaC 深度、#117
+   移动端调试、#133 远程 Agent 于 v0.5.18 落地）——补全/重命名/RBAC/LSP 协议层/断点建议/
+   云生态门控/共享会话/HCL 解析/ADB 车道/SSH 会话层已逐一交付；🟡32 是「诚实半面」口径
+   （如 #116 DevTools 交付 DOM 快照面、console/网络面板是路线图）。每项剩余边界都有明确
+   的路线图挂点（上游 IDE、native 逃生舱、网关扩展），这是「知道边界在哪」的工程证据而非缺点。

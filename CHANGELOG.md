@@ -1,5 +1,71 @@
 # CHANGELOG
 
+## v0.5.18（2026-09-19）—— 终局三 ⬜ 清零批：IaC 深度 + 移动端调试 + 远程 Agent（⬜3→⬜0，✅118/150）
+
+v0.5.17 三簇批 CI 全绿基线之上，能力矩阵**终局三 ⬜ 清零**（子智能体 15-A/15-B/15-C
+三 worktree 并行，主 Agent 集成收尾）：3 项 ⬜→✅（#44/#117/#133），主表 **✅ 118/150
+（🟡32 · ⬜0）**——150 项能力矩阵未做项清零。测试 977 → **1093**（+116：iac 63 ·
+mobile 60 · remote 53，三簇共享文件合并边界修复后集成回归 304 全绿）。
+
+### 一、IaC 深度实现簇（#44）—— lib/iac.ts 1786 行（与 #147 iacscan 扫描面互补）
+
+- **内置 HCL 子集解析器**（零依赖主车道）：block 九族（terraform/provider/resource/
+  data/variable/output/locals/module）/引号与裸 label/基础类型/list/嵌套 object（尾逗号
+  容忍）/**heredoc**（<< 与 <<- 公共缩进剥除 + 体内插值）/插值表达式（traversal/函数
+  调用/索引/splat（suffix 属性链保持顶层）/一元二元三元）/$${ 转义/注释三形态；行号级
+  诚实报错。
+- **parseValue 标量统一走 parseExpr 车道**（v0.5.18.1 修复）：count = var.x + 1 /
+  三元等续接不再被「赋值后须换行」截断；表达式域 boolv/nullv 字面量折叠回 IacValue 域。
+- **资源依赖图**：iacGraph（var/local/data/module/资源地址/depends_on 双来源去重边 +
+  Kahn 拓扑序 + DFS 环检测（最多报 3 条）+ 未声明引用诚实警告 + locals 字面量属性
+  降粒度不入图）。**人读 Plan**：to create N resources 风格 + 依赖序 + 与真
+  terraform plan 差异五条诚实尾注。**manifest 逆向生成**：iacGenerate（provider +
+  variable 提取（$ref 自动变量）+ resource + output），iacParse 往返自洽。
+- **外部车道**：probeIac（terraform/tofu/tflint 探测）+ iacValidate（在场
+  terraform validate -json 只读；缺席→内置车道为主车道）。
+- 三端：CLI org iac 六子命令 · 工具环 iac_parse/plan/graph/generate（全只读）·
+  Web ⚒ 面板（GET /api/govex/iac 五动作）。
+
+### 二、移动端调试簇（#117）—— lib/mobile.ts（多重优雅降级全链）
+
+- **四层降级**：devices（adb 缺席→无设备→未授权；devices -l 五字段解析 + usb:1-1
+  transport 保留 + iOS idevice 面）/ logcat（-d 快照五元组：时间/进程/级别/tag/消息；
+  -s TAG 服务端过滤 + pidof 包名过滤；行数 1..2000 钳制）/ forward（adb→设备→
+  /proc/net/unix socket 发现→CDP /json 页面清单，本地端口可达性探测）/ apk（aapt
+  badging 解析→PK 魔数降级）。
+- **plan 纯函数保底**：平台（android/ios/both）× 症状（crash/白屏/network/性能/
+  构建/安装/webview，CJK 关键词归一）矩阵 → 步骤化计划（每步可粘贴命令 + 预期 +
+  降级指引）——零外部依赖永远可用。install/uninstall 只出现在计划文本里，任何执行
+  面全只读。**mobileSelfTest 8/8 自检**。
+- 三端：CLI org mobile 七子命令 · 工具环 mobile_devices/logcat/plan（全只读）·
+  Web 📱 面板（GET /api/govex/mobile 四动作 + selftest）。
+
+### 三、远程 Agent 簇（#133）—— lib/remote.ts（会话/部署/计划层，与 #68 cloud_ssh 互补）
+
+- **主机档案门**：remote-hosts.json（name→host/user/port/identity 路径；**私钥内容
+  PEM 头混入拒绝 + password 字段拒绝**；host 不在档案拒绝不猜默认）。
+- **remoteExec 会话级执行**：ssh -o BatchMode=yes -o ConnectTimeout=8 -o
+  StrictHostKeyChecking=accept-new 构造 + 白名单默认只读九命令 + 元字符拒 +
+  allow_full 显式 + 三类诊断（超时/拒连/鉴权含指纹漂移）。
+- **remoteSync** rsync→scp→指引三层降级（local 过 pathjail）；**remotePing** ssh
+  echo 往返三统计（min/avg/max，部分降级只计成功轮）；**remoteDeployPlan** 四模式
+  （摸底/git/rsync/容器三式 + run 队列远程化（org web + 网关模型）+ 回滚，纯函数保底）。
+- 三端：CLI org remote 六子命令 · 工具环 remote_probe/plan/ping（只读）+
+  remote_exec（**process_spawn 门 + 审批在环**——capability 映射缺失曾致合并版
+  门控旁路 120s 卡死，已修）· Web 🛰 面板（GET /api/govex/remote 四动作）。
+
+### 四、集成与流程沉淀
+
+- **三 worktree 并行**（wt-iac/wt-mobile/wt-remote 各挂 feat 分支）——子智能体真
+  并行不踩工作区；15-A 超时后产物修复收尾（7 处实现/测试不收敛点：parseValue 表达式
+  车道/splat 顶层/未收口报错含 labels/locals 降粒度/CLI 措辞/heredoc 期望自洽/web
+  内联转义）。
+- **合并边界修复**：三共享文件（cli/org.ts · hsl/pool/tools.hsl · web/entry.ts）
+  三轮合并的**双侧保留边界截断**系统性问题——干净重建策略（mobile 侧完整版 + iac
+  增量 apply）+ 函数区整体重建 + 能力映射（process_spawn 门）补齐。
+- 版本 0.5.18 四件套对齐；capabilities.md #44/#117/#133 ⬜→✅ + 统计行 ✅118/⬜0 +
+  v0.5.18 交付段 + 论文叙事第 3 点「未做项清零」更新。
+
 ## v0.5.17（2026-09-19）—— 三簇主攻批：LSP/DAP 深度 + 云生态 + 团队协作（⬜10→⬜3）
 
 v0.5.16.1 CI 全绿基线之上，能力矩阵剩余 ⬜ 项三簇并进（子智能体 14-A/14-B/14-C

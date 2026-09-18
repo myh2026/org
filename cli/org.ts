@@ -52,6 +52,9 @@ import { dbDiagnose, DBDIAG_LIMITS } from "../lib/dbdiag.ts"; // v0.5.16 数据�
 import { gitMergeState, gitMerge, gitRebase, GIT_LIMITS } from "../lib/gitmerge.ts"; // v0.5.16 merge/rebase 安全操作（#80）
 import { loadRbac, rbacCheck, rbacRoles, rbacActions, DEFAULT_RBAC_POLICY, RBAC_POLICY_FILE } from "../lib/rbac.ts"; // v0.5.16 RBAC（#149）
 import { scanIac, IAC_RULES } from "../lib/iacscan.ts"; // v0.5.16 容器/IaC 扫描（#147）
+import { iacParseFile, iacGraph, iacPlan, iacGenerate, probeIac, iacValidate, iacSelfTest,
+         type IacBlock } from "../lib/iac.ts"; // v0.5.18 IaC 深度实现层（#44：解析/图/计划/生成 —— 与 iacscan 扫描面互补）
+import { resolveInWorkspace, inWorkspace } from "../lib/pathjail.ts"; // 工作区监狱（v0.5.16.1 跨平台比较形单点）
 import { pluginList, pluginInstall, pluginRemove, pluginValidate, gitAvailable, PLUGINS_DIR_REL } from "../lib/plugins.ts"; // v0.5.16 插件市场（#132）
 import { parseOpenApiFile, suggestToolName, OPENAPI_MAX_BYTES } from "../lib/openapi.ts"; // v0.5.16 OpenAPI 解析（#134）
 import { browserEngines, browserSnapshot, browserScreenshot } from "../lib/browser.ts"; // v0.5.16 浏览器 DOM 快照/截图（#116/#30）
@@ -66,9 +69,18 @@ import { lspDefinition, lspReferences, lspHover, detectLspServers, protocolSelfT
 import { suggestBreakpoints, debugPlan, dapSelfTest } from "../lib/debug.ts"; // v0.5.17 断点/调试建议（#108）
 import { latestSession } from "../lib/sessions.ts"; // v0.5.17：collab bridge 缺省会话（只读复用会话账本协议）
 import {
+  probeRemote, loadRemoteHosts, saveRemoteHosts, findRemoteHost, REMOTE_HOSTS_FILE, REMOTE_HOSTS_GUIDANCE,
+  remoteExec, remoteSync, remotePing, remoteDeployPlan, REMOTE_DEPLOY_MODES, remoteSelfTest,
+  REMOTE_READONLY_COMMANDS, type RemoteRunResult,
+} from "../lib/remote.ts"; // v0.5.18 远程 Agent 簇（#133 —— 会话/部署/计划层，与 cloud_ssh 单命令执行互补）
+import {
   currentUser, setUser, postThread, commentOn, listThreads, threadFeed, flattenThread,
   collaborators, collabSummary, bridgeSession, COLLAB_DIR_REL,
 } from "../lib/collab.ts"; // v0.5.17 团队协作层（#87 团队共享会话/评论）
+import {
+  probeMobile, mobileDevices, mobileLogcat, mobileForward, mobileApkInfo, mobileDebugPlan, mobileSelfTest,
+  MOBILE_PLAN_PLATFORMS, MOBILE_SYMPTOMS, LOGCAT_LINES_DEFAULT, LOGCAT_LINES_MAX, LOGCAT_LEVELS,
+} from "../lib/mobile.ts"; // v0.5.18 移动端调试统一模块（#117 —— 与 iacscan #147 的扫描面互补）
 import { listApprovals, decideApproval, clearGranted } from "../lib/approvals.ts";
 import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
@@ -3205,6 +3217,492 @@ async function cmdCloud(a: Args): Promise<number> {
   return 2;
 }
 
+// ---- org iac：IaC 深度实现入口（v0.5.18 · #44）------------------------------
+// 与 org iacscan（#147 静态安全扫描）互补：这里是「解析/规划/生成」面。
+// 内置 HCL 子集解析器是主车道（恒在）；terraform/tofu 在场时 validate 外部
+// 车道可用（只读）；缺席 → 诚实降级，绝不假装跑过 terraform。
+
+/** 解析结果渲染：块清单（类型 + label + 属性名，嵌套块缩进）。 */
+function renderIacBlocks(blocks: IacBlock[], depth = 0): string[] {
+  const out: string[] = [];
+  for (const b of blocks) {
+    const label = b.labels.length > 0 ? ` ${b.labels.map((l) => (/["\s]/.test(l) ? `"${l}"` : l)).join(" ")}` : "";
+    const attrs = b.attrs.length > 0 ? ` [${b.attrs.map((a) => a.name).join(", ")}]` : "";
+    out.push(`${"  ".repeat(depth + 1)}${b.type}${label}${attrs}`);
+    if (b.blocks.length > 0) out.push(...renderIacBlocks(b.blocks, depth + 1));
+  }
+  return out;
+}
+
+/** org iac [parse|plan|graph|generate|probe|validate|self-test]。 */
+async function cmdIac(a: Args): Promise<number> {
+  const positional = rawPositionals(a);
+  const verb = positional[0] ?? "help";
+  const ws = defaultWorkspace(a);
+
+  if (verb === "parse" || verb === "plan" || verb === "graph") {
+    const file = positional[1];
+    if (!file) {
+      console.error(`用法：org iac ${verb} <main.tf> [--workspace DIR]（工作区相对路径）`);
+      console.error("  内置 HCL 子集解析器（零依赖主车道）：block/label/属性/插值/heredoc/注释");
+      return 2;
+    }
+    const r = iacParseFile(ws, file);
+    if (!r.ok) {
+      console.error(`✗ [${r.kind}] ${r.reason}`);
+      if (r.errors.length > 1) for (const e of r.errors.slice(0, 5)) console.error(`  第 ${e.line} 行：${e.message.replace(/^第 \d+ 行：/, "")}`);
+      return 1;
+    }
+    if (verb === "parse") {
+      console.log(`🧱 ${r.file} 解析成功（${r.ast.length} 顶层块 · ${r.ast.reduce((s, b) => s + b.attrs.length, 0)} 直接属性 · ${r.tookMs}ms · 内置 HCL 解析器）：`);
+      for (const line of renderIacBlocks(r.ast)) console.log(line);
+      return 0;
+    }
+    if (verb === "graph") {
+      const g = iacGraph(r.ast);
+      console.log(`🕸 依赖图：${g.nodes.length} 节点 · ${g.edges.length} 边（${r.file}）`);
+      for (const e of g.edges) console.log(`  ${e.from}  →  ${e.to}    （${e.via} · 第 ${e.line} 行）`);
+      if (g.undeclaredRefs.length > 0) {
+        console.log(`  ⚠ ${g.undeclaredRefs.length} 处未声明引用（apply 前须补声明）：`);
+        for (const u of g.undeclaredRefs.slice(0, 10)) console.log(`      ${u.from} → ${u.via}（第 ${u.line} 行）`);
+      }
+      if (!g.ok) {
+        console.error(`\n✗ ${g.reason}`);
+        for (const c of g.cycles.slice(0, 3)) console.error(`  环：${c.join(" → ")}`);
+        return 1;
+      }
+      console.log(`\n  拓扑序（被依赖在前）：${g.order.join(" → ")}`);
+      return 0;
+    }
+    // plan
+    const p = iacPlan(r.ast);
+    if (!p.ok) {
+      console.error(`✗ ${p.reason}`);
+      for (const c of p.cycles?.slice(0, 3) ?? []) console.error(`  环：${c.join(" → ")}`);
+      return 1;
+    }
+    console.log(p.text);
+    return 0;
+  }
+
+  if (verb === "generate") {
+    const manifest = positional[1];
+    if (!manifest) {
+      console.error("用法：org iac generate <manifest.json> [--workspace DIR]（工作区相对路径）");
+      console.error('  manifest：{provider, region?, variables?, resources:[{type,name,attrs}], outputs?}');
+      console.error('  $ref 引用形：{"$ref":"var.instance_type"} → instance_type = var.instance_type');
+      console.error("  生成结果可直接被 iacParse 解析（往返自洽 —— 逆操作验证）");
+      return 2;
+    }
+    const abs = resolveInWorkspace(ws, manifest);
+    if (!inWorkspace(ws, abs)) { console.error(`✗ manifest 路径越界（须在工作区内）：${manifest}`); return 1; }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(fs.readFileSync(abs, "utf-8"));
+    } catch (e) {
+      console.error(`✗ manifest 读取/JSON 解析失败：${(e as Error).message}`);
+      return 1;
+    }
+    const r = iacGenerate(parsed as Parameters<typeof iacGenerate>[0]);
+    if (!r.ok) {
+      for (const err of r.errors) console.error(`✗ ${err}`);
+      return 1;
+    }
+    console.log(r.tf.trimEnd());
+    console.log(`\n  ⚙ 生成摘要：provider ${r.provider} · 资源 ${r.resources} · 变量 ${r.variables.length}（${r.variables.join(", ")}）· 往返自解析 ✓（${r.roundTrip.blocks} 块）`);
+    for (const w of r.warnings) console.log(`  ⚠ ${w}`);
+    for (const n of r.notes) console.log(`  💡 ${n}`);
+    return 0;
+  }
+
+  if (verb === "probe") {
+    const p = probeIac();
+    console.log(`🧱 IaC 工具链五面探测（${p.tookMs}ms）：`);
+    console.log(`  terraform ${p.terraform.available ? `✓ 在场（v${p.terraform.version ?? "?"}）` : "✗ 缺席"}`);
+    if (p.terraform.reason) console.log(`      ${p.terraform.reason}`);
+    console.log(`  tofu       ${p.tofu.available ? `✓ 在场（v${p.tofu.version ?? "?"}）` : "✗ 缺席"}`);
+    if (p.tofu.reason) console.log(`      ${p.tofu.reason}`);
+    console.log(`  tflint    ${p.tflint.available ? `✓ 在场（v${p.tflint.version ?? "?"}）` : "✗ 缺席"}`);
+    if (p.tflint.reason) console.log(`      ${p.tflint.reason}`);
+    console.log(`  车道      ${p.lane === "cli" ? "cli（外部 validate 可用）+ builtin（恒在）" : "builtin（内置静态解析主车道 —— 恒在，零外部依赖）"}`);
+    console.log(`  建议      ${p.suggestion}`);
+    return 0;
+  }
+
+  if (verb === "validate") {
+    const dir = positional[1] ?? ".";
+    const r = iacValidate(ws, dir);
+    if (!r.ok && r.kind === "tool-absent") {
+      console.log(`ℹ 外部车道缺席（lane ${r.lane}）—— ${r.reason}`);
+      console.log("  内置静态车道替代：org iac parse/plan/graph <file>（语法级校验恒在）");
+      return 1; // 缺席是诚实降级，非命令失败面 —— 退出码 1 提示车道缺席
+    }
+    if (!r.ok && r.kind !== "invalid") {
+      console.error(`✗ [${r.kind}] ${r.reason}`);
+      console.error(`  argv（数组参数 · 零 shell 面）：${r.argv.join(" ")}`);
+      return 1;
+    }
+    if (!r.ok) {
+      console.error(`✗ 配置校验未通过（${r.diagnostics.length} 条诊断 · ${r.bin} validate · 车道 ${r.lane}）：`);
+      for (const d of r.diagnostics.slice(0, 20)) {
+        console.error(`  [${(d.severity ?? "error").toUpperCase()}] ${d.file ?? ""}${d.line ? ":" + d.line : ""} ${d.summary ?? ""}`);
+        if (d.detail) console.error(`      ${d.detail.split("\n")[0]}`);
+      }
+      return 1;
+    }
+    console.log(`✓ ${r.bin} validate 通过（车道 ${r.lane} · ${r.tookMs}ms · 目录 ${dir}）`);
+    return 0;
+  }
+
+  if (verb === "self-test" || verb === "selftest" || verb === "self") {
+    const r = iacSelfTest();
+    console.log("🧪 IaC 深度层自检（解析器/依赖图/计划/生成器往返 + probe 结构）：");
+    for (const c of r.checks) console.log(`  ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? `（${c.detail}）` : ""}`);
+    console.log(`\n  ${r.passed}/${r.total} 通过`);
+    return r.ok ? 0 : 1;
+  }
+
+  console.error(`未知子命令：${verb}`);
+  console.error("用法：org iac parse <main.tf> · plan <main.tf> · graph <main.tf> · generate <manifest.json> · probe · validate [dir] · self-test");
+  console.error("  IaC 深度实现（#44）：HCL 子集解析 → 依赖图/拓扑序 → 人读 Plan → manifest 逆向生成 .tf（与 org iacscan 静态扫描互补）");
+  console.error("  内置静态车道恒在；terraform/tofu 在场时 validate 外部车道可用（只读 —— init/plan/apply 不在任何车道）");
+  return 2;
+}
+
+// ---- org mobile：移动端调试统一入口（v0.5.18 · #117） ----------------------------
+
+/** org mobile —— probe/devices/logcat/forward/apk/plan/self-test 七面。 */
+async function cmdMobile(a: Args): Promise<number> {
+  const positional = a.rest.filter((r) => !r.startsWith("--"));
+  const verb = positional[0] ?? "probe";
+  const ws = defaultWorkspace(a);
+
+  // ---- 探测面（Android/iOS/跨端三面 + SDK 定位）----
+  if (verb === "probe") {
+    const p = probeMobile();
+    const face = (icon: string, label: string, f: { available: boolean; version: string | null; reason?: string }) =>
+      `${icon} ${label.padEnd(15)} ${f.available ? `✓ 在场（${(f.version ?? "?").slice(0, 42)}）` : "✗ 缺席"}`;
+    console.log(`📱 移动端调试工具链探测（${p.tookMs}ms · Android/iOS/跨端三面）：`);
+    console.log(`  ${face("🤖", "adb", p.adb)}${p.adb.reason ? `\n      ${p.adb.reason}` : ""}`);
+    console.log(`  ${face("📦", "aapt", p.aapt)}${p.aapt.reason ? `\n      ${p.aapt.reason}` : ""}`);
+    console.log(`  ${face("📦", "aapt2", p.aapt2)}`);
+    console.log(`  ${face("🖼", "scrcpy", p.scrcpy)}${p.scrcpy.reason ? `\n      ${p.scrcpy.reason}` : ""}`);
+    console.log(`  ${face("🍏", "ideviceinstaller", p.ideviceinstaller)}${p.ideviceinstaller.reason ? `\n      ${p.ideviceinstaller.reason}` : ""}`);
+    console.log(`  ${face("🍏", "idevice_id", p.ideviceId)}`);
+    console.log(`  ${face("🦋", "flutter", p.flutter)}${p.flutter.reason ? `\n      ${p.flutter.reason}` : ""}`);
+    console.log(`  Android SDK 根：${p.androidHome ?? "未定位（ANDROID_HOME/常见位置均缺席 —— adb 在 PATH 时无需定位）"}`);
+    const s = p.summary;
+    console.log(`\n  面就绪：Android ${s.androidFace ? "✓" : "✗"} · APK ${s.apkFace ? "✓" : "✗"} · iOS ${s.iosFace ? "✓" : "✗"} · 跨端 ${s.crossFace ? "✓" : "✗"}（${s.facesUp}/5 面在场）`);
+    if (s.facesUp === 0) {
+      console.log(`\n  工具缺席环境 —— 保底车道即主车道：`);
+      console.log(`    org mobile plan <android|ios|both> <crash|白屏|network|…>   步骤化排查计划（纯函数，永远可用）`);
+      console.log(`    org mobile apk <app.apk>                                    APK 魔数车道（aapt 缺席也交付）`);
+    }
+    return 0; // 探测本身成功（全景面缺席是结果不是失败 —— org cloud probe 同哲学）
+  }
+
+  // ---- 设备清单面（adb devices -l 解析 + iOS 面 + 三层降级）----
+  if (verb === "devices") {
+    const r = mobileDevices();
+    const kindText: Record<string, string> = {
+      "tool-absent": "adb CLI 缺席（安装指引见上）",
+      timeout: "adb devices 执行超时",
+      failed: "adb devices 执行失败",
+    };
+    if (!r.ok) {
+      console.error(`✗ org mobile devices（${kindText[r.kind ?? "failed"] ?? r.kind}）：${r.reason ?? ""}`);
+      return 1;
+    }
+    console.log(`📱 Android 设备（${r.devices.length} 台 · 就绪 ${r.ready}）：`);
+    for (const d of r.devices) {
+      console.log(`  ${d.serial.padEnd(22)} ${d.state.padEnd(13)} ${[d.model, d.product, d.device].filter(Boolean).join(" · ") || "（无 -l 描述字段 —— 未授权/离线设备常见）"}${d.transport ? ` · ${d.transport}` : ""}`);
+    }
+    if (r.devices.length === 0) console.log(`  （无设备连接 —— ${r.reason ?? ""}）`);
+    else if (r.ready === 0) console.log(`  ⚠ ${r.reason ?? ""}`);
+    console.log(`\n  🍏 iOS 面：${r.ios.note}`);
+    if (r.ios.udids.length > 0) for (const u of r.ios.udids) console.log(`     ${u}`);
+    console.log(`  argv（数组参数 · 零 shell 面）：${r.argv.join(" ")}`);
+    return 0;
+  }
+
+  // ---- logcat 面（dump 快照 + 五元组 + tag/级别/包名过滤）----
+  if (verb === "logcat") {
+    const serial = restFlag(a, "serial");
+    const tag = restFlag(a, "tag");
+    const level = restFlag(a, "level");
+    const pkg = restFlag(a, "package");
+    const linesRaw = Number(restFlag(a, "lines"));
+    const r = mobileLogcat({
+      ...(serial ? { serial } : {}),
+      ...(tag ? { tag } : {}),
+      ...(level ? { level } : {}),
+      ...(pkg ? { package: pkg } : {}),
+      ...(Number.isFinite(linesRaw) && linesRaw > 0 ? { lines: linesRaw } : {}),
+    });
+    if (!r.ok) {
+      const kindText: Record<string, string> = {
+        "tool-absent": "adb CLI 缺席", "no-device": "无设备连接", unauthorized: "设备未授权",
+        "multi-device": "多设备未指定 serial", timeout: "执行超时", failed: "执行失败",
+      };
+      console.error(`✗ org mobile logcat（${kindText[r.kind ?? "failed"] ?? r.kind}）：${r.reason ?? ""}`);
+      return 1;
+    }
+    console.log(`📱 logcat dump（${r.entries.length} 条五元组 · 未匹配行 ${r.skipped}${r.truncated ? " · 尾部截断" : ""}）：`);
+    for (const e of r.entries.slice(-Math.min(r.entries.length, 30))) {
+      console.log(`  ${e.time}  ${e.pid.padStart(6)}  ${e.level} ${e.tag}: ${e.message.slice(0, 120)}`);
+    }
+    if (r.entries.length > 30) console.log(`  …（仅示尾 30 条 / 共 ${r.entries.length} 条）`);
+    if (r.entries.length === 0) console.log(`  （空 —— ${r.reason ?? "无匹配日志行"}）`);
+    console.log(`\n  argv：${r.argv.join(" ")}（-d 快照车道；行数帽 ${LOGCAT_LINES_MAX} · 级别 ${LOGCAT_LEVELS.join("/")}）`);
+    return 0;
+  }
+
+  // ---- WebView CDP 转发面（四层降级：adb→设备→socket→页面）----
+  if (verb === "forward") {
+    const serial = restFlag(a, "serial");
+    const local = restFlag(a, "port");
+    const remote = restFlag(a, "remote");
+    const r = await mobileForward({
+      ...(serial ? { serial } : {}),
+      ...(local !== undefined ? { local } : {}),
+      ...(remote ? { remote } : {}),
+    });
+    const kindText: Record<string, string> = {
+      "tool-absent": "adb CLI 缺席", "no-device": "无设备连接", unauthorized: "设备未授权",
+      "multi-device": "多设备未指定 serial", "socket-not-found": "设备上无 devtools socket",
+      "socket-unreachable": "forward 已建立但 CDP HTTP 不可达", "page-empty": "CDP 页面清单为空",
+      timeout: "执行超时", failed: "执行失败",
+    };
+    if (!r.ok && r.kind !== "page-empty") {
+      console.error(`✗ org mobile forward（${kindText[r.kind ?? "failed"] ?? r.kind}）：${r.reason ?? ""}`);
+      return 1;
+    }
+    console.log(`📱 WebView CDP 转发：${r.serial} · tcp:${r.localPort} → ${r.remote}`);
+    console.log(`  socket 发现：${r.sockets.length > 0 ? r.sockets.join(" / ") : "（显式 remote 形态 —— 未做自动发现）"}`);
+    if (r.cdp) {
+      console.log(`  CDP /json 探测：${r.cdp.reachable ? `✓ 可达（HTTP ${r.cdp.httpStatus} · ${r.cdp.pages.length} 页可调试）` : `✗ 不可达`}`);
+      for (const p of r.cdp.pages) console.log(`     📄 ${p.title || "（无标题）"} — ${p.url}`);
+    }
+    if (r.reason) console.log(`  ${r.ok ? "💡" : "⚠"} ${r.reason}`);
+    console.log(`\n  下一步：桌面 Chrome 打开 chrome://inspect（Devices → Port forwarding 9222）即可 inspect 目标 WebView。`);
+    return r.ok ? 0 : 1;
+  }
+
+  // ---- APK 检查面（aapt 车道 / 魔数车道两层降级；路径过工作区监狱）----
+  if (verb === "apk") {
+    const file = positional[1];
+    if (!file) {
+      console.error("用法：org mobile apk <app.apk> [--workspace DIR]（工作区相对路径 · 过监狱）");
+      console.error("  aapt/aapt2 dump badging 全量解析（包名/版本/权限）→ 缺席降级 APK 魔数车道（PK\\x03\\x04 + 大小 + 指引）");
+      return 2;
+    }
+    const r = mobileApkInfo(ws, file);
+    if (!r.ok) {
+      const kindText: Record<string, string> = { jail: "路径越界（须在工作区内）", failed: "读取/解析失败" };
+      console.error(`✗ org mobile apk（${kindText[r.kind ?? "failed"] ?? r.kind} · 车道 ${r.lane ?? "无"}）：${r.reason ?? ""}`);
+      return 1;
+    }
+    console.log(`📦 APK 检查（车道 ${r.lane === "aapt" ? "aapt —— badging 全量解析" : "magic —— 魔数降级（aapt 缺席/失败）"} · ${(r.sizeBytes / 1024 / 1024).toFixed(2)} MB）：`);
+    console.log(`  文件：${r.file} · 魔数 ${r.magic?.apk ? "✓ APK 形态（PK\\x03\\x04）" : "✗ 异常"}`);
+    if (r.badging) {
+      const b = r.badging;
+      console.log(`  包名：${b.package ?? "?"} · versionName ${b.versionName ?? "?"} · versionCode ${b.versionCode ?? "?"}`);
+      console.log(`  minSdk ${b.sdkVersion ?? "?"} · targetSdk ${b.targetSdkVersion ?? "?"} · 标签 ${b.applicationLabel ?? "?"}`);
+      console.log(`  权限（${b.permissions.length} 项）：${b.permissions.slice(0, 6).join(" · ")}${b.permissions.length > 6 ? " …" : ""}`);
+      if (b.nativeCode.length > 0) console.log(`  native-code：${b.nativeCode.join(" · ")}`);
+    }
+    if (r.reason) console.log(`  💡 ${r.reason}`);
+    return 0;
+  }
+
+  // ---- 调试计划面（纯函数保底车道 —— 任何环境永远可用）----
+  if (verb === "plan") {
+    const platform = positional[1] ?? "android";
+    const symptom = positional.slice(2).filter((x) => !x.startsWith("--")).join(" ") || "crash";
+    if (!(MOBILE_PLAN_PLATFORMS as readonly string[]).includes(platform)) {
+      console.error(`✗ 未知平台 "${platform}"（三式：${MOBILE_PLAN_PLATFORMS.join("/")}）`);
+      return 2;
+    }
+    const p = mobileDebugPlan(platform, symptom);
+    console.log(`📱 移动端调试计划（平台 ${p.platform} · 症状 ${p.symptom} · ${p.steps.length} 步）：`);
+    for (const s of p.steps) {
+      console.log(`\n  ${s.step}. ${s.title}`);
+      if (s.cmd) console.log(`     $ ${s.cmd}`);
+      console.log(`     预期：${s.expect}`);
+      console.log(`     降级：${s.degrade}`);
+    }
+    console.log(`\n  ${p.note}`);
+    return 0;
+  }
+
+  // ---- 自检面 ----
+  if (verb === "self-test" || verb === "selftest") {
+    const t = mobileSelfTest();
+    console.log("🧪 移动端调试簇自检（解析器/计划器/魔数/socket 提取/argv 形态 —— 纯内存零副作用）：");
+    for (const c of t.checks) console.log(`  ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? `（${c.detail}）` : ""}`);
+    console.log(`\n  ${t.passed}/${t.total} 通过`);
+    return t.ok ? 0 : 1;
+  }
+
+  console.error(`未知子命令：${verb}`);
+  console.error(`用法：org mobile probe · devices · logcat [--serial S] [--lines N] [--tag T] [--level VDIWEF] [--package P]`);
+  console.error(`      org mobile forward [--serial S] [--port N] [--remote sock] · apk <app.apk> · plan <android|ios|both> [症状] · self-test`);
+  console.error("  移动端调试（#117）：多重优雅降级（adb→设备→socket→页面四层 / aapt→魔数两层 / 计划纯函数保底）·");
+  console.error("  执行面全只读（devices/logcat -d dump/forward/apk 检查 —— install/uninstall 只出现在计划的可粘贴命令里）");
+  return 2;
+}
+
+
+// ---- org remote：远程 Agent 簇（v0.5.18 · #133）-----------------------------------
+
+/** RemoteRunResult 统一渲染（remoteExec/remoteSync 车道 —— 成功吐输出、失败吐 kind+reason）。 */
+function renderRemoteRun(r: RemoteRunResult, label: string): number {
+  const kindText: Record<string, string> = {
+    denied: "白名单拒绝（未执行）", "host-not-found": "host 未在档案（不猜默认主机）",
+    "tool-absent": "CLI 缺席（降级车道可用）", jail: "路径越界（工作区监狱）",
+    timeout: "超时", refused: "拒连/不可达", auth: "鉴权失败", failed: "执行失败（退出码非 0）",
+  };
+  const argvPreview = r.argv.join(" ").slice(0, 160);
+  if (!r.ok) {
+    console.error(`✗ ${label}（${kindText[r.kind ?? "?"] ?? r.kind}）：${r.reason ?? ""}`);
+    console.error(`  argv（数组参数 · 零 shell 面）：${argvPreview}`);
+    if (r.kind === "denied" && (r.reason ?? "").includes("allow_full")) {
+      console.error(`  全量命令车道：org remote exec <host> "<cmd>" --allow-full（显式开启 —— 由你对命令内容负责）`);
+    }
+    return 1;
+  }
+  console.log(`✓ ${label}（${r.tookMs}ms · argv 数组参数）：${argvPreview}`);
+  if (r.stdout.trim().length > 0) console.log(r.stdout.trim().split("\n").slice(0, 60).join("\n"));
+  if (r.stderr.trim().length > 0) console.log(`（stderr）${r.stderr.trim().split("\n").slice(0, 10).join("\n")}`);
+  return 0;
+}
+
+async function cmdRemote(a: Args): Promise<number> {
+  const positional = a.rest.filter((r) => !r.startsWith("--"));
+  const verb = positional[0] ?? "probe";
+  const ws = defaultWorkspace(a);
+
+  // ---- 探测面 ----
+  if (verb === "probe") {
+    const p = probeRemote();
+    console.log(`🛰 远程会话工具链探测：`);
+    console.log(`  🔐 ssh        ${p.available ? `✓ 在场（${p.versionRaw ?? "?"} → OpenSSH ${p.openSsh ? `${p.openSsh.major}.${p.openSsh.minor}` : "?"}）` : "✗ 缺席"}`);
+    console.log(`  📤 rsync      ${p.rsyncAvailable ? `✓ 在场（${(p.rsyncVersion ?? "").slice(0, 46)}）` : "✗ 缺席"}（同步主车道）`);
+    console.log(`  📥 scp        ${p.scpAvailable ? "✓ 在场" : "✗ 缺席"}（rsync 缺席时的降级车道）`);
+    console.log(`  🔑 ssh-keygen ${p.sshKeygenAvailable ? "✓ 在场" : "✗ 缺席"}（密钥生成指引可行）`);
+    console.log(`  🔁 agent      ${p.agentForwarding ? "✓ SSH_AUTH_SOCK 在场（BatchMode 下 agent 密钥可用）" : "✗ 无 agent 转发环境（SSH_AUTH_SOCK 缺席）"}`);
+    if (p.reason) console.log(`  ${p.reason}`);
+    console.log(`\n  档案：<ws>/${REMOTE_HOSTS_FILE}（主机档案 —— host 寻址的门控源）· 计划车道：org remote plan [host] [git|rsync|container|all]`);
+    return 0; // 探测本身成功（全景面缺席是结果不是失败 —— 与 org cloud probe 全景同哲学；诚实呈现绿 ✓ / 灰 ⬜）
+  }
+
+  // ---- 主机档案面 ----
+  if (verb === "hosts") {
+    const report = loadRemoteHosts(ws);
+    console.log(`🛰 ${REMOTE_HOSTS_FILE}：${report.exists ? `${report.hosts.length} 个主机在册` : "未创建（host 寻址一律拒绝 —— 安全缺省）"}`);
+    console.log(`  路径：${report.file}`);
+    if (report.hosts.length > 0) {
+      for (const h of report.hosts) {
+        console.log(`    ${h.name.padEnd(12)} ${h.user}@${h.host}:${h.port ?? 22}${h.identity ? ` · key ${h.identity}` : ""}`);
+      }
+    }
+    for (const e of report.errors) console.log(`  ⚠ ${e}`);
+    if (positional[1]) {
+      const f = findRemoteHost(ws, positional[1]);
+      console.log(`  判定 "${positional[1]}" → ${f.entry ? `✓ 放行（档案 ${f.by === "name" ? "名" : "host 字段"}：${f.entry.name}）` : "✗ 拒绝（不在档案）"}`);
+    }
+    if (!report.exists || report.hosts.length === 0) console.log(`\n  ${REMOTE_HOSTS_GUIDANCE}`);
+    return 0;
+  }
+
+  // ---- 执行面（会话级 remoteExec —— 白名单默认只读）----
+  if (verb === "exec") {
+    const host = positional[1];
+    const command = positional.slice(2).filter((x) => !x.startsWith("--")).join(" ");
+    if (!host || !command) {
+      console.error(`用法：org remote exec <host> "<command>" [--allow-full] [--timeout N] [--workspace DIR]`);
+      console.error(`  host 须在 <ws>/${REMOTE_HOSTS_FILE} 档案内（不猜默认）；命令白名单默认只读：${REMOTE_READONLY_COMMANDS.join("/")}`);
+      console.error("  非白名单命令须 --allow-full 显式开启（RBAC 哲学：读 = 缺省，执行 = 显式）");
+      return 2;
+    }
+    const timeout = Number(restFlag(a, "timeout"));
+    return renderRemoteRun(remoteExec(ws, {
+      host, command,
+      ...(Number.isFinite(timeout) && timeout > 0 ? { timeoutMs: timeout } : {}),
+      ...(restBool(a, "allow-full") ? { allowFull: true } : {}),
+    }), `remote exec ${host}`);
+  }
+
+  // ---- 同步面（rsync → scp → 指引三层降级）----
+  if (verb === "sync") {
+    const [host, local, remote] = positional.slice(1);
+    const direction = restFlag(a, "direction") === "download" ? "download" : "upload";
+    if (!host || !local || !remote) {
+      console.error(`用法：org remote sync <host> <local（工作区内）> <remote路径> [--direction upload|download]`);
+      console.error(`  rsync -avz（主车道）→ scp -r（rsync 缺席降级）→ 指引（双缺）；local 过工作区监狱`);
+      return 2;
+    }
+    return renderRemoteRun(remoteSync(ws, { host, local, remote, direction }), `remote sync ${host}（${direction}）`);
+  }
+
+  // ---- 心跳/延迟面 ----
+  if (verb === "ping") {
+    const host = positional[1];
+    if (!host) { console.error(`用法：org remote ping <host> [--rounds N]（ssh echo 往返计时 min/avg/max；host 须在档案）`); return 2; }
+    const rounds = Number(restFlag(a, "rounds"));
+    const r = remotePing(ws, { host, ...(Number.isFinite(rounds) && rounds > 0 ? { rounds } : {}) });
+    if (!r.ok) {
+      const kindText: Record<string, string> = { "host-not-found": "host 未在档案（不猜默认主机）", "tool-absent": "ssh CLI 缺席", refused: "拒连/不可达" };
+      console.error(`✗ remote ping ${host}（${kindText[r.kind ?? "?"] ?? r.kind}）：${r.reason ?? ""}`);
+      return 1;
+    }
+    console.log(`🛰 remote ping ${host}：${r.rounds} 轮 echo 往返（失败 ${r.failures} 轮）`);
+    console.log(`  延迟 min/avg/max = ${r.stats!.min}/${r.stats!.avg}/${r.stats!.max} ms${r.failures > 0 ? "（部分降级：统计只计成功轮）" : ""}`);
+    console.log(`  逐轮：${r.times.map((t) => `${t}ms`).join(" · ")}`);
+    return 0;
+  }
+
+  // ---- 部署计划面（纯函数保底车道 —— 无真远程机环境的主交付）----
+  if (verb === "plan") {
+    const host = positional[1] ?? restFlag(a, "host") ?? "";
+    const mode = positional[2] ?? restFlag(a, "mode") ?? "all";
+    if (!(REMOTE_DEPLOY_MODES as readonly string[]).includes(mode)) {
+      console.error(`✗ 未知模式 "${mode}"（四式：${REMOTE_DEPLOY_MODES.join("/")}）`);
+      return 2;
+    }
+    // host 若在档案 → 实参化（user/port 就位）；不在档案也照出计划（占位形态）
+    const f = host ? findRemoteHost(ws, host) : null;
+    const entry = f?.entry;
+    const p = remoteDeployPlan({
+      host: entry?.host ?? host, user: entry?.user ?? restFlag(a, "user") ?? "", mode,
+    });
+    console.log(`🛰 远程 Agent 部署计划（模式 ${p.mode} · 目标 ${p.target}${entry ? `（档案 ${entry.name}）` : "（占位 —— 未在档案实参化）"}）：`);
+    for (const ph of p.phases) {
+      console.log(`\n  ${ph.title}`);
+      for (const [i, s] of ph.steps.entries()) {
+        console.log(`    ${i + 1}. ${s.cmd.split("\n").join("\n       ")}`);
+        console.log(`       # ${s.note}${s.expect ? `\n       ▸ ${s.expect}` : ""}`);
+      }
+    }
+    console.log(`\n  诚实边界：计划是纯函数（不 spawn 不落盘）；真机执行走 org remote exec/sync/ping（须档案 + 白名单）。`);
+    return 0;
+  }
+
+  // ---- 自检面 ----
+  if (verb === "self-test" || verb === "selftest") {
+    const t = remoteSelfTest();
+    console.log("🧪 远程 Agent 簇自检（计划器/档案校验/白名单/三类诊断/ping 统计/argv 形态 —— 纯内存）");
+    for (const c of t.checks) console.log(`  ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? `（${c.detail}）` : ""}`);
+    console.log(`\n  ${t.passed}/${t.total} 通过`);
+    return t.ok ? 0 : 1;
+  }
+
+  console.error(`未知子命令：${verb}`);
+  console.error(`用法：org remote probe · hosts [name] · exec <host> "<cmd>" [--allow-full] · sync <host> <local> <remote> [--direction upload|download]`);
+  console.error(`      org remote ping <host> [--rounds N] · plan [host] [git|rsync|container|all] · self-test（#133 远程 Agent 统一入口）`);
+  return 2;
+}
+
 // ---- org memory：专家长期记忆（v0.5.3） ----------------------------------------
 
 async function cmdMemory(a: Args): Promise<number> {
@@ -3374,7 +3872,9 @@ export async function orgMain(): Promise<number> {
     case "rebase": return cmdRebase(a);
     case "mergestate": return cmdMergestate(a);
     case "rbac": return cmdRbac(a);
-    case "iacscan": case "iac": return cmdIacscan(a);
+    case "iacscan": return cmdIacscan(a);
+    // v0.5.18 IaC 深度簇（capabilities #44 —— 与 #147 iacscan 扫描面互补的解析/规划/生成面）
+    case "iac": return cmdIac(a);
     case "plugin": case "plugins": return cmdPlugin(a);
     case "openapi": return cmdOpenapi(a);
     case "browser": return cmdBrowser(a);
@@ -3387,6 +3887,10 @@ export async function orgMain(): Promise<number> {
     case "collab": return cmdCollab(a);
     // v0.5.17 云生态簇（capabilities #67/#68/#72/#74）
     case "cloud": return cmdCloud(a);
+    // v0.5.18 移动端调试簇（capabilities #117）
+    case "mobile": return cmdMobile(a);
+    // v0.5.18 远程 Agent 簇（capabilities #133 —— 会话/部署/计划层）
+    case "remote": return cmdRemote(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -3561,6 +4065,28 @@ export async function orgMain(): Promise<number> {
       ssh <host> "<cmd>"（host 须在 <ws>/ssh-hosts.allow）· ssh-template ·
       manifest <deployment|service|ingress|configmap|pvc> · terraform ·
       clis（10 家云 CLI 探测表）· overview（21 模型商 + 10 云 CLI 全景）
+  org iac [parse|plan|graph] <main.tf> · generate <manifest.json> · probe · validate [dir]
+      IaC 深度实现（v0.5.18 · #44，与 iacscan 扫描面互补）：内置 HCL 子集
+      解析器（block/label/属性/插值/heredoc/注释 —— 行号级诚实报错）→ 资源
+      依赖图（拓扑序 + 环检测）→ 人读 Plan（to create N resources 风格，
+      与真 terraform plan 差异诚实标注）→ JSON manifest 逆向生成 .tf
+      （iacParse 往返自洽）；probe 探测 terraform/tofu/tflint 三工具（缺席
+      → 内置车道为主车道）；validate 在场时跑 terraform validate -json（只读）
+  org mobile probe · devices · logcat · forward · apk · plan · self-test
+      移动端调试统一入口（v0.5.18 · #117）：多重优雅降级 —— devices 三层
+      （adb 缺席→无设备→未授权）/ forward 四层（adb→设备→socket 发现
+      /proc/net/unix→CDP /json 页面清单）/ apk 两层（aapt badging→魔数
+      PK 魔数）/ logcat 五元组 dump（-d 快照·tag/级别/包名过滤）· plan
+      纯函数保底（平台 × 症状矩阵步骤化计划，零外部依赖永远可用）·
+      执行面全只读（install/uninstall 只出现在计划的可粘贴命令里）
+  org remote probe · hosts [name] · exec · sync · ping · plan · self-test
+      远程 Agent 簇（v0.5.18 · #133 会话/部署/计划层 —— 与 cloud_ssh 单命令
+      执行互补）：probe 四工具探测（ssh/scp/rsync/ssh-keygen + OpenSSH
+      版本 + agent 环境）· hosts 主机档案（<ws>/remote-hosts.json，name→
+      host/user/port/identity；host 不在档案 = 拒绝不猜默认）· exec 会话级
+      执行（命令白名单默认只读，非白名单须 --allow-full）· sync rsync→scp→
+      指引三层降级（local 过监狱）· ping echo 往返 min/avg/max · plan 部署
+      计划四式（git/rsync/容器/run 队列远程化+回滚，纯函数保底车道）
 
 仓库布局：hsl/ = HSL 源码；toolchain/dhv-ts = 内嵌解释器（vendored）；
           demo-run/ = 本地构建目录（git 忽略）；dist/ = 编译产物（入库）
