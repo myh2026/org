@@ -69,6 +69,10 @@ import {
   currentUser, setUser, postThread, commentOn, listThreads, threadFeed, flattenThread,
   collaborators, collabSummary, bridgeSession, COLLAB_DIR_REL,
 } from "../lib/collab.ts"; // v0.5.17 团队协作层（#87 团队共享会话/评论）
+import {
+  probeMobile, mobileDevices, mobileLogcat, mobileForward, mobileApkInfo, mobileDebugPlan, mobileSelfTest,
+  MOBILE_PLAN_PLATFORMS, MOBILE_SYMPTOMS, LOGCAT_LINES_DEFAULT, LOGCAT_LINES_MAX, LOGCAT_LEVELS,
+} from "../lib/mobile.ts"; // v0.5.18 移动端调试统一模块（#117 —— 与 iacscan #147 的扫描面互补）
 import { listApprovals, decideApproval, clearGranted } from "../lib/approvals.ts";
 import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
@@ -3205,6 +3209,189 @@ async function cmdCloud(a: Args): Promise<number> {
   return 2;
 }
 
+// ---- org mobile：移动端调试统一入口（v0.5.18 · #117） ----------------------------
+
+/** org mobile —— probe/devices/logcat/forward/apk/plan/self-test 七面。 */
+async function cmdMobile(a: Args): Promise<number> {
+  const positional = a.rest.filter((r) => !r.startsWith("--"));
+  const verb = positional[0] ?? "probe";
+  const ws = defaultWorkspace(a);
+
+  // ---- 探测面（Android/iOS/跨端三面 + SDK 定位）----
+  if (verb === "probe") {
+    const p = probeMobile();
+    const face = (icon: string, label: string, f: { available: boolean; version: string | null; reason?: string }) =>
+      `${icon} ${label.padEnd(15)} ${f.available ? `✓ 在场（${(f.version ?? "?").slice(0, 42)}）` : "✗ 缺席"}`;
+    console.log(`📱 移动端调试工具链探测（${p.tookMs}ms · Android/iOS/跨端三面）：`);
+    console.log(`  ${face("🤖", "adb", p.adb)}${p.adb.reason ? `\n      ${p.adb.reason}` : ""}`);
+    console.log(`  ${face("📦", "aapt", p.aapt)}${p.aapt.reason ? `\n      ${p.aapt.reason}` : ""}`);
+    console.log(`  ${face("📦", "aapt2", p.aapt2)}`);
+    console.log(`  ${face("🖼", "scrcpy", p.scrcpy)}${p.scrcpy.reason ? `\n      ${p.scrcpy.reason}` : ""}`);
+    console.log(`  ${face("🍏", "ideviceinstaller", p.ideviceinstaller)}${p.ideviceinstaller.reason ? `\n      ${p.ideviceinstaller.reason}` : ""}`);
+    console.log(`  ${face("🍏", "idevice_id", p.ideviceId)}`);
+    console.log(`  ${face("🦋", "flutter", p.flutter)}${p.flutter.reason ? `\n      ${p.flutter.reason}` : ""}`);
+    console.log(`  Android SDK 根：${p.androidHome ?? "未定位（ANDROID_HOME/常见位置均缺席 —— adb 在 PATH 时无需定位）"}`);
+    const s = p.summary;
+    console.log(`\n  面就绪：Android ${s.androidFace ? "✓" : "✗"} · APK ${s.apkFace ? "✓" : "✗"} · iOS ${s.iosFace ? "✓" : "✗"} · 跨端 ${s.crossFace ? "✓" : "✗"}（${s.facesUp}/5 面在场）`);
+    if (s.facesUp === 0) {
+      console.log(`\n  工具缺席环境 —— 保底车道即主车道：`);
+      console.log(`    org mobile plan <android|ios|both> <crash|白屏|network|…>   步骤化排查计划（纯函数，永远可用）`);
+      console.log(`    org mobile apk <app.apk>                                    APK 魔数车道（aapt 缺席也交付）`);
+    }
+    return 0; // 探测本身成功（全景面缺席是结果不是失败 —— org cloud probe 同哲学）
+  }
+
+  // ---- 设备清单面（adb devices -l 解析 + iOS 面 + 三层降级）----
+  if (verb === "devices") {
+    const r = mobileDevices();
+    const kindText: Record<string, string> = {
+      "tool-absent": "adb CLI 缺席（安装指引见上）",
+      timeout: "adb devices 执行超时",
+      failed: "adb devices 执行失败",
+    };
+    if (!r.ok) {
+      console.error(`✗ org mobile devices（${kindText[r.kind ?? "failed"] ?? r.kind}）：${r.reason ?? ""}`);
+      return 1;
+    }
+    console.log(`📱 Android 设备（${r.devices.length} 台 · 就绪 ${r.ready}）：`);
+    for (const d of r.devices) {
+      console.log(`  ${d.serial.padEnd(22)} ${d.state.padEnd(13)} ${[d.model, d.product, d.device].filter(Boolean).join(" · ") || "（无 -l 描述字段 —— 未授权/离线设备常见）"}${d.transport ? ` · ${d.transport}` : ""}`);
+    }
+    if (r.devices.length === 0) console.log(`  （无设备连接 —— ${r.reason ?? ""}）`);
+    else if (r.ready === 0) console.log(`  ⚠ ${r.reason ?? ""}`);
+    console.log(`\n  🍏 iOS 面：${r.ios.note}`);
+    if (r.ios.udids.length > 0) for (const u of r.ios.udids) console.log(`     ${u}`);
+    console.log(`  argv（数组参数 · 零 shell 面）：${r.argv.join(" ")}`);
+    return 0;
+  }
+
+  // ---- logcat 面（dump 快照 + 五元组 + tag/级别/包名过滤）----
+  if (verb === "logcat") {
+    const serial = restFlag(a, "serial");
+    const tag = restFlag(a, "tag");
+    const level = restFlag(a, "level");
+    const pkg = restFlag(a, "package");
+    const linesRaw = Number(restFlag(a, "lines"));
+    const r = mobileLogcat({
+      ...(serial ? { serial } : {}),
+      ...(tag ? { tag } : {}),
+      ...(level ? { level } : {}),
+      ...(pkg ? { package: pkg } : {}),
+      ...(Number.isFinite(linesRaw) && linesRaw > 0 ? { lines: linesRaw } : {}),
+    });
+    if (!r.ok) {
+      const kindText: Record<string, string> = {
+        "tool-absent": "adb CLI 缺席", "no-device": "无设备连接", unauthorized: "设备未授权",
+        "multi-device": "多设备未指定 serial", timeout: "执行超时", failed: "执行失败",
+      };
+      console.error(`✗ org mobile logcat（${kindText[r.kind ?? "failed"] ?? r.kind}）：${r.reason ?? ""}`);
+      return 1;
+    }
+    console.log(`📱 logcat dump（${r.entries.length} 条五元组 · 未匹配行 ${r.skipped}${r.truncated ? " · 尾部截断" : ""}）：`);
+    for (const e of r.entries.slice(-Math.min(r.entries.length, 30))) {
+      console.log(`  ${e.time}  ${e.pid.padStart(6)}  ${e.level} ${e.tag}: ${e.message.slice(0, 120)}`);
+    }
+    if (r.entries.length > 30) console.log(`  …（仅示尾 30 条 / 共 ${r.entries.length} 条）`);
+    if (r.entries.length === 0) console.log(`  （空 —— ${r.reason ?? "无匹配日志行"}）`);
+    console.log(`\n  argv：${r.argv.join(" ")}（-d 快照车道；行数帽 ${LOGCAT_LINES_MAX} · 级别 ${LOGCAT_LEVELS.join("/")}）`);
+    return 0;
+  }
+
+  // ---- WebView CDP 转发面（四层降级：adb→设备→socket→页面）----
+  if (verb === "forward") {
+    const serial = restFlag(a, "serial");
+    const local = restFlag(a, "port");
+    const remote = restFlag(a, "remote");
+    const r = await mobileForward({
+      ...(serial ? { serial } : {}),
+      ...(local !== undefined ? { local } : {}),
+      ...(remote ? { remote } : {}),
+    });
+    const kindText: Record<string, string> = {
+      "tool-absent": "adb CLI 缺席", "no-device": "无设备连接", unauthorized: "设备未授权",
+      "multi-device": "多设备未指定 serial", "socket-not-found": "设备上无 devtools socket",
+      "socket-unreachable": "forward 已建立但 CDP HTTP 不可达", "page-empty": "CDP 页面清单为空",
+      timeout: "执行超时", failed: "执行失败",
+    };
+    if (!r.ok && r.kind !== "page-empty") {
+      console.error(`✗ org mobile forward（${kindText[r.kind ?? "failed"] ?? r.kind}）：${r.reason ?? ""}`);
+      return 1;
+    }
+    console.log(`📱 WebView CDP 转发：${r.serial} · tcp:${r.localPort} → ${r.remote}`);
+    console.log(`  socket 发现：${r.sockets.length > 0 ? r.sockets.join(" / ") : "（显式 remote 形态 —— 未做自动发现）"}`);
+    if (r.cdp) {
+      console.log(`  CDP /json 探测：${r.cdp.reachable ? `✓ 可达（HTTP ${r.cdp.httpStatus} · ${r.cdp.pages.length} 页可调试）` : `✗ 不可达`}`);
+      for (const p of r.cdp.pages) console.log(`     📄 ${p.title || "（无标题）"} — ${p.url}`);
+    }
+    if (r.reason) console.log(`  ${r.ok ? "💡" : "⚠"} ${r.reason}`);
+    console.log(`\n  下一步：桌面 Chrome 打开 chrome://inspect（Devices → Port forwarding 9222）即可 inspect 目标 WebView。`);
+    return r.ok ? 0 : 1;
+  }
+
+  // ---- APK 检查面（aapt 车道 / 魔数车道两层降级；路径过工作区监狱）----
+  if (verb === "apk") {
+    const file = positional[1];
+    if (!file) {
+      console.error("用法：org mobile apk <app.apk> [--workspace DIR]（工作区相对路径 · 过监狱）");
+      console.error("  aapt/aapt2 dump badging 全量解析（包名/版本/权限）→ 缺席降级 APK 魔数车道（PK\\x03\\x04 + 大小 + 指引）");
+      return 2;
+    }
+    const r = mobileApkInfo(ws, file);
+    if (!r.ok) {
+      const kindText: Record<string, string> = { jail: "路径越界（须在工作区内）", failed: "读取/解析失败" };
+      console.error(`✗ org mobile apk（${kindText[r.kind ?? "failed"] ?? r.kind} · 车道 ${r.lane ?? "无"}）：${r.reason ?? ""}`);
+      return 1;
+    }
+    console.log(`📦 APK 检查（车道 ${r.lane === "aapt" ? "aapt —— badging 全量解析" : "magic —— 魔数降级（aapt 缺席/失败）"} · ${(r.sizeBytes / 1024 / 1024).toFixed(2)} MB）：`);
+    console.log(`  文件：${r.file} · 魔数 ${r.magic?.apk ? "✓ APK 形态（PK\\x03\\x04）" : "✗ 异常"}`);
+    if (r.badging) {
+      const b = r.badging;
+      console.log(`  包名：${b.package ?? "?"} · versionName ${b.versionName ?? "?"} · versionCode ${b.versionCode ?? "?"}`);
+      console.log(`  minSdk ${b.sdkVersion ?? "?"} · targetSdk ${b.targetSdkVersion ?? "?"} · 标签 ${b.applicationLabel ?? "?"}`);
+      console.log(`  权限（${b.permissions.length} 项）：${b.permissions.slice(0, 6).join(" · ")}${b.permissions.length > 6 ? " …" : ""}`);
+      if (b.nativeCode.length > 0) console.log(`  native-code：${b.nativeCode.join(" · ")}`);
+    }
+    if (r.reason) console.log(`  💡 ${r.reason}`);
+    return 0;
+  }
+
+  // ---- 调试计划面（纯函数保底车道 —— 任何环境永远可用）----
+  if (verb === "plan") {
+    const platform = positional[1] ?? "android";
+    const symptom = positional.slice(2).filter((x) => !x.startsWith("--")).join(" ") || "crash";
+    if (!(MOBILE_PLAN_PLATFORMS as readonly string[]).includes(platform)) {
+      console.error(`✗ 未知平台 "${platform}"（三式：${MOBILE_PLAN_PLATFORMS.join("/")}）`);
+      return 2;
+    }
+    const p = mobileDebugPlan(platform, symptom);
+    console.log(`📱 移动端调试计划（平台 ${p.platform} · 症状 ${p.symptom} · ${p.steps.length} 步）：`);
+    for (const s of p.steps) {
+      console.log(`\n  ${s.step}. ${s.title}`);
+      if (s.cmd) console.log(`     $ ${s.cmd}`);
+      console.log(`     预期：${s.expect}`);
+      console.log(`     降级：${s.degrade}`);
+    }
+    console.log(`\n  ${p.note}`);
+    return 0;
+  }
+
+  // ---- 自检面 ----
+  if (verb === "self-test" || verb === "selftest") {
+    const t = mobileSelfTest();
+    console.log("🧪 移动端调试簇自检（解析器/计划器/魔数/socket 提取/argv 形态 —— 纯内存零副作用）：");
+    for (const c of t.checks) console.log(`  ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? `（${c.detail}）` : ""}`);
+    console.log(`\n  ${t.passed}/${t.total} 通过`);
+    return t.ok ? 0 : 1;
+  }
+
+  console.error(`未知子命令：${verb}`);
+  console.error(`用法：org mobile probe · devices · logcat [--serial S] [--lines N] [--tag T] [--level VDIWEF] [--package P]`);
+  console.error(`      org mobile forward [--serial S] [--port N] [--remote sock] · apk <app.apk> · plan <android|ios|both> [症状] · self-test`);
+  console.error("  移动端调试（#117）：多重优雅降级（adb→设备→socket→页面四层 / aapt→魔数两层 / 计划纯函数保底）·");
+  console.error("  执行面全只读（devices/logcat -d dump/forward/apk 检查 —— install/uninstall 只出现在计划的可粘贴命令里）");
+  return 2;
+}
+
 // ---- org memory：专家长期记忆（v0.5.3） ----------------------------------------
 
 async function cmdMemory(a: Args): Promise<number> {
@@ -3387,6 +3574,8 @@ export async function orgMain(): Promise<number> {
     case "collab": return cmdCollab(a);
     // v0.5.17 云生态簇（capabilities #67/#68/#72/#74）
     case "cloud": return cmdCloud(a);
+    // v0.5.18 移动端调试簇（capabilities #117）
+    case "mobile": return cmdMobile(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -3561,6 +3750,13 @@ export async function orgMain(): Promise<number> {
       ssh <host> "<cmd>"（host 须在 <ws>/ssh-hosts.allow）· ssh-template ·
       manifest <deployment|service|ingress|configmap|pvc> · terraform ·
       clis（10 家云 CLI 探测表）· overview（21 模型商 + 10 云 CLI 全景）
+  org mobile probe · devices · logcat · forward · apk · plan · self-test
+      移动端调试统一入口（v0.5.18 · #117）：多重优雅降级 —— devices 三层
+      （adb 缺席→无设备→未授权）/ forward 四层（adb→设备→socket 发现
+      /proc/net/unix→CDP /json 页面清单）/ apk 两层（aapt badging→魔数
+      PK 魔数）/ logcat 五元组 dump（-d 快照·tag/级别/包名过滤）· plan
+      纯函数保底（平台 × 症状矩阵步骤化计划，零外部依赖永远可用）·
+      执行面全只读（install/uninstall 只出现在计划的可粘贴命令里）
 
 仓库布局：hsl/ = HSL 源码；toolchain/dhv-ts = 内嵌解释器（vendored）；
           demo-run/ = 本地构建目录（git 忽略）；dist/ = 编译产物（入库）

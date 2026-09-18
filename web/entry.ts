@@ -167,6 +167,7 @@ import { cloudProbeAll, probeDocker, probeSsh, probeK8s, probeTerraform, probeCl
          dockerRun, dockerBuild, dockerfileFor, composeFor, dockerPlan,
          sshRun, scpUpload, sshConfigTemplate, sshPlan, k8sRun, k8sManifestFor, terraformPlan } from "../lib/cloud.ts"; // v0.5.17 云生态统一模块（#67/#68/#72/#74）
 import { suggestBreakpoints, debugPlan, dapSelfTest } from "../lib/debug.ts"; // v0.5.17 断点/调试建议（#108）
+import { probeMobile, mobileDevices, mobileLogcat, mobileDebugPlan, mobileSelfTest, MOBILE_PLAN_PLATFORMS } from "../lib/mobile.ts"; // v0.5.18 移动端调试（#117）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
 
@@ -1699,6 +1700,70 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
           }
           return json({ ok: false, error: `未知 action：${action || "（空）"}（docker/ssh/k8s）` }, 400);
         }
+        // v0.5.18 📱 移动端调试（#117）：GET ?action=probe|devices|logcat|plan
+        // [selftest]。只读四动作 + 自检。与 CLI org mobile / 工具环 mobile_* 同源
+        // lib/mobile.ts（单一实现防口径漂移）。执行车道全只读 —— forward/apk 的
+        // 深层探测在 CLI（Web 面保持只读四动作）。
+        if (route === "GET /api/govex/mobile") {
+          const action = String(url.searchParams.get("action") ?? "probe").trim();
+          try {
+            if (action === "probe") {
+              const p = probeMobile();
+              const face = (f: typeof p.adb) => ({ available: f.available, version: f.version, ...(f.reason ? { reason: f.reason } : {}) });
+              return json({
+                ok: true, took_ms: p.tookMs,
+                adb: { ...face(p.adb), android_home: p.androidHome },
+                aapt: face(p.aapt), aapt2: face(p.aapt2), scrcpy: face(p.scrcpy),
+                ideviceinstaller: face(p.ideviceinstaller), idevice_id: face(p.ideviceId),
+                flutter: face(p.flutter),
+                android_home: p.androidHome, summary: p.summary,
+                hint: "工具缺席不是失败 —— org mobile plan（纯函数保底）与 APK 魔数车道（org mobile apk）恒可用",
+              });
+            }
+            if (action === "devices") {
+              const r = mobileDevices();
+              return json({
+                ok: r.ok, ...(r.kind ? { kind: r.kind } : {}), ...(r.reason ? { reason: r.reason } : {}),
+                argv: r.argv, devices: r.devices, ready: r.ready, ios: r.ios, took_ms: r.tookMs,
+                hint: "unauthorized/offline 是设备清单的诚实状态而非失败（解锁屏幕点「允许」/重插）",
+              });
+            }
+            if (action === "logcat") {
+              const linesParam = url.searchParams.get("lines");
+              const lines = linesParam !== null ? Math.max(1, Math.floor(Number(linesParam) || 0)) : undefined;
+              const r = mobileLogcat({
+                ...(lines ? { lines } : {}),
+                ...(url.searchParams.get("tag") ? { tag: String(url.searchParams.get("tag")) } : {}),
+                ...(url.searchParams.get("level") ? { level: String(url.searchParams.get("level")) } : {}),
+                ...(url.searchParams.get("serial") ? { serial: String(url.searchParams.get("serial")) } : {}),
+                ...(url.searchParams.get("package") ? { package: String(url.searchParams.get("package")) } : {}),
+              });
+              return json({
+                ok: r.ok, ...(r.kind ? { kind: r.kind } : {}), ...(r.reason ? { reason: r.reason } : {}),
+                argv: r.argv,
+                entries: r.entries.slice(0, 200).map((e) => ({ time: e.time, pid: e.pid, tid: e.tid, level: e.level, tag: e.tag, message: e.message.slice(0, 200) })),
+                count: r.entries.length, skipped: r.skipped, truncated: r.truncated, took_ms: r.tookMs,
+                hint: "-d 是一次性 dump（流式尾随是路线图）；复现一次目标操作后再抓最完整",
+              });
+            }
+            if (action === "plan") {
+              const platform = String(url.searchParams.get("platform") ?? "android");
+              const symptom = String(url.searchParams.get("symptom") ?? "crash");
+              if (!(MOBILE_PLAN_PLATFORMS as readonly string[]).includes(platform)) {
+                return json({ ok: false, error: `platform 须为 ${MOBILE_PLAN_PLATFORMS.join("/")}` }, 400);
+              }
+              const p = mobileDebugPlan(platform, symptom);
+              return json({ ok: true, platform: p.platform, symptom: p.symptom, steps: p.steps, note: p.note });
+            }
+            if (action === "selftest" || action === "self-test") {
+              const t = mobileSelfTest();
+              return json({ ok: t.ok, passed: t.passed, total: t.total, checks: t.checks });
+            }
+            return json({ ok: false, error: `未知 action：${action || "（空）"}（probe/devices/logcat/plan/selftest —— 只读动作；forward/apk 深层探测走 CLI org mobile）` }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
         if (route === "GET /api/spawns") {
         // v0.5.11：派生池（agent_spawn 池化重档的观测面）。
           // 数据源三层：① <ws>/spawn/pool.json 登记（v0.5.11 起每次派生回写）；
@@ -2216,6 +2281,7 @@ export async function webMain(argv: string[]): Promise<number> {
   console.log(`  停止       POST /api/abort（运行轮 SIGKILL / body{id} 取消排队轮）`);
   console.log(`  协作面     GET/POST /api/govex/collab（v0.5.17 #87：threads/feed/users/summary/whoami + post/comment/user/bridge）`);
   console.log(`  云生态     GET/POST /api/govex/cloud（v0.5.17 #67/#68/#72/#74：probe 全景/dockerfile/compose/manifest/terraform 模板 + docker/ssh/k8s 白名单执行）`);
+  console.log(`  移动端     GET /api/govex/mobile（v0.5.18 #117：probe 三面探测/devices 设备清单/logcat dump 五元组/plan 计划保底 + selftest —— 只读动作）`);
   console.log(`  模型       ${p.model}（GUI 可切 scripted/deepseek，请求体可逐次覆盖）`);
   // v0.4.13：网关三件套可见性 —— 直连服务商（DeepSeek 等）的鉴权/模型/超时
   // 经环境变量注入（spawn 车道继承 process.env），横幅回显防「配了没生效」。
@@ -3257,7 +3323,7 @@ function renderIndexHtml(): string {
   <button id="toolboxBtn" class="rchip" type="button" title="工具箱（v0.5.15）— 🗄 SQLite 查询 · 🔎 符号跳转 · 🛡 密钥扫描 · 📦 审计导出 · 📋 SBOM · 👥 评审推荐">
     <span class="rc-label">🧰 工具箱</span>
   </button>
-  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16+）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🐞 LSP/DAP 调试 · 🌿 merge/rebase · 👥 团队协作 · ☁ 云生态">
+  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16+）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🐞 LSP/DAP 调试 · 🌿 merge/rebase · 👥 团队协作 · ☁ 云生态 · 📱 移动端调试">
     <span class="rc-label">🛡 治理与扩展</span>
   </button>
   <span class="tstats" id="topStats"></span>
@@ -3397,7 +3463,7 @@ function renderIndexHtml(): string {
 <div id="govexScrim" aria-hidden="true"></div>
 <div id="govexPane" role="dialog" aria-modal="true" aria-labelledby="gxTitle">
   <div class="schhead">
-    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git · 👥 协作 · ☁ 云生态（v0.5.16+）</div>
+    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git · 👥 协作 · ☁ 云生态 · 📱 移动端（v0.5.16+）</div>
     <button class="schclose" type="button" onclick="closeGovex()" title="关闭（Esc）" aria-label="关闭治理与扩展面板">✕</button>
     <div class="tbtabs" role="tablist">
       <button class="tbtab on" id="gxTabIac" type="button" role="tab" onclick="gxTab('iac')">🛡 IaC</button>
@@ -3411,6 +3477,7 @@ function renderIndexHtml(): string {
       <button class="tbtab" id="gxTabGit" type="button" role="tab" onclick="gxTab('git')">🌿 git</button>
       <button class="tbtab" id="gxTabCollab" type="button" role="tab" onclick="gxTab('collab')">👥 协作</button>
       <button class="tbtab" id="gxTabCloud" type="button" role="tab" onclick="gxTab('cloud')">☁ 云生态</button>
+      <button class="tbtab" id="gxTabMobile" type="button" role="tab" onclick="gxTab('mobile')">📱 移动端</button>
     </div>
   </div>
 
@@ -3584,9 +3651,37 @@ function renderIndexHtml(): string {
       </div>
       <div class="tbout" id="gxCloudRunOut"><div class="schempty">执行车道：docker/kubectl 子命令白名单（破坏性命令一律拒绝，拒绝先于 spawn）· ssh host 门控（ssh-hosts.allow）· 数组参数零 shell 面 · 路径过工作区监狱。CLI 同款 org cloud docker/ssh/k8s。</div></div>
     </section>
+
+    <section class="tbsec" id="gxSecMobile" hidden>
+      <div class="tbbar">
+        <button type="button" onclick="gxMobileProbe()">📱 工具链探测</button>
+        <button type="button" onclick="gxMobileDevices()">📲 设备清单</button>
+        <button type="button" onclick="gxMobileSelftest()">🧪 自检</button>
+        <span class="tbmeta" id="gxMobileMeta"></span>
+      </div>
+      <div class="tbout" id="gxMobileOut" style="margin-bottom:10px"><div class="schempty">移动端调试（#117）：Android/iOS/跨端三面探测（adb/aapt/scrcpy/idevice/flutter，缺席诚实降级）· 设备清单（adb devices -l 解析 · 未授权/offline 是诚实状态非失败 + iOS 面 UDID）。CLI 同款 org mobile probe/devices。</div></div>
+      <div class="tbbar">
+        <input id="gxMobTag" type="text" placeholder="tag（如 chromium/AndroidRuntime）" autocomplete="off" aria-label="logcat tag" style="max-width:190px">
+        <input id="gxMobLines" type="text" placeholder="行数（帽 2000）" autocomplete="off" aria-label="logcat 行数" style="max-width:90px">
+        <button type="button" onclick="gxMobileLogcat()">📜 logcat dump</button>
+        <span class="tbmeta">-d 快照（非尾随）· 五元组（时间/进程/级别/tag/消息）</span>
+      </div>
+      <div class="tbout" id="gxMobLogcatOut" style="margin-bottom:10px"><div class="schempty">logcat dump：adb logcat -d -t N 快照 + 五元组结构化（时间/进程/级别/tag/消息）· tag 过滤（-s TAG）· 行数钳 1..2000。无 adb/无设备 → 诚实降级 + 指引。CLI 同款 org mobile logcat。</div></div>
+      <div class="tbbar">
+        <select id="gxMobPlat" aria-label="计划平台" style="max-width:110px">
+          <option value="android">android</option><option value="ios">ios</option><option value="both">both</option>
+        </select>
+        <select id="gxMobSym" aria-label="症状" style="max-width:130px">
+          <option value="crash">crash 崩溃</option><option value="白屏">白屏</option><option value="network">network 网络</option><option value="卡顿">performance 卡顿</option><option value="build">build 构建</option><option value="装不上">install 安装</option><option value="webview">webview</option>
+        </select>
+        <button type="button" onclick="gxMobilePlan()">📋 调试计划</button>
+        <span class="tbmeta">纯函数保底（零外部依赖永远可用）</span>
+      </div>
+      <div class="tbout" id="gxMobPlanOut" style="max-height:320px"><div class="schempty">调试计划：平台 × 症状矩阵 → 步骤化计划（每步 = 可粘贴命令 + 预期 + 降级指引）。工具缺席环境的主交付 —— 无 adb/无真机也永远可用。CLI 同款 org mobile plan。</div></div>
+    </section>
   </div>
 
-  <div class="spwfoot">治理与扩展面板与 CLI / 工具环同源（lib/dbdiag · gitmerge · rbac · iacscan · plugins · openapi · browser · completion · rename · lsp · debug · collab · cloud 单一实现三端消费）—— v0.5.16 「每个功能都有对应操作页面」的延续。</div>
+  <div class="spwfoot">治理与扩展面板与 CLI / 工具环同源（lib/dbdiag · gitmerge · rbac · iacscan · plugins · openapi · browser · completion · rename · lsp · debug · collab · cloud · mobile 单一实现三端消费）—— v0.5.16 「每个功能都有对应操作页面」的延续。</div>
 </div>
 <div id="voiceScrim" aria-hidden="true"></div>
 <div id="voicePane" role="dialog" aria-modal="true" aria-labelledby="voTitle">
@@ -5233,7 +5328,7 @@ function closeGovex() {
   document.getElementById("govexPane").classList.remove("on");
   document.getElementById("govexScrim").classList.remove("on");
 }
-var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Lsp", "lsp"], ["Git", "git"], ["Collab", "collab"], ["Cloud", "cloud"]];
+var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Lsp", "lsp"], ["Git", "git"], ["Collab", "collab"], ["Cloud", "cloud"], ["Mobile", "mobile"]];
 function gxTab(sec) {
   for (const [k, id] of GX_TABS) {
     document.getElementById("gxTab" + k).classList.toggle("on", id === sec);
@@ -5746,6 +5841,104 @@ function gxCloudRun(lane) {
     if (so) h += '<pre style="margin:6px 0 0;white-space:pre-wrap;font:11px/1.5 var(--mono)">' + esc(so.slice(0, 6000)) + "</pre>";
     const se = String(j.stderr || "").trim();
     if (se) h += '<div class="tbmeta">（stderr）' + esc(se.slice(0, 1500)) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+// ---- 📱 移动端面板（v0.5.18：#117 —— 三面探测 · 设备清单 · logcat dump · 调试计划，只读动作） ----
+function gxMobileProbe() {
+  const out = document.getElementById("gxMobileOut"), meta = document.getElementById("gxMobileMeta");
+  out.innerHTML = '<div class="schempty">探测中…（adb/aapt/scrcpy/idevice/flutter 五工具 which + 版本探活；缺席诚实降级）</div>';
+  fetch("/api/govex/mobile?action=probe").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    const s = j.summary || {};
+    meta.textContent = j.took_ms + "ms · Android " + (s.androidFace ? "✓" : "✗") + " · APK " + (s.apkFace ? "✓" : "✗") + " · iOS " + (s.iosFace ? "✓" : "✗") + " · 跨端 " + (s.crossFace ? "✓" : "✗");
+    let h = "";
+    const row = function (icon, name, f) {
+      h += '<div class="tbrow">' + icon + " <b>" + name + "</b> " + (f.available ? '<span class="spwc">✓ 在场' + (f.version ? "（" + esc(String(f.version).slice(0, 40)) + "）" : "") + "</span>" : "⬜ 缺席") + (f.reason ? ' · <span class="tbmeta">' + esc(String(f.reason).slice(0, 110)) + "</span>" : "") + "</div>";
+    };
+    row("🤖", "adb", j.adb);
+    row("📦", "aapt", j.aapt);
+    row("📦", "aapt2", j.aapt2);
+    row("🖼", "scrcpy", j.scrcpy);
+    row("🍏", "ideviceinstaller", j.ideviceinstaller);
+    row("🍏", "idevice_id", j.idevice_id);
+    row("🦋", "flutter", j.flutter);
+    h += '<div class="tbrow">SDK 根：' + esc(j.android_home || "未定位（adb 在 PATH 时无需定位）") + "</div>";
+    if (s.facesUp === 0) h += '<div class="tbrow" style="margin-top:4px">⚠ 工具缺席环境 —— 调试计划（下方）是保底车道（纯函数永远可用）</div>';
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxMobileDevices() {
+  const out = document.getElementById("gxMobileOut"), meta = document.getElementById("gxMobileMeta");
+  out.innerHTML = '<div class="schempty">清单中…（adb devices -l · 未授权/offline 是诚实状态非失败）</div>';
+  fetch("/api/govex/mobile?action=devices").then(function (r) { return r.json(); }).then(function (j) {
+    const kindText = { "tool-absent": "adb CLI 缺席（安装指引见探测）", "no-device": "无设备", unauthorized: "未授权", "multi-device": "多设备", timeout: "超时", failed: "执行失败" };
+    if (!j.ok) {
+      out.innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(kindText[j.kind] || "") + " —— " + esc(String(j.reason || j.error || "").split("\\n")[0].slice(0, 200)) + "</div>";
+      return;
+    }
+    meta.textContent = (j.devices || []).length + " 台 · 就绪 " + (j.ready ?? 0);
+    let h = '<div class="tbsym">📱 Android 设备（' + (j.devices || []).length + " 台 · 就绪 " + (j.ready ?? 0) + "）</div>";
+    for (const d of j.devices || []) {
+      const stateCls = d.state === "device" ? "spwc" : "tbmeta";
+      h += '<div class="tbrow"><b>' + esc(d.serial) + '</b> <span class="' + stateCls + '">' + esc(d.state) + "</span> " + esc([d.model, d.product, d.device].filter(Boolean).join(" · ") || "（无 -l 描述 —— 未授权/离线常见）") + (d.transport ? ' · <span class="tbmeta">' + esc(d.transport) + "</span>" : "") + "</div>";
+    }
+    if (!(j.devices || []).length) h += '<div class="schempty">（' + esc(String(j.reason || "无设备连接").slice(0, 200)) + "）</div>";
+    const ios = j.ios || {};
+    h += '<div class="tbmeta" style="margin-top:6px">🍏 iOS 面：' + esc(String(ios.note || "").slice(0, 160)) + "</div>";
+    for (const u of ios.udids || []) h += '<div class="tbrow">　' + esc(u) + "</div>";
+    h += '<div class="tbmeta">argv：' + esc((j.argv || []).join(" ")) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxMobileLogcat() {
+  const out = document.getElementById("gxMobLogcatOut");
+  const tag = document.getElementById("gxMobTag").value.trim();
+  const lines = document.getElementById("gxMobLines").value.trim();
+  let url = "/api/govex/mobile?action=logcat";
+  if (tag) url += "&tag=" + encodeURIComponent(tag);
+  if (lines) url += "&lines=" + encodeURIComponent(lines);
+  out.innerHTML = '<div class="schempty">抓取中…（adb logcat -d 快照 · 五元组解析）</div>';
+  fetch(url).then(function (r) { return r.json(); }).then(function (j) {
+    const kindText = { "tool-absent": "adb CLI 缺席", "no-device": "无设备连接", unauthorized: "设备未授权", "multi-device": "多设备未指定 serial", timeout: "超时", failed: "执行失败" };
+    if (!j.ok) {
+      out.innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(kindText[j.kind] || "") + " —— " + esc(String(j.reason || j.error || "").split("\\n")[0].slice(0, 200)) + "</div>";
+      return;
+    }
+    let h = '<div class="tbsym">📜 logcat dump（' + (j.count ?? 0) + " 条 · 未匹配 " + (j.skipped ?? 0) + (j.truncated ? " · 截断" : "") + "）</div>";
+    h += '<div class="tbmeta">argv：' + esc((j.argv || []).join(" ")) + "</div>";
+    for (const e of (j.entries || []).slice(-25)) {
+      h += '<div class="tbrow"><span class="tbmeta">' + esc(e.time) + "</span>  " + String(e.pid).padStart(6) + "  " + esc(e.level) + " <b>" + esc(e.tag) + "</b>: " + esc(String(e.message).slice(0, 120)) + "</div>";
+    }
+    if (!(j.entries || []).length) h += '<div class="schempty">（空 —— ' + esc(String(j.reason || "无匹配日志行").slice(0, 160)) + "）</div>";
+    else if ((j.entries || []).length > 25) h += '<div class="tbmeta">…（仅示尾 25 条 / 共 ' + j.entries.length + " 条）</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxMobilePlan() {
+  const plat = document.getElementById("gxMobPlat").value;
+  const sym = document.getElementById("gxMobSym").value;
+  const out = document.getElementById("gxMobPlanOut");
+  out.innerHTML = '<div class="schempty">生成中…（纯函数 —— 零外部依赖永远可用）</div>';
+  fetch("/api/govex/mobile?action=plan&platform=" + encodeURIComponent(plat) + "&symptom=" + encodeURIComponent(sym)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    let h = '<div class="tbsym">📋 调试计划（平台 ' + esc(j.platform) + " · 症状 " + esc(j.symptom) + " · " + (j.steps || []).length + " 步）</div>";
+    for (const s of j.steps || []) {
+      h += '<div class="tbrow" style="margin-top:6px">' + s.step + ". <b>" + esc(s.title) + "</b>" + (s.cmd ? ' — <code>' + esc(String(s.cmd).slice(0, 140)) + "</code>" : "") + "</div>";
+      h += '<div class="tbmeta">　▸ 预期：' + esc(s.expect) + "</div>";
+      h += '<div class="tbmeta">　↩ 降级：' + esc(s.degrade) + "</div>";
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxMobileSelftest() {
+  const out = document.getElementById("gxMobileOut"), meta = document.getElementById("gxMobileMeta");
+  out.innerHTML = '<div class="schempty">自检中…（解析器/计划器/魔数/socket 提取 —— 纯内存）</div>';
+  fetch("/api/govex/mobile?action=selftest").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok && !j.checks) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    meta.textContent = j.passed + "/" + j.total + " 通过";
+    let h = '<div class="tbsym">🧪 自检 ' + j.passed + "/" + j.total + "</div>";
+    for (const c of j.checks || []) h += '<div class="tbrow">' + (c.ok ? "✓" : "✗") + " " + esc(c.name) + (c.detail ? ' <span class="tbmeta">（' + esc(c.detail) + "）</span>" : "") + "</div>";
     out.innerHTML = h;
   }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
 }
