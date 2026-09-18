@@ -66,6 +66,11 @@ import { lspDefinition, lspReferences, lspHover, detectLspServers, protocolSelfT
 import { suggestBreakpoints, debugPlan, dapSelfTest } from "../lib/debug.ts"; // v0.5.17 断点/调试建议（#108）
 import { latestSession } from "../lib/sessions.ts"; // v0.5.17：collab bridge 缺省会话（只读复用会话账本协议）
 import {
+  probeRemote, loadRemoteHosts, saveRemoteHosts, findRemoteHost, REMOTE_HOSTS_FILE, REMOTE_HOSTS_GUIDANCE,
+  remoteExec, remoteSync, remotePing, remoteDeployPlan, REMOTE_DEPLOY_MODES, remoteSelfTest,
+  REMOTE_READONLY_COMMANDS, type RemoteRunResult,
+} from "../lib/remote.ts"; // v0.5.18 远程 Agent 簇（#133 —— 会话/部署/计划层，与 cloud_ssh 单命令执行互补）
+import {
   currentUser, setUser, postThread, commentOn, listThreads, threadFeed, flattenThread,
   collaborators, collabSummary, bridgeSession, COLLAB_DIR_REL,
 } from "../lib/collab.ts"; // v0.5.17 团队协作层（#87 团队共享会话/评论）
@@ -3205,6 +3210,157 @@ async function cmdCloud(a: Args): Promise<number> {
   return 2;
 }
 
+// ---- org remote：远程 Agent 簇（v0.5.18 · #133）-----------------------------------
+
+/** RemoteRunResult 统一渲染（remoteExec/remoteSync 车道 —— 成功吐输出、失败吐 kind+reason）。 */
+function renderRemoteRun(r: RemoteRunResult, label: string): number {
+  const kindText: Record<string, string> = {
+    denied: "白名单拒绝（未执行）", "host-not-found": "host 未在档案（不猜默认主机）",
+    "tool-absent": "CLI 缺席（降级车道可用）", jail: "路径越界（工作区监狱）",
+    timeout: "超时", refused: "拒连/不可达", auth: "鉴权失败", failed: "执行失败（退出码非 0）",
+  };
+  const argvPreview = r.argv.join(" ").slice(0, 160);
+  if (!r.ok) {
+    console.error(`✗ ${label}（${kindText[r.kind ?? "?"] ?? r.kind}）：${r.reason ?? ""}`);
+    console.error(`  argv（数组参数 · 零 shell 面）：${argvPreview}`);
+    if (r.kind === "denied" && (r.reason ?? "").includes("allow_full")) {
+      console.error(`  全量命令车道：org remote exec <host> "<cmd>" --allow-full（显式开启 —— 由你对命令内容负责）`);
+    }
+    return 1;
+  }
+  console.log(`✓ ${label}（${r.tookMs}ms · argv 数组参数）：${argvPreview}`);
+  if (r.stdout.trim().length > 0) console.log(r.stdout.trim().split("\n").slice(0, 60).join("\n"));
+  if (r.stderr.trim().length > 0) console.log(`（stderr）${r.stderr.trim().split("\n").slice(0, 10).join("\n")}`);
+  return 0;
+}
+
+/** org remote —— 远程 Agent 统一入口（probe/hosts/exec/sync/ping/plan/self-test）。 */
+async function cmdRemote(a: Args): Promise<number> {
+  const positional = a.rest.filter((r) => !r.startsWith("--"));
+  const verb = positional[0] ?? "probe";
+  const ws = defaultWorkspace(a);
+
+  // ---- 探测面 ----
+  if (verb === "probe") {
+    const p = probeRemote();
+    console.log(`🛰 远程会话工具链探测：`);
+    console.log(`  🔐 ssh        ${p.available ? `✓ 在场（${p.versionRaw ?? "?"} → OpenSSH ${p.openSsh ? `${p.openSsh.major}.${p.openSsh.minor}` : "?"}）` : "✗ 缺席"}`);
+    console.log(`  📤 rsync      ${p.rsyncAvailable ? `✓ 在场（${(p.rsyncVersion ?? "").slice(0, 46)}）` : "✗ 缺席"}（同步主车道）`);
+    console.log(`  📥 scp        ${p.scpAvailable ? "✓ 在场" : "✗ 缺席"}（rsync 缺席时的降级车道）`);
+    console.log(`  🔑 ssh-keygen ${p.sshKeygenAvailable ? "✓ 在场" : "✗ 缺席"}（密钥生成指引可行）`);
+    console.log(`  🔁 agent      ${p.agentForwarding ? "✓ SSH_AUTH_SOCK 在场（BatchMode 下 agent 密钥可用）" : "✗ 无 agent 转发环境（SSH_AUTH_SOCK 缺席）"}`);
+    if (p.reason) console.log(`  ${p.reason}`);
+    console.log(`\n  档案：<ws>/${REMOTE_HOSTS_FILE}（主机档案 —— host 寻址的门控源）· 计划车道：org remote plan [host] [git|rsync|container|all]`);
+    return 0; // 探测本身成功（全景面缺席是结果不是失败 —— 与 org cloud probe 全景同哲学；诚实呈现绿 ✓ / 灰 ⬜）
+  }
+
+  // ---- 主机档案面 ----
+  if (verb === "hosts") {
+    const report = loadRemoteHosts(ws);
+    console.log(`🛰 ${REMOTE_HOSTS_FILE}：${report.exists ? `${report.hosts.length} 个主机在册` : "未创建（host 寻址一律拒绝 —— 安全缺省）"}`);
+    console.log(`  路径：${report.file}`);
+    if (report.hosts.length > 0) {
+      for (const h of report.hosts) {
+        console.log(`    ${h.name.padEnd(12)} ${h.user}@${h.host}:${h.port ?? 22}${h.identity ? ` · key ${h.identity}` : ""}`);
+      }
+    }
+    for (const e of report.errors) console.log(`  ⚠ ${e}`);
+    if (positional[1]) {
+      const f = findRemoteHost(ws, positional[1]);
+      console.log(`  判定 "${positional[1]}" → ${f.entry ? `✓ 放行（档案 ${f.by === "name" ? "名" : "host 字段"}：${f.entry.name}）` : "✗ 拒绝（不在档案）"}`);
+    }
+    if (!report.exists || report.hosts.length === 0) console.log(`\n  ${REMOTE_HOSTS_GUIDANCE}`);
+    return 0;
+  }
+
+  // ---- 执行面（会话级 remoteExec —— 白名单默认只读）----
+  if (verb === "exec") {
+    const host = positional[1];
+    const command = positional.slice(2).filter((x) => !x.startsWith("--")).join(" ");
+    if (!host || !command) {
+      console.error(`用法：org remote exec <host> "<command>" [--allow-full] [--timeout N] [--workspace DIR]`);
+      console.error(`  host 须在 <ws>/${REMOTE_HOSTS_FILE} 档案内（不猜默认）；命令白名单默认只读：${REMOTE_READONLY_COMMANDS.join("/")}`);
+      console.error("  非白名单命令须 --allow-full 显式开启（RBAC 哲学：读 = 缺省，执行 = 显式）");
+      return 2;
+    }
+    const timeout = Number(restFlag(a, "timeout"));
+    return renderRemoteRun(remoteExec(ws, {
+      host, command,
+      ...(Number.isFinite(timeout) && timeout > 0 ? { timeoutMs: timeout } : {}),
+      ...(restBool(a, "allow-full") ? { allowFull: true } : {}),
+    }), `remote exec ${host}`);
+  }
+
+  // ---- 同步面（rsync → scp → 指引三层降级）----
+  if (verb === "sync") {
+    const [host, local, remote] = positional.slice(1);
+    const direction = restFlag(a, "direction") === "download" ? "download" : "upload";
+    if (!host || !local || !remote) {
+      console.error(`用法：org remote sync <host> <local（工作区内）> <remote路径> [--direction upload|download]`);
+      console.error(`  rsync -avz（主车道）→ scp -r（rsync 缺席降级）→ 指引（双缺）；local 过工作区监狱`);
+      return 2;
+    }
+    return renderRemoteRun(remoteSync(ws, { host, local, remote, direction }), `remote sync ${host}（${direction}）`);
+  }
+
+  // ---- 心跳/延迟面 ----
+  if (verb === "ping") {
+    const host = positional[1];
+    if (!host) { console.error(`用法：org remote ping <host> [--rounds N]（ssh echo 往返计时 min/avg/max；host 须在档案）`); return 2; }
+    const rounds = Number(restFlag(a, "rounds"));
+    const r = remotePing(ws, { host, ...(Number.isFinite(rounds) && rounds > 0 ? { rounds } : {}) });
+    if (!r.ok) {
+      const kindText: Record<string, string> = { "host-not-found": "host 未在档案（不猜默认主机）", "tool-absent": "ssh CLI 缺席", refused: "拒连/不可达" };
+      console.error(`✗ remote ping ${host}（${kindText[r.kind ?? "?"] ?? r.kind}）：${r.reason ?? ""}`);
+      return 1;
+    }
+    console.log(`🛰 remote ping ${host}：${r.rounds} 轮 echo 往返（失败 ${r.failures} 轮）`);
+    console.log(`  延迟 min/avg/max = ${r.stats!.min}/${r.stats!.avg}/${r.stats!.max} ms${r.failures > 0 ? "（部分降级：统计只计成功轮）" : ""}`);
+    console.log(`  逐轮：${r.times.map((t) => `${t}ms`).join(" · ")}`);
+    return 0;
+  }
+
+  // ---- 部署计划面（纯函数保底车道 —— 无真远程机环境的主交付）----
+  if (verb === "plan") {
+    const host = positional[1] ?? restFlag(a, "host") ?? "";
+    const mode = positional[2] ?? restFlag(a, "mode") ?? "all";
+    if (!(REMOTE_DEPLOY_MODES as readonly string[]).includes(mode)) {
+      console.error(`✗ 未知模式 "${mode}"（四式：${REMOTE_DEPLOY_MODES.join("/")}）`);
+      return 2;
+    }
+    // host 若在档案 → 实参化（user/port 就位）；不在档案也照出计划（占位形态）
+    const f = host ? findRemoteHost(ws, host) : null;
+    const entry = f?.entry;
+    const p = remoteDeployPlan({
+      host: entry?.host ?? host, user: entry?.user ?? restFlag(a, "user") ?? "", mode,
+    });
+    console.log(`🛰 远程 Agent 部署计划（模式 ${p.mode} · 目标 ${p.target}${entry ? `（档案 ${entry.name}）` : "（占位 —— 未在档案实参化）"}）：`);
+    for (const ph of p.phases) {
+      console.log(`\n  ${ph.title}`);
+      for (const [i, s] of ph.steps.entries()) {
+        console.log(`    ${i + 1}. ${s.cmd.split("\n").join("\n       ")}`);
+        console.log(`       # ${s.note}${s.expect ? `\n       ▸ ${s.expect}` : ""}`);
+      }
+    }
+    console.log(`\n  诚实边界：计划是纯函数（不 spawn 不落盘）；真机执行走 org remote exec/sync/ping（须档案 + 白名单）。`);
+    return 0;
+  }
+
+  // ---- 自检面 ----
+  if (verb === "self-test" || verb === "selftest") {
+    const t = remoteSelfTest();
+    console.log("🧪 远程 Agent 簇自检（计划器/档案校验/白名单/三类诊断/ping 统计/argv 形态 —— 纯内存）");
+    for (const c of t.checks) console.log(`  ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? `（${c.detail}）` : ""}`);
+    console.log(`\n  ${t.passed}/${t.total} 通过`);
+    return t.ok ? 0 : 1;
+  }
+
+  console.error(`未知子命令：${verb}`);
+  console.error(`用法：org remote probe · hosts [name] · exec <host> "<cmd>" [--allow-full] · sync <host> <local> <remote> [--direction upload|download]`);
+  console.error(`      org remote ping <host> [--rounds N] · plan [host] [git|rsync|container|all] · self-test（#133 远程 Agent 统一入口）`);
+  return 2;
+}
+
 // ---- org memory：专家长期记忆（v0.5.3） ----------------------------------------
 
 async function cmdMemory(a: Args): Promise<number> {
@@ -3387,6 +3543,8 @@ export async function orgMain(): Promise<number> {
     case "collab": return cmdCollab(a);
     // v0.5.17 云生态簇（capabilities #67/#68/#72/#74）
     case "cloud": return cmdCloud(a);
+    // v0.5.18 远程 Agent 簇（capabilities #133 —— 会话/部署/计划层）
+    case "remote": return cmdRemote(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -3561,6 +3719,14 @@ export async function orgMain(): Promise<number> {
       ssh <host> "<cmd>"（host 须在 <ws>/ssh-hosts.allow）· ssh-template ·
       manifest <deployment|service|ingress|configmap|pvc> · terraform ·
       clis（10 家云 CLI 探测表）· overview（21 模型商 + 10 云 CLI 全景）
+  org remote probe · hosts [name] · exec · sync · ping · plan · self-test
+      远程 Agent 簇（v0.5.18 · #133 会话/部署/计划层 —— 与 cloud_ssh 单命令
+      执行互补）：probe 四工具探测（ssh/scp/rsync/ssh-keygen + OpenSSH
+      版本 + agent 环境）· hosts 主机档案（<ws>/remote-hosts.json，name→
+      host/user/port/identity；host 不在档案 = 拒绝不猜默认）· exec 会话级
+      执行（命令白名单默认只读，非白名单须 --allow-full）· sync rsync→scp→
+      指引三层降级（local 过监狱）· ping echo 往返 min/avg/max · plan 部署
+      计划四式（git/rsync/容器/run 队列远程化+回滚，纯函数保底车道）
 
 仓库布局：hsl/ = HSL 源码；toolchain/dhv-ts = 内嵌解释器（vendored）；
           demo-run/ = 本地构建目录（git 忽略）；dist/ = 编译产物（入库）
