@@ -97,6 +97,8 @@ const SIDECAR_SUFFIX = ".migrations.json";
 interface SqliteStmt {
   readonly columnNames: string[];
   values(...params: unknown[]): unknown[][];
+  get(...params: unknown[]): unknown;
+  run(...params: unknown[]): unknown;
   finalize(): void;
 }
 
@@ -313,7 +315,9 @@ export function dbSchema(file: string): DbSchemaInfo {
     if (file !== ":memory:") info.sizeBytes = fs.statSync(file).size;
     // sqlite_master 一次取全（元数据面天然轻量；256MB 帽不设于此 —— 行数
     // 抽查自带 10MB 阈，其余全是目录读取）
-    const master = stmtOf(db, "SELECT type, name FROM sqlite_master").values() as Array<[string, string]>;
+    const masterSt = stmtOf(db, "SELECT type, name FROM sqlite_master");
+    const master = masterSt.values() as Array<[string, string]>;
+    try { masterSt.finalize(); } catch { /* 已终结 */ }
     const tableNames: string[] = [];
     for (const [type, name] of master) {
       if (type === "table" && !name.startsWith("sqlite_")) tableNames.push(name);
@@ -332,13 +336,17 @@ export function dbSchema(file: string): DbSchemaInfo {
       if (countRows) {
         try {
           const ident = `"${name.replace(/"/g, '""')}"`;
-          rowCount = (stmtOf(db, `SELECT COUNT(*) FROM ${ident}`).values()[0]?.[0] as number | undefined) ?? null;
+          const cntSt = stmtOf(db, `SELECT COUNT(*) FROM ${ident}`);
+          rowCount = (cntSt.values()[0]?.[0] as number | undefined) ?? null;
+          try { cntSt.finalize(); } catch { /* 已终结 */ }
         } catch { rowCount = null; }
       }
       info.tables.push({ name, columns: cols, rowCount });
     }
     try { colSt.finalize(); } catch { /* 兜底 */ }
-    const jm = db.prepare("PRAGMA journal_mode").get() as { journal_mode?: string } | null;
+    const jmSt = stmtOf(db, "PRAGMA journal_mode");
+    const jm = jmSt.get() as { journal_mode?: string } | null;
+    try { jmSt.finalize(); } catch { /* 已终结 */ }
     info.journalMode = jm?.journal_mode ?? null;
   } catch {
     // 部分聚合失败 → 保留已聚合部分（优雅降级，绝不抛）
@@ -494,7 +502,9 @@ function writeSidecar(file: string, list: DbMigration[]): void {
 function tableHistory(db: Database): Map<number, string> {
   const out = new Map<number, string>();
   try {
-    const rows = stmtOf(db, `SELECT version, name FROM ${MIGRATIONS_TABLE} ORDER BY version`).values();
+    const histSt = stmtOf(db, `SELECT version, name FROM ${MIGRATIONS_TABLE} ORDER BY version`);
+    const rows = histSt.values();
+    try { histSt.finalize(); } catch { /* 已终结 */ }
     for (const [v, name] of rows as Array<[number, string]>) out.set(v, name);
   } catch {
     // no such table（尚未初始化）→ 空历史
@@ -596,8 +606,9 @@ export function dbApplyMigration(
         `CREATE TABLE IF NOT EXISTS ${MIGRATIONS_TABLE} ` +
           "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)",
       );
-      db.prepare(`INSERT INTO ${MIGRATIONS_TABLE}(version, name, applied_at) VALUES (?, ?, ?)`)
-        .run(version, n, appliedAt);
+      const insSt = stmtOf(db, `INSERT INTO ${MIGRATIONS_TABLE}(version, name, applied_at) VALUES (?, ?, ?)`);
+      insSt.run(version, n, appliedAt);
+      try { insSt.finalize(); } catch { /* 已终结 */ }
       db.exec(sql); // 多条语句允许；失败 → 外层 catch 整体回滚
       if (dryRun) db.exec("ROLLBACK");
       else db.exec("COMMIT");
