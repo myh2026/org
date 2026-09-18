@@ -13,11 +13,32 @@
 // CI 无残留进程、无端口冲突（绝不用 3000/3030/5000/4600 固定端口）。
 // ============================================================================
 
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { TEST_RUN, runOrg, makeWorkspace, exists } from "./helpers";
 import { startWebServer, parseLedgerRaw, parseAskOut, parseWebArgv, renderMd } from "../web/entry.ts";
+import { snapshotEnv, clearEnv, restoreEnv, type EnvSnapshot } from "./env-hygiene";
+
+// v0.5.17.1 环境卫生（文件级钩子，双层）：
+// ① 敏感变量清零/恢复（parseWebArgv 缺省与 model 回落链对干净环境有假设 ——
+//   宿主注入 DEEPSEEK_API_KEY/DHV_LLM_GATEWAY 时假红，甚至触发真实 LLM 出网）。
+// ② ORG_CONFIG 定向沙盒：config 链测试（/api/config preset/use/keys-add）写
+//   ~/.org/config.json 全局配置（实弹事故：假 key sk-web-test-12345678 +
+//   default_lane=deepseek 落盘全局 → 此后所有「裸模型 id」解析成 real 车道
+//   真实出网 401，model 回落链用例稳定红，且污染用户真实环境）。沙盒后：
+//   测试写沙盒零全局污染；model 回落链读沙盒（初始无文件 → 空配置 →
+//   裸模型 → scripted 剧本轨道，符合用例期望）。
+const __envSnap: EnvSnapshot = snapshotEnv();
+const __sandboxConfig = path.join(TEST_RUN, "web-test-config.json");
+beforeEach(() => {
+  clearEnv();
+  process.env.ORG_CONFIG = __sandboxConfig; // 沙盒配置（config 链测试与 model 回落链共用）
+  if (fs.existsSync(__sandboxConfig)) fs.rmSync(__sandboxConfig);
+});
+afterEach(() => {
+  restoreEnv(__envSnap);
+});
 
 /** 诗人 harness 样本（导入测试用）：/// 人格文档 + #[capability] 注解，
  *  import 时自动生成占位剧本（direct:poet 轨道）—— scripted 秒回。 */
