@@ -54,7 +54,15 @@ export function jailRelative(ws: string, p: string): string {
   return t === w ? "." : t.slice(w.length + 1);
 }
 
-/** 工作区绝对形：相对路径解析进 ws（win32 下 resolve 产 "\" 形 —— fs 两形皆收）。 */
+/** 工作区绝对形：相对路径解析进 ws（win32 下 resolve 产 "\" 形 —— fs 两形皆收）。
+ * win32 无盘符基底（POSIX 风格 "/a/ws"）：path.resolve 会附当前盘符（D:\a\ws\…），
+ * 与基底的比较形不可比 —— 剥回无盘符形（fs 两形皆收，jail 比较恢复可比）。
+ * 生产面 ws 恒为带盘符原生形（org 宿主解析），此分支只救测试/词法形调用。 */
 export function resolveInWorkspace(ws: string, p: string): string {
-  return path.isAbsolute(String(p ?? "")) ? String(p) : path.resolve(String(ws), String(p));
+  if (path.isAbsolute(String(p ?? ""))) return String(p);
+  const joined = path.resolve(String(ws), String(p));
+  if (process.platform === "win32" && !/^[a-zA-Z]:/.test(String(ws)) && /^[a-zA-Z]:/.test(joined)) {
+    return joined.slice(2); // 剥盘符：D:\a\ws\x → \a\ws\x（canonFor → /a/ws/x，与基底可比）
+  }
+  return joined;
 }

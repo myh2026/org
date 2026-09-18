@@ -86,10 +86,18 @@ describe("pathjail：jailRelative 相对形", () => {
     expect(jailRelative("/a/ws", "/a/ws")).toBe(".");
     expect(jailRelative("/a/ws", "/b/x.ts")).toBe("/b/x.ts"); // 越界原样（调用方决定报错口径）
   });
-  test("resolveInWorkspace：相对解析进 ws；绝对透传", () => {
-    // win32 的 path.resolve 产 "\" 形（fs 两形皆收）—— 断言按比较形归一，跨平台同规
+  test("resolveInWorkspace：相对解析进 ws；绝对透传（win32 无盘符基底剥盘符保可比）", () => {
+    // win32 的 path.resolve 产 "\" 形且对无盘符基底（"/a/ws"）附当前盘符 ——
+    // resolveInWorkspace 剥回无盘符形，canonFor 后与基底可比（跨平台同规）。
     expect(canonFor(process.platform, resolveInWorkspace("/a/ws", "src/app.hsl"))).toBe("/a/ws/src/app.hsl");
     expect(resolveInWorkspace("/a/ws", "/abs/x.ts")).toBe("/abs/x.ts"); // 绝对形透传不 resolve
+    // 语义闭环：解析产物经 inWorkspace 判定必在基底内（jail 比较形一致性）
+    expect(inWorkspace("/a/ws", resolveInWorkspace("/a/ws", "src/app.hsl"))).toBe(true);
+    // win32 真实形态：带盘符基底不剥（生产行为不变）
+    if (process.platform === "win32") {
+      const drive = process.cwd().slice(0, 2); // 如 "D:"
+      expect(canonFor("win32", resolveInWorkspace(drive + "/a/ws", "src/app.hsl"))).toBe("d:/a/ws/src/app.hsl");
+    }
   });
 });
 
