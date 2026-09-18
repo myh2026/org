@@ -1,4 +1,4 @@
-# ORG 能力矩阵 —— 主 Agent 150 项 / 专家 Agent 25 项对照（v0.5.4 底稿 · 持续增补至 v0.5.15）
+# ORG 能力矩阵 —— 主 Agent 150 项 / 专家 Agent 25 项对照（v0.5.4 底稿 · 持续增补至 v0.5.16）
 
 > 本文是**毕业论文的能力对照底稿**：把 ORG 当前实现（v0.5.4，357/357 测试全绿）
 > 对照「桌面 Agent 主 agent 应有的 150 项能力」（十大类）与「专家 agent 应有的
@@ -67,14 +67,14 @@
 | 27 | AST、语法树与类型信息 | ✅ | **这是 HSL 的本体**：S1-S8 静态铁律 + 38 后端 AST 投射 + 语义对拍 |
 | 28 | 增量索引/跨仓搜索 | 🟡 | 静默更新检测 + N 版本冗余 + registry git 资产层；代码索引未做 |
 | 29 | 代码图谱/知识图谱 | 🟡 | graph 拓扑（G1-G6 校验 + node/edge 事件可观测）即程序结构图谱；知识图谱未做 |
-| 30 | 浏览器 DOM/页面上下文 | ⬜ | 未做（org web 是控制面不是浏览器自动化面） |
+| 30 | 浏览器 DOM/页面上下文 | ✅ | **v0.5.16** lib/browser.ts 多引擎降级链（agent-browser → chromium → chrome，探活 + 级联 + 全败合并错误摘要）：`browserSnapshot`（标题/正文/链接 cap 100/图片 cap 50，剥 script·style）· `browserScreenshot`（整页 PNG，盘上字节校验非引擎自报）· 非 http(s) 协议拒绝。三端：CLI `org browser snapshot/screenshot` · 工具环 `browser_snapshot`（只读）/`browser_screenshot`（审批在环，PNG 落工作区）· Web 🌐 快照/截图表单；超时预算收敛引擎侧（1-60s 钳制，缺省 30s）；tests/browser 49 例中相关面已锁定 |
 
 ## 三、代码生成与理解（31–45）
 
 | # | 能力 | 状态 | 实现位置 / 说明 |
 |:--|:--|:--|:--|
 | 31 | 代码生成 | ✅ | 工厂 mint 流水线（mint_hsl 生成 + check 闸门 + fixture 验收 + git 注册）；HSL 38 后端投射 |
-| 32 | 代码补全 | ⬜ | 未做（IDE 侧能力） |
+| 32 | 代码补全 | ✅ | **v0.5.16** lib/completion.ts `completeAt`：三级候选（同文件符号 100 > 项目符号 80 > 语言关键字 50，前缀排序全确定性）HSL/TS/PY 三语言；空候选永不静默（附原因：行首/空格后/点后成员/无命中）。三端：CLI `org complete <file> <line> <col>` · 工具环 `complete_at`（line_text+column 或 line 行号双形态）· Web ⌨ 补全表单；tests/completion 锁定 |
 | 33 | 代码解释 | ✅ | 直连专家问答 + 工具环读真实代码作答（实测：读 notices.txt → 正确计数） |
 | 34 | 代码审查 | ✅ | 监督回路 review 阶段（四态裁决 + coverage 客观闸门 + 意见复发→补丁提案） |
 | 35 | Bug 定位 | 🟡 | 审查/复发计数/评分卡漂移告警提供定位信号；无专用调试器 |
@@ -103,7 +103,7 @@
 | 53 | 冲突解决 | 🟡 | 补丁唯一锚点约束（多处命中即拒绝，不猜）；git 层冲突未接 |
 | 54 | 撤销/回滚 | ✅ | `org revert`（版本回退本身可逆：当前源先归档）· 会话 fork 反悔通道 |
 | 55 | 检查点/快照 | ✅ | **git 作为资产层**（每次 mint/keep/patch 一 commit）+ N 版本冗余 + dist 快照 |
-| 56 | LSP 重命名/代码动作 | ⬜ | 未做 |
+| 56 | LSP 重命名/代码动作 | 🟡 | **v0.5.16 重命名半面 ✅**：lib/rename.ts `planRename/applyRename`（词法符号索引 + 行级词边界替换；拒绝面：找不到定义/目标名冲突/非法标识符附原因；dryRun 缺省预览 unified diff ≤5 文件，真写逐文件读→替换→复读校验失败即停）。三端：CLI `org rename <old> <new> [--apply]` · 工具环 `rename_symbol`（审批在环）· Web ✏️ 表单（真写可选）。**代码动作（quick fix/自动修复菜单）未做** —— 行整体按重命名交付 + 代码动作路线图定 🟡 |
 | 57 | 多仓库/多工作区 | 🟡 | --workspace 显式多区并行（任务队列天然多区）；跨仓联动未做 |
 | 58 | 文件监听/自动同步 | 🟡 | 上游 dhv-ts watch 模式；org 侧静默更新检测 + vendored 新鲜度守卫 |
 | 59 | 编码、换行、权限处理 | ✅ | vendored fs 层 CRLF 归一化重试 + PYTHONUTF8 + UTF-8 全链（三平台 CI 实证） |
@@ -137,7 +137,7 @@
 | 77 | 生成 commit message | ✅ | 注册表语义 commit（mint/keep/patch 带语义消息）；deepseek 车道可生成 |
 | 78 | 分支管理 | 🟡 | shell_run git 白名单内可达；org 无专用分支面（资产层用 main 单线 + git-chain） |
 | 79 | 提交/amend | ✅ | 注册表自动提交 + 留痕（sh_quote POSIX 转义防注入） |
-| 80 | merge/rebase | ⬜ | 未做（资产层单线演进 + 补丁线代替合并语义） |
+| 80 | merge/rebase | ✅ | **v0.5.16** lib/gitmerge.ts：`gitMerge`（--no-ff/自定义 message）· `gitRebase` · `gitMergeState` 只读探测（分支/上游/ahead-behind/分叉/脏树/stash，git 缺席降级不炸）。**冲突哲学：绝不自动解决** —— 冲突即自动 abort 回滚 + 冲突清单；每命令 30s 超时 + 输出 64KB 截断；仓外零执行（repoGuard）。三端：CLI `org merge/rebase/mergestate` · 工具环 `git_merge/git_rebase`（审批在环 + repo 工作区监狱）· Web 🌿 面板；tests/gitmerge 19 例（真 clone 含冲突 abort 后工作区干净验证） |
 | 81 | 冲突处理 | 🟡 | 同 53 |
 | 82 | 创建 PR/MR | 🟡 | 工程流程层（本开发系列即 PR 工作流）；org 无 API 集成 |
 | 83 | PR 审查 | ✅ | **监督回路 review 是 org 的核心**（四态 + 复发检测 + 补丁提案 + 金丝雀） |
@@ -180,10 +180,10 @@
 | 110 | 性能剖析 | 🟡 | 计量全链（tokens/ms/model_calls）；profiler 未做 |
 | 111 | 内存/CPU 分析 | 🟡 | 池并发/预算水位；OS 级分析未做 |
 | 112 | 网络请求诊断 | ✅ | 路由器台账（latency/status/key 指纹/usage）+ 连通测试 testLane |
-| 113 | 数据库查询诊断 | ⬜ | 未做 |
+| 113 | 数据库查询诊断 | ✅ | **v0.5.16** lib/dbdiag.ts `dbDiagnose`：EXPLAIN QUERY PLAN 只读通道（前导词白名单 SELECT/WITH + 写动词骨架扫描堵 WITH…INSERT 漏网 + readonly 连接纵深）→ 计划解析（索引命中/全表扫描/涉及表，SCAN CONSTANT ROW 伪步骤不计）+ 四类调优建议；:memory: 瞬态可 setup 播种（文件库拒绝）。三端：CLI `org dbdiag` · 工具环 `db_diagnose`（只读）· Web 🩺 表单；tests/dbdiag 16 例 |
 | 114 | 依赖冲突诊断 | ✅ | vendored 漂移守卫（版本比对 + 浅克隆）+ 锁文件纪律 |
 | 115 | 根因分析与验证 | ✅ | 复发计数（跨运行 recurrence.json）→ 补丁提案 → 金丝雀验证闭环 |
-| 116 | 浏览器 DevTools | ⬜ | 未做 |
+| 116 | 浏览器 DevTools | 🟡 | **v0.5.16 交付可本地化半面**：DOM 快照（标题/正文/链接/图片清单）+ 整页截图 + 引擎探测（lib/browser.ts 多引擎降级，与 #30 同源）；CLI/工具环/Web 三端可用。**console 面板/网络面板/DOM 交互（点击/输入）未做** —— 需要常驻会话型引擎（CDP 协议），是路线图；行按诚实口径定 🟡 |
 | 117 | 移动端调试 | ⬜ | 未做 |
 | 118 | 分布式追踪 | 🟡 | trace 概念在事件 seq/ts 全链贯通；无 APM 接入 |
 | 119 | 监控告警关联 | 🟡 | 漂移告警 + 预算水位 + 通知中心；外部监控未接 |
@@ -193,7 +193,7 @@
 
 | # | 能力 | 状态 | 实现位置 / 说明 |
 |:--|:--|:--|:--|
-| 121 | 插件系统 | 🟡 | `org import`（用户 harness 导入 + check 闸门 + 即刻复用）+ 工厂 stock；无动态加载 |
+| 121 | 插件系统 | 🟡 | `org import`（用户 harness 导入 + check 闸门 + 即刻复用）+ 工厂 stock；无动态加载。**v0.5.16 补插件包市场半面**（lib/plugins.ts 事务性安装/清单/移除，见 #132 —— 只装不执行，动态加载是路线图） |
 | 122 | MCP 支持 | 🟡 | adapters/bridge.hsl（外部 subagent 登记）；协议翻译未做（登记≠在岗，诚实标注） |
 | 123 | 自定义命令 | ✅ | 斜杠命令 22 个 + TUI `:命令` + Web 面板动作（三端同权） |
 | 124 | 工作流编排 | ✅ | **HSL graph**（node/edge/guard + G 拓扑校验）+ 监督回路四阶段 + 工厂管线 |
@@ -204,9 +204,9 @@
 | 129 | 多 Agent 协作 | ✅ | **org 本体**：主控-专家监督回路 + 工厂铸专家 + 池化 + 暖移交 + 金丝雀双跑 |
 | 130 | 工具注册/发现 | ✅ | 工具环注册表 + registry manifest + adapter 登记 |
 | 131 | SDK/API Server | ✅ | cliMain 可编程入口 + startWebServer({port:0}) + $host.dhv 嵌入执行面 |
-| 132 | 插件/规则市场 | ⬜ | 未做（registry + git 即本地市场形态） |
+| 132 | 插件/规则市场 | ✅ | **v0.5.16** lib/plugins.ts：manifest 契约（name/version/description/entry/permissions）+ **事务性安装**（staging 中转 → 校验 → 同文件系统原子 rename，任何失败整体清理绝不留半成品）+ git 源浅克隆（60s 硬超时，缺席诚实降级 tool-absent）+ 重名冲突双查 + remove/validate（纯只读预览）。**permissions 字段（"tool:shell_run" 形态）与 RBAC 命名空间联动**。诚实边界：只装不执行（entry 仅验存在），插件执行面是路线图。三端：CLI `org plugin list/install/remove/validate` · 工具环 `plugin_list/plugin_install/plugin_remove`（写半环审批在环）· Web 🧩 面板；tests/plugins 15 例 |
 | 133 | 远程 Agent/云执行 | ⬜ | 未做（沙盒本地执行） |
-| 134 | OpenAPI/GraphQL/gRPC | ⬜ | 未做（OpenAI 兼容协议是唯一外部协议面——最大公约数选择） |
+| 134 | OpenAPI/GraphQL/gRPC | ✅ | **v0.5.16 OpenAPI 半面**：lib/openapi.ts `parseOpenApiText/File`（OpenAPI 3.x / Swagger 2.0 双识别；2.0 的 basePath/schemes 合成 servers 语义对齐；路径级公共参数并入操作级按 in:name 覆盖；$ref 参数不展开如实标注）+ `suggestToolName`（api_<operationId> 清洗，工具环命名建议）。诚实边界：**GraphQL/gRPC 未做**（路线图）；YAML 不写半吊子 parser（错误附 python3 yaml→JSON 转换指引）；spec 帽 1MB。三端：CLI `org openapi` · 工具环 `openapi_parse`（只读）· Web 🔌 上传/粘贴解析；tests/openapi 16 例 |
 | 135 | 评测/基准平台 | ✅ | **评分卡**（证据归因 + 客观/裁判档权重 + 漂移基线）+ fixture-miner 出题 + 诗歌擂台反哺 |
 
 ## 十、安全与治理（136–150）
@@ -224,9 +224,9 @@
 | 144 | 数据脱敏 | ✅ | key/args 摘要截断 + preview 60 字符；全量脱敏管道未做 |
 | 145 | 登录/API Key/配置管理 | ✅ | org config v3（车道/key 池/降级链/预算）+ env 自动发现 + 连通测试 |
 | 146 | SAST/DAST | 🟡 | dhv check 是 SAST 的语言级形态（编译期处决）；通用 SAST 未接 |
-| 147 | 容器/IaC 扫描 | ⬜ | 未做 |
+| 147 | 容器/IaC 扫描 | ✅ | **v0.5.16** lib/iacscan.ts：16 条规则三族 —— Dockerfile（USER root/无 USER/:latest/ADD url/EXPOSE 22/ENV 密钥/apt 未瘦身，续行 \\ 拼接后同层判定）· compose（privileged/docker.sock/ports 22/network host/2375，环回绑定误报守卫）· terraform（0.0.0.0/0 ingress 且非 80/443/publicly_accessible/硬编码 secret/ssl=false）；注释跳过 + 二进制/超限/读失败三重降级逐文件隔离。诚实边界：行级正则非完整 parser（截断误截方向是漏报，安全侧）。三端：CLI `org iacscan`（高危 exit 1）· 工具环 `iac_scan`（只读）· Web 🛡 面板；tests/iacscan 22 例 |
 | 148 | SBOM/许可证合规 | ✅ | **v0.5.15** lib/sbom.ts SPDX-2.3 生成器：application（org 本体）+ runtime（z-ai-web-dev-sdk，bun.lock 三层宽容解析 JSONC 尾随逗号）+ vendored（dhv-ts）；JSON 与 tag:value 双渲染，**spdx-tools 全量校验 0 错误**；CLI `org sbom --format json|tv` + Web 📋 工具箱；tests/sbom 12 例 |
-| 149 | SSO/RBAC/数据驻留 | ⬜ | 未做（单机 Agent 边界） |
+| 149 | SSO/RBAC/数据驻留 | ✅ | **v0.5.16 RBAC 半面**：lib/rbac.ts（策略 <ws>/.org/rbac.json 严格形状校验坏文件降级单机 owner 兜底；模式匹配 `*` 全量/尾 `*` 前缀通配/中置 * 不通配；判定次序：未知角色拒→deny 优先→allow→默认拒）+ **工具环可选门控**（`ORG_RBAC_ROLE` 未设 = 完全不启用零回归；设了 → 每工具调用判 tool:<name>，拒绝返回含 rule/reason 的工具错误并落审计：journal rbac_denied 事件 + runtime/rbac.jsonl 决策账本）+ 插件 permissions 字段同命名空间联动（执行面路线图）。诚实边界：**SSO 身份联邦/数据驻留未做**（单机角色声明形态，路线图）。三端：CLI `org rbac list/check` · 工具环 `rbac_check` · Web 🛂 面板；tests/rbac 16 例 |
 | 150 | 隐私模式/审计导出 | ✅ | **v0.5.15** lib/audit.ts 审计导出：out-*/ 七件套 + runtime 审批台账/LLM 台账/通知/key 池指纹 + git-chain → **零依赖手写 zip**（CRC-32 与 python zlib 对拍 · EOCD 偏移 bug 实测抓修）+ markdown 摘要；缺文件警告不炸。三端：CLI `org audit [--run]` · 工具环 `audit_export`（审批在环）· Web 📦 工具箱；tests/audit 11 例。隐私模式（DHV_LLM_DISABLE_SDK 零外联）v0.5.4 起在册 |
 
 ---
@@ -264,8 +264,10 @@
 | E24 成本限额/多模型 | ✅ | 预算水位 + 21 车道 + key 池轮换 |
 | E25 评测/配置管理 | ✅ | 评分卡归因 + org config v3 |
 
-**统计（v0.5.15 交付后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 100 · 🟡 30 · ⬜ 20；专家 25 项 → ✅ 24 · 🟡 1 · ⬜ 0。
+**统计（v0.5.16 交付后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 108 · 🟡 32 · ⬜ 10；专家 25 项 → ✅ 24 · 🟡 1 · ⬜ 0。
 
+> v0.5.16 交付治理与扩展批（9 模块 × CLI/工具环/Web 三端接线）：8 项 ⬜→✅（#30 浏览器 DOM/#32 补全/#80 merge·rebase/#113 查询诊断/#132 插件市场/#134 OpenAPI/#147 IaC 扫描/#149 RBAC）+ 2 项 ⬜→🟡 诚实口径（#116 DevTools：DOM 快照/截图交付，console/网络面板是路线图；#56 重命名交付、代码动作路线图）—— 主表 ✅ 108/150。工具环 +13 工具（native 块动态 import 与 lib 同源）+ RBAC 可选门控（ORG_RBAC_ROLE）；CLI +11 命令；Web 🛡 治理与扩展面板（11 端点）。
+>
 > v0.5.15 交付 12 项升级（6 ⬜→✅：#20 符号/#43 Schema/#52 移动/#73 迁移操作/#85 评审推荐/#89 CODEOWNERS；6 🟡→✅：#24 PDF/#49 diff/#60 干跑/#141 密钥扫描/#148 SBOM/#150 审计导出）——**主表 ✅ 破百（100/150）**；专家表 B10 随 PDF 补齐升 ✅（24/25）。
 >
 历史统计行曾停留在 v0.5.4 口径且被截断（91/34/25），与表格实态漂移 —— v0.5.15 按表逐行重算并修订三处滞后条目：#128 定时任务 ⬜→✅（v0.5.5 已落地）、#127 出站 webhook 🟡→✅（v0.5.5 已落地）、B9 语义检索 ⬜→✅（v0.5.8 已落地，与 #19 自相矛盾的行）。

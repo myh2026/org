@@ -1,5 +1,58 @@
 # CHANGELOG
 
+## v0.5.16（2026-09-18）—— 治理与扩展批：9 模块统一接线（CLI / 工具环 / Web 三端）
+
+9 个 lib 模块（dbdiag/gitmerge/rbac/iacscan/plugins/openapi/browser/
+completion/rename，153 专项测试先行落地）统一接入三端消费面，沿用
+v0.5.15 的「lib 单一实现 → CLI / 工具环 / Web 三端」与 native 块
+`await import(root+"/lib/x.ts")` 动态导入同源范式。
+
+### 一、CLI（+11 命令）
+
+| 命令 | 能力 |
+|:--|:--|
+| `org dbdiag <x.db\|:memory:> "SELECT…" [--setup SQL]` | #113 EXPLAIN QUERY PLAN 诊断 |
+| `org merge [--no-ff] [--message M] <source>` / `org rebase <onto>` / `org mergestate` | #80 冲突恒 abort + 清单 |
+| `org rbac [list\|check <角色> <动作>]` | #149 角色权限查询 |
+| `org iacscan [dirs…]` | #147 容器/IaC 16 规则 |
+| `org plugin [list\|install\|remove\|validate]` | #132 事务性安装只装不执行 |
+| `org openapi <spec.json>` | #134 3.x/2.0 解析 + 工具命名建议 |
+| `org browser [status\|snapshot\|screenshot]` | #116/#30 多引擎降级 |
+| `org complete <file> <line> <col>` | #32 三级候选补全 |
+| `org rename <old> <new> [--apply]` | #56 缺省 dryRun 预览 |
+
+### 二、工具环（+13 工具 + RBAC 可选门控）
+
+- 只读（ReadOnly 可用）：`db_diagnose` / `rbac_check` / `iac_scan` /
+  `openapi_parse` / `plugin_list` / `browser_snapshot` / `complete_at`
+- 写动作（Full + 审批在环）：`git_merge` / `git_rebase` /
+  `plugin_install` / `plugin_remove` / `browser_screenshot`（PNG 落工作区）/
+  `rename_symbol`（缺省 dryRun 预览）
+- 浏览器工具超时预算收敛引擎侧既有约束（1-60s 钳制，缺省 30s）
+- **RBAC 可选门控**（execute_tool 分发处最外层）：`ORG_RBAC_ROLE` 未设 =
+  完全不启用（零行为回归，单机缺省 owner 全放行）；设了 → 每工具调用判
+  `tool:<name>`，拒绝返回含 rule/reason 的工具错误并落两处审计
+  （journal `rbac_denied` 事件 + `runtime/rbac.jsonl` 决策账本）；
+  插件 manifest 的 permissions 字段与该命名空间联动（执行面路线图）
+
+### 三、Web 🛡 治理与扩展面板（8 区 11 端点）
+
+IaC 扫描 / 插件清单+安装表单 / RBAC 角色查看 / OpenAPI 上传与粘贴解析 /
+浏览器快照+截图 / dbdiag 表单 / 补全+重命名表单（真写可选）/ git
+状态+merge+rebase —— `/api/govex/*`；写端点用真实工作区 + dist/demo
+只读守卫（与 /api/memory 同规）。**顺带修复 v0.5.15 遗留**：工具箱面板
+（🧰）与遮罩缺 display CSS（页面加载即常显）—— 本轮与治理面板同款补上。
+
+### 四、能力矩阵与版本口径
+
+- capabilities.md 10 行修订：8 项 ⬜→✅（#30/#32/#80/#113/#132/#134/#147/
+  #149）+ 2 项 ⬜→🟡 诚实口径（#116 DevTools：DOM 快照/截图交付，console/
+  网络面板路线图；#56 重命名交付、代码动作路线图）+ #121 插件系统补市场
+  半面注记 —— 主表 ✅ 100→**108**/150 · 🟡 30→32 · ⬜ 20→10
+- 版本对齐：lib/version.ts 0.5.15→0.5.16；package.json 0.5.14→0.5.16
+  （漂移两版）；README 徽章与状态注记
+- build/payload.json 再生（tools.hsl 变更）
+
 ## v0.5.15（2026-09-18）—— 桌面 Agent 补全批 + CI 红灯清零 + 漂移治理
 
 实测驱动的三线交付：**① org CI 连续 8 run 红灯的根因清零**（payload 过期 /

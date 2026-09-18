@@ -39,6 +39,31 @@
 //   journal tool_call   <tool> <args 摘要>
 //   journal tool_result <tool> ok=<n> chars / denied=<原因>
 //   journal tool_denied <tool> <原因>
+//   journal rbac_denied <action> <rule> <reason>（v0.5.16，ORG_RBAC_ROLE 启用时）
+//
+// v0.5.16 新增（治理与扩展批 · 13 工具，native 块 await import(root+
+// "/lib/x.ts") 与 lib 同源 —— 行为等价由构造保证）：
+//   只读（ReadOnly 模式可用）：
+//   db_diagnose  {file, sql, setup?}   SQLite EXPLAIN QUERY PLAN 诊断（#113）
+//   rbac_check   {action, role?}       RBAC 判定查询（#149）
+//   iac_scan     {dirs?}               容器/IaC 静态扫描（#147，16 规则）
+//   openapi_parse {file}               OpenAPI 3.x/Swagger 2.0 解析（#134）
+//   plugin_list  {}                    插件清单（#132）
+//   browser_snapshot {url, timeout_ms?} DOM 快照（#116/#30）
+//   complete_at  {file, line_text, column?} 光标补全（#32）
+//   写动作（Full 模式 + 能力门/审批在环）：
+//   git_merge    {repo?, source, message?, no_ff?}  merge（#80，冲突恒 abort）
+//   git_rebase   {repo?, onto}                      rebase（#80，同上）
+//   plugin_install {source} / plugin_remove {name}  插件事务性安装/移除（#132）
+//   browser_screenshot {url, out?, timeout_ms?}     整页截图 PNG（#116）
+//   rename_symbol {old, new, dry_run?}  项目级重命名（#56，缺省 dryRun 预览）
+//
+// v0.5.16 RBAC 可选门控（execute_tool 分发处）：ORG_RBAC_ROLE 未设 = 门控
+// 完全不启用（零行为回归，单机缺省）；设了 → lib/rbac.ts loadRbac +
+// rbacCheck（动作命名空间 tool:<name>），拒绝时工具错误含 rule 与 reason，
+// 并落审计（journal rbac_denied 事件 + runtime/rbac.jsonl 决策账本）。
+// 插件 manifest 的 permissions 字段（"tool:shell_run" 形态）与该命名空间
+// 联动 —— 插件执行面是路线图（本仓库只装不执行，permissions 先行声明）。
 // ============================================================================
 
 import { CapabilityPolicy, AccessMode } from "../policy/capability.hsl";
@@ -90,6 +115,14 @@ export fn tools_prompt(mode: ToolMode) -> String {
     out.push_str("- db_schema {\"file\":\"data/app.db\"} — SQLite schema inspection (tables/columns/indexes/views; workspace-relative). Read-only.\n");
     out.push_str("- db_query {\"file\":\"data/app.db\",\"sql\":\"SELECT …\",\"limit\":200?} — SQLite read-only query (single SELECT/WITH/EXPLAIN/PRAGMA table_info only; writes go through db_migrate).\n");
     out.push_str("- read_pdf {\"file\":\"docs/spec.pdf\",\"max_pages\":50?} — extract text from a PDF (engine chain: pdftotext → uv+pypdf → honest failure).\n");
+    // v0.5.16 治理与扩展批（只读工具，零审批门槛）
+    out.push_str("- db_diagnose {\"file\":\"data/app.db\",\"sql\":\"SELECT …\",\"setup\":\"CREATE TABLE…\"?} — SQLite EXPLAIN QUERY PLAN diagnosis: index usage / full-table-scan detection / tables involved + tuning suggestions. setup seeds a transient :memory: db only (file dbs refuse it); single SELECT/WITH statement only.\n");
+    out.push_str("- rbac_check {\"action\":\"tool:fs_write\",\"role\":\"observer\"?} — query the RBAC policy (workspace .org/rbac.json; falls back to owner-allows-all when absent). Returns allowed/denied + matched rule (deny wins over allow; unknown role or no match = deny). role defaults to ORG_RBAC_ROLE env.\n");
+    out.push_str("- iac_scan {\"dirs\":[\"deploy\"]?} — static security scan of Dockerfile / docker-compose / terraform files (16 rules: root user, privileged containers, 0.0.0.0 ingress, hardcoded secrets, :latest tags …). Read-only, per-file isolation.\n");
+    out.push_str("- openapi_parse {\"file\":\"api/openapi.json\"} — parse an OpenAPI 3.x / Swagger 2.0 JSON spec into an operations list (method/path/params/security) with suggested tool names (api_<operationId>). YAML must be converted to JSON first (hint in error).\n");
+    out.push_str("- plugin_list {} — list installed plugins (.org/plugins; manifest name/version/entry/permissions). Installing executes nothing — plugin execution is roadmap; permissions map to RBAC actions.\n");
+    out.push_str("- browser_snapshot {\"url\":\"https://example.com\",\"timeout_ms\":30000?} — fetch a page DOM snapshot (title/text/links/images) via engine chain agent-browser → chromium → chrome. timeout_ms clamped to 1-60s. Console/network panels are roadmap (honest boundary).\n");
+    out.push_str("- complete_at {\"file\":\"src/app.ts\",\"line_text\":\"const va\",\"column\":7?} — code completion at cursor (HSL/TS/PY): same-file symbols > project symbols > language keywords, prefix-ranked. column is a 0-based char offset into line_text (defaults to end of line). Member completion/type inference are LSP roadmap; empty results carry an honest reason.\n");
     if mode == ToolMode::Full {
         out.push_str("- fs_write {\"path\":\"...\",\"content\":\"...\",\"preview\":true?} — write a file (may require approval). preview:true returns a unified diff WITHOUT writing (dry-run). Content is scanned for secrets: high-severity key patterns (sk-/ghp_/AKIA… ) are refused — never persist real credentials.\n");
         out.push_str("- fs_edit {\"path\":\"...\",\"old\":\"exact unique text\",\"new\":\"replacement\",\"preview\":true?} — precise edit (may require approval); preview:true returns the diff without writing.\n");
@@ -97,6 +130,12 @@ export fn tools_prompt(mode: ToolMode) -> String {
         out.push_str("- db_migrate {\"file\":\"data/app.db\",\"name\":\"add users\",\"sql\":\"CREATE TABLE …\",\"dry_run\":true?} — versioned schema migration (_org_migrations ledger + companion .migrations.json; dry_run validates then rolls back). Requires approval.\n");
         out.push_str("- audit_export {\"run\":\"out-a\"?} — export the audit trail (events/journal/approvals/llm-ledger) to a zip in the workspace (may require approval).\n");
         out.push_str("- review_suggest {\"files\":[\"lib/a.ts\",\"hsl/org.hsl\"]} — CODEOWNERS-based reviewer recommendation for changed files.\n");
+        out.push_str("- git_merge {\"repo\":\".\",\"source\":\"feature-x\",\"message\":\"…\",\"no_ff\":true?} — merge a branch into the current one (repo = workspace-relative git root, default workspace). Conflicts are NEVER auto-resolved: the merge is aborted, workspace restored, conflict list returned. May require approval.\n");
+        out.push_str("- git_rebase {\"repo\":\".\",\"onto\":\"main\"} — rebase the current branch onto another branch (same conflict philosophy as git_merge: auto-abort + conflict list). May require approval.\n");
+        out.push_str("- plugin_install {\"source\":\"path/or/git-url\"} — transactionally install a plugin (staging → manifest validation → atomic rename; local dir or git URL source; never leaves half-installed state). May require approval.\n");
+        out.push_str("- plugin_remove {\"name\":\"my-plugin\"} — remove an installed plugin directory. May require approval.\n");
+        out.push_str("- browser_screenshot {\"url\":\"https://example.com\",\"out\":\"shot.png\",\"timeout_ms\":30000?} — full-page screenshot to a PNG in the workspace (out is workspace-relative, default browser-<ts>.png; engine chain as browser_snapshot; PNG magic verified on disk). May require approval.\n");
+        out.push_str("- rename_symbol {\"old\":\"startRun\",\"new\":\"startRunV2\",\"dry_run\":true?} — project-wide rename (HSL/TS/PY symbol index; word-boundary line edits; definition+references+mentions). dry_run defaults to true (unified-diff preview, ≤5 files); dry_run:false writes with read→replace→verify per file, stopping at first failure. Refuses: missing definition / target-name clash / invalid identifier. May require approval.\n");
         out.push_str("- shell_run {\"cmd\":\"git status\"} — run an allowlisted command (may require approval)\n");
         out.push_str("- agent_spawn {\"goal\":\"...\",\"mode\":\"run\"|\"ask\",\"expert\":\"name\",\"reuse\":false?} — spawn a sub-organization (team mission via org run, or direct expert via org ask). Depth+budget governed recursion (child budget halves each level); similar goals hit the spawn pool and are REUSED at zero cost (pass reuse:false to force a fresh spawn). Use it ONLY when the task genuinely needs multi-step decomposition or another expert's specialty; for trivial lookups use fs_read/fs_list first. The child inherits your model lane.\n");
         out.push_str("- audio_compose {\"timbre\":\"strings\",\"chords\":\"D3:canon:arp\",\"tempo\":90} — compose from chord progression + timbre (8 instruments: piano/strings/flute/organ/harpsichord/music-box/guitar/bell; 7 progressions: canon/pop/epic/circle/jazz/blues/romance); or explicit notes [{\"freq\":261.63,\"start_beat\":0,\"beats\":1}]. Engine renders playable .wav + .mid alongside your reply (deliverable = audio, not sheet).\n");
@@ -185,6 +224,16 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
     let args: String = call.args_json.clone();
     let name = call.name.clone();
 
+    // v0.5.16 RBAC 可选门控（最外层治理）：ORG_RBAC_ROLE 未设 = 完全不启用
+    // （零行为回归）；设了 → lib/rbac.ts 判定 tool:<name>，拒绝时返回工具错误
+    // （含 rule 与 reason）并落审计（rbac_gate_tool 内部：journal rbac_denied
+    // 事件 + runtime/rbac.jsonl 决策账本）。放行静默（不刷屏审计面）。
+    let rbac_denied: String = rbac_gate_tool(name.clone()).await;
+    if rbac_denied != String::new() {
+        emit_tool(String::from("tool_denied"), format!("{} rbac", name));
+        return json_ok(name.clone(), false, rbac_denied.clone());
+    }
+
     // 能力门（读 = Auto；写/执行 = Confirm → 审批队列或明确拒绝；
     // v0.5.6：agent_spawn / audio_compose 为编排/产物增强动作，Full 模式即门）
     if name == String::from("agent_spawn") || name == String::from("audio_compose") {
@@ -199,17 +248,25 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "fs_write" | "fs_edit" | "fs_move" | "db_migrate" | "audit_export" => String::from("file_write"),
         "shell_run" => String::from("process_spawn"),
         "agent_spawn" | "audio_compose" => String::from("agent_spawn"),
+        // v0.5.16：git/插件/截图/重命名都是工作区写动作（file_write 门 + 审批在环）
+        "git_merge" | "git_rebase" | "plugin_install" | "plugin_remove" | "browser_screenshot" | "rename_symbol" => String::from("file_write"),
         _ => String::from("file_read"), // v0.5.15：db_schema/db_query（只读门内建）/symbol_search/read_pdf/review_suggest 均只读
     };
     // 写门例外清单（只读工具 + agent_spawn/audio_compose 自带门）：v0.5.15 新增
     // db_schema/db_query（lib/db.ts 只读门双层：词法白名单 + readonly 连接）、
-    // symbol_search/read_pdf/review_suggest（纯读）。
+    // symbol_search/read_pdf/review_suggest（纯读）；v0.5.16 新增 db_diagnose（EQP
+    // 只读通道 + 词法门）/rbac_check/iac_scan/openapi_parse/plugin_list（纯查询）/
+    // browser_snapshot（导航只读）/complete_at（纯索引查询）。
     if name != String::from("fs_read") && name != String::from("fs_list") && name != String::from("fs_glob")
         && name != String::from("semantic_search")
         && name != String::from("agent_spawn") && name != String::from("audio_compose")
         && name != String::from("symbol_search") && name != String::from("db_schema")
         && name != String::from("db_query") && name != String::from("read_pdf")
-        && name != String::from("review_suggest") {
+        && name != String::from("review_suggest")
+        && name != String::from("db_diagnose") && name != String::from("rbac_check")
+        && name != String::from("iac_scan") && name != String::from("openapi_parse")
+        && name != String::from("plugin_list") && name != String::from("browser_snapshot")
+        && name != String::from("complete_at") {
         let approved = gate_write(policy, gate_cap, name.clone(), args.clone()).await;
         if approved == String::from("denied") {
             emit_tool(String::from("tool_denied"), format!("{} {}", name, "capability denied"));
@@ -241,7 +298,21 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "fs_move" => tool_fs_move(args.clone()),
         "audit_export" => tool_audit_export(args.clone()),
         "review_suggest" => tool_review_suggest(args.clone()),
-        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/read_pdf/fs_write/fs_edit/fs_move/db_migrate/shell_run/agent_spawn/audio_compose/audit_export/review_suggest）", name)),
+        // v0.5.16 治理与扩展批（native 块动态 import lib —— 与 CLI/Web 同源）
+        "db_diagnose" => tool_db_diagnose(args.clone()).await,
+        "git_merge" => tool_git_merge(args.clone()),
+        "git_rebase" => tool_git_rebase(args.clone()),
+        "rbac_check" => tool_rbac_check(args.clone()),
+        "iac_scan" => tool_iac_scan(args.clone()),
+        "plugin_list" => tool_plugin_list(args.clone()),
+        "plugin_install" => tool_plugin_install(args.clone()),
+        "plugin_remove" => tool_plugin_remove(args.clone()),
+        "openapi_parse" => tool_openapi_parse(args.clone()),
+        "browser_snapshot" => tool_browser_snapshot(args.clone()).await,
+        "browser_screenshot" => tool_browser_screenshot(args.clone()).await,
+        "complete_at" => tool_complete_at(args.clone()).await,
+        "rename_symbol" => tool_rename_symbol(args.clone()).await,
+        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/shell_run/agent_spawn/audio_compose/audit_export/review_suggest）", name)),
     };
     emit_tool(String::from("tool_result"), result_summary(result.clone()));
     result
@@ -275,6 +346,46 @@ async fn gate_write(policy: CapabilityPolicy, capability: String, tool: String, 
     // 就地放行」仅覆盖 llm_call，写文件/执行命令不能静默放行）
     let _ = policy.decide(capability.clone(), AccessMode::Direct);
     String::from("denied")
+}
+
+/// v0.5.16 RBAC 工具门（可选启用，execute_tool 的最外层治理）：
+/// ORG_RBAC_ROLE 未设 → 返回空串（门控完全不启用 —— 零行为回归，单机
+/// 缺省 owner 全放行）；设了 → lib/rbac.ts loadRbac + rbacCheck
+/// （动作命名空间 tool:<name>），拒绝时返回 DENIED 文案（含 rule 与
+/// reason），并落两处审计：journal rbac_denied 事件（events.jsonl/
+/// journal.jsonl 可观测）+ runtime/rbac.jsonl 决策账本（rbacDecisionLog
+/// 单行 JSONL，账本写失败不拦拒绝语义）。放行静默（不刷屏审计面）。
+async fn rbac_gate_tool(name: String) -> String {
+    let n = name.clone();
+    let verdict: String = native typescript {
+        try {
+            const role = String($host.env.get("ORG_RBAC_ROLE") || "").trim();
+            if (!role) return ""; // 未设 = 门控不启用（零行为回归）
+            const action = "tool:" + n;
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return "DENIED (RBAC): org 根目录未定位，策略无法加载 —— 拒绝执行（安全缺省；需经 org 宿主启动）";
+            const pathMod = await import("node:path");
+            const fsMod = await import("node:fs");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const rbac = await import(root + "/lib/rbac.ts");
+            const loaded = rbac.loadRbac(ws);
+            const decision = rbac.rbacCheck(loaded.policy, role, action);
+            if (decision.allowed) return "";
+            // 审计 ①：journal 事件（events.jsonl / journal.jsonl 同步可观测）
+            $host.events.emit("journal", { name: "rbac_denied", detail: (action + " " + decision.rule + " " + String(decision.reason || "")).slice(0, 300) });
+            // 审计 ②：决策账本 runtime/rbac.jsonl（单行 JSONL；失败不拦拒绝语义）
+            try {
+                const dir = pathMod.join(ws, "runtime");
+                fsMod.mkdirSync(dir, { recursive: true });
+                fsMod.appendFileSync(pathMod.join(dir, "rbac.jsonl"), rbac.rbacDecisionLog(decision) + "\n", "utf8");
+            } catch (e2) { /* 账本失败不影响拒绝 */ }
+            return "DENIED (RBAC): " + action + " 被拒 —— rule=" + decision.rule + "；" + String(decision.reason || "") + "（角色 " + role + "；策略 " + (loaded.file || "内建兜底") + "）";
+        } catch (e) {
+            return "DENIED (RBAC): 门控评估异常（" + String(e && e.message || e) + "）—— 拒绝执行（安全缺省）";
+        }
+    };
+    verdict
 }
 
 // ---- 工具执行体（$host ABI 直通；全部带界与容错） -----------------------------
@@ -574,6 +685,425 @@ fn tool_review_suggest(args: String) -> String {
             });
         } catch (e) {
             return JSON.stringify({ tool: "review_suggest", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+// ---- v0.5.16 治理与扩展批：13 工具（native 块动态 import lib，与 CLI/Web 同源） ----
+
+/// v0.5.16 SQLite 查询诊断（capabilities #113）：lib/dbdiag.ts 同源。
+/// EXPLAIN QUERY PLAN 只读通道（词法门 + readonly 连接纵深）+ 计划解析
+/// （索引命中/全表扫描/涉及表）+ 调优建议。只读工具。
+async fn tool_db_diagnose(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const file = String(a.file || a.db || "");
+            const sql = String(a.sql || "");
+            if (!file || !sql) return JSON.stringify({ tool: "db_diagnose", ok: false, error: "args.file/args.sql 必填" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "db_diagnose", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const guard = await (async () => {
+                try {
+                    if (file === ":memory:") return { jail: true, path: ":memory:" };
+                    const pathMod = await import("node:path");
+                    const fsMod = await import("node:fs");
+                    const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+                    const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+                    const wsReal = fsMod.realpathSync(ws);
+                    const lexical = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(wsReal, file);
+                    const inWs = (p) => p === wsReal || p.startsWith(wsReal + pathMod.sep);
+                    if (!inWs(lexical)) return { jail: false, error: "路径越界（须在工作区内）：" + file };
+                    try {
+                        const parent = fsMod.realpathSync(pathMod.dirname(lexical));
+                        const resolved = pathMod.join(parent, pathMod.basename(lexical));
+                        if (!inWs(resolved)) return { jail: false, error: "路径越界（符号链逃逸）：" + file };
+                        return { jail: true, path: resolved };
+                    } catch (e2) { return { jail: true, path: lexical }; }
+                } catch (e) { return { jail: false, error: String(e && e.message || e) }; }
+            })();
+            if (!guard.jail) return JSON.stringify({ tool: "db_diagnose", ok: false, error: guard.error });
+            const dbdiag = await import(root + "/lib/dbdiag.ts");
+            const setup = a.setup != null ? String(a.setup) : undefined;
+            const r = await dbdiag.dbDiagnose(guard.path, sql, setup ? { setup } : {});
+            if (!r.ok) return JSON.stringify({ tool: "db_diagnose", ok: false, kind: r.kind, error: r.error });
+            return JSON.stringify({
+                tool: "db_diagnose", ok: true, ms: r.ms,
+                plan: { steps: r.plan.steps.slice(0, 20), step_count: r.plan.steps.length, tables: r.plan.tables, full_scan: r.plan.fullScan },
+                suggestions: r.suggestions,
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "db_diagnose", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.16 merge / rebase（capabilities #80）：lib/gitmerge.ts 同源。冲突哲学
+/// 绝不自动解决 —— 冲突即自动 abort + 清单（lib 内建）。Full + 审批在环。
+/// repo 缺省 = 工作区根；显式 repo 须在工作区内（监狱）。
+fn tool_git_merge(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const source = String(a.source || a.branch || "");
+            if (!source) return JSON.stringify({ tool: "git_merge", ok: false, error: "args.source 必填（被合并的分支/提交）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "git_merge", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const repo = a.repo != null && String(a.repo) !== "" ? pathMod.resolve(ws, String(a.repo)) : ws;
+            if (repo !== ws && !(repo.startsWith(ws + pathMod.sep))) return JSON.stringify({ tool: "git_merge", ok: false, error: "路径越界（repo 须在工作区内）：" + String(a.repo) });
+            const gm = await import(root + "/lib/gitmerge.ts");
+            const r = gm.gitMerge(repo, { source: source, ...(a.message != null ? { message: String(a.message) } : {}), noFf: a.no_ff === true || a.noFf === true });
+            return JSON.stringify({
+                tool: "git_merge", ok: r.ok, output: String(r.output || "").slice(0, 4096),
+                conflicts: r.conflicts, aborted: r.aborted,
+                ...(r.kind ? { kind: r.kind } : {}), ...(r.error ? { error: r.error } : {}),
+                ...(r.kind === "conflict" ? { hint: "冲突绝不自动解决：人工处理后重试，或换 fs_read 查看文件内容" } : {}),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "git_merge", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_git_rebase(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const onto = String(a.onto || a.base || "");
+            if (!onto) return JSON.stringify({ tool: "git_rebase", ok: false, error: "args.onto 必填（变基目标分支/提交）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "git_rebase", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const repo = a.repo != null && String(a.repo) !== "" ? pathMod.resolve(ws, String(a.repo)) : ws;
+            if (repo !== ws && !(repo.startsWith(ws + pathMod.sep))) return JSON.stringify({ tool: "git_rebase", ok: false, error: "路径越界（repo 须在工作区内）：" + String(a.repo) });
+            const gm = await import(root + "/lib/gitmerge.ts");
+            const r = gm.gitRebase(repo, { onto: onto });
+            return JSON.stringify({
+                tool: "git_rebase", ok: r.ok, output: String(r.output || "").slice(0, 4096),
+                conflicts: r.conflicts, aborted: r.aborted,
+                ...(r.kind ? { kind: r.kind } : {}), ...(r.error ? { error: r.error } : {}),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "git_rebase", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.16 RBAC 判定查询（capabilities #149）：lib/rbac.ts 同源（只读——
+/// 门控本身在 execute_tool 分发处，本工具只是策略查询面）。只读工具。
+fn tool_rbac_check(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const action = String(a.action || "");
+            if (!action) return JSON.stringify({ tool: "rbac_check", ok: false, error: "args.action 必填（如 tool:fs_write / cli:db）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "rbac_check", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const rbac = await import(root + "/lib/rbac.ts");
+            const role = a.role != null && String(a.role) !== "" ? String(a.role) : String($host.env.get("ORG_RBAC_ROLE") || "owner");
+            const loaded = rbac.loadRbac(ws);
+            const d = rbac.rbacCheck(loaded.policy, role, action);
+            return JSON.stringify({
+                tool: "rbac_check", ok: true, allowed: d.allowed, role: d.role, action: d.action,
+                rule: d.rule, ...(d.reason ? { reason: d.reason } : {}),
+                roles: rbac.rbacRoles(loaded.policy),
+                policy_file: loaded.file, ...(loaded.fallbackReason ? { fallback_reason: loaded.fallbackReason } : {}),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "rbac_check", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.16 容器/IaC 静态扫描（capabilities #147）：lib/iacscan.ts 同源
+/// （16 规则三族：Dockerfile/compose/terraform）。只读工具。
+fn tool_iac_scan(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "iac_scan", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const iac = await import(root + "/lib/iacscan.ts");
+            const dirs = Array.isArray(a.dirs) ? a.dirs.map(String).filter(Boolean).slice(0, 10) : undefined;
+            const r = dirs && dirs.length > 0 ? iac.scanIac(ws, { dirs }) : iac.scanIac(ws);
+            const order = { high: 0, medium: 1, low: 2 };
+            const hits = r.hits.slice().sort((x, y) => order[x.severity] - order[y.severity]);
+            return JSON.stringify({
+                tool: "iac_scan", ok: true, files: r.files, scanned: r.scanned, took_ms: r.tookMs,
+                truncated: r.truncated, rules: iac.IAC_RULES.length,
+                high: hits.filter((h) => h.severity === "high").length,
+                hits: hits.slice(0, 100).map((h) => ({ rule: h.ruleId, file: h.file, line: h.line, severity: h.severity, message: h.message, hint: h.hint })),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "iac_scan", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.16 插件清单 / 安装 / 移除（capabilities #132）：lib/plugins.ts 同源。
+/// 只装不执行（manifest 的 permissions 与 RBAC 命名空间联动，执行面是路线图）。
+/// plugin_list 只读；install/remove 是写动作（Full + 审批在环）。
+fn tool_plugin_list(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "plugin_list", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const plugins = await import(root + "/lib/plugins.ts");
+            const r = plugins.pluginList(ws);
+            return JSON.stringify({
+                tool: "plugin_list", ok: true, dir: ".org/plugins", count: r.plugins.length,
+                plugins: r.plugins.map((p) => ({
+                    name: p.manifest ? p.manifest.name : pathMod.basename(p.path),
+                    ...(p.manifest ? { version: p.manifest.version, description: p.manifest.description, permissions: p.manifest.permissions } : {}),
+                    valid: p.valid, ...(p.problems.length > 0 ? { problems: p.problems } : {}),
+                })),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "plugin_list", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_plugin_install(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const source = String(a.source || a.url || a.dir || "");
+            if (!source) return JSON.stringify({ tool: "plugin_install", ok: false, error: "args.source 必填（本地插件目录或 git URL）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "plugin_install", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const plugins = await import(root + "/lib/plugins.ts");
+            // git 源（协议 URL）原样透传；本地源解析进工作区（监狱：源须在 ws 内）
+            const isGit = /^(?:https?|git|ssh|file):\/\//i.test(source) || /^git@[\w.-]+:[\w./-]+/i.test(source);
+            const resolved = isGit ? source : pathMod.resolve(ws, source);
+            if (!isGit && resolved !== ws && !resolved.startsWith(ws + pathMod.sep)) {
+                return JSON.stringify({ tool: "plugin_install", ok: false, error: "路径越界（本地源须在工作区内）：" + source });
+            }
+            const r = plugins.pluginInstall(ws, resolved);
+            if (!r.ok) return JSON.stringify({ tool: "plugin_install", ok: false, kind: r.kind, error: r.error });
+            return JSON.stringify({ tool: "plugin_install", ok: true, name: r.name, version: r.version, path: ".org/plugins/" + r.name, warnings: r.warnings });
+        } catch (e) {
+            return JSON.stringify({ tool: "plugin_install", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_plugin_remove(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const name = String(a.name || "");
+            if (!name) return JSON.stringify({ tool: "plugin_remove", ok: false, error: "args.name 必填" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "plugin_remove", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const plugins = await import(root + "/lib/plugins.ts");
+            const r = plugins.pluginRemove(ws, name);
+            if (!r.ok) return JSON.stringify({ tool: "plugin_remove", ok: false, kind: r.kind, error: r.error });
+            return JSON.stringify({ tool: "plugin_remove", ok: true, name: r.name });
+        } catch (e) {
+            return JSON.stringify({ tool: "plugin_remove", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.16 OpenAPI 解析（capabilities #134）：lib/openapi.ts 同源
+/// （3.x/2.0 双识别 + suggestToolName 工具命名建议）。只读工具。
+fn tool_openapi_parse(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const file = String(a.file || a.spec || "");
+            if (!file) return JSON.stringify({ tool: "openapi_parse", ok: false, error: "args.file 必填（工作区相对路径）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "openapi_parse", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const guard = await (async () => {
+                try {
+                    const pathMod = await import("node:path");
+                    const fsMod = await import("node:fs");
+                    const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+                    const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+                    const wsReal = fsMod.realpathSync(ws);
+                    const lexical = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(wsReal, file);
+                    const inWs = (p) => p === wsReal || p.startsWith(wsReal + pathMod.sep);
+                    if (!inWs(lexical)) return { jail: false, error: "路径越界（须在工作区内）：" + file };
+                    try {
+                        const parent = fsMod.realpathSync(pathMod.dirname(lexical));
+                        const resolved = pathMod.join(parent, pathMod.basename(lexical));
+                        if (!inWs(resolved)) return { jail: false, error: "路径越界（符号链逃逸）：" + file };
+                        return { jail: true, path: resolved };
+                    } catch (e2) { return { jail: true, path: lexical }; }
+                } catch (e) { return { jail: false, error: String(e && e.message || e) }; }
+            })();
+            if (!guard.jail) return JSON.stringify({ tool: "openapi_parse", ok: false, error: guard.error });
+            const oa = await import(root + "/lib/openapi.ts");
+            const r = oa.parseOpenApiFile(guard.path);
+            if (!r.ok) return JSON.stringify({ tool: "openapi_parse", ok: false, kind: r.kind, error: r.error });
+            return JSON.stringify({
+                tool: "openapi_parse", ok: true, version: r.version, info: r.info,
+                servers: r.servers, schemas: r.schemas,
+                operations: r.operations.slice(0, 50).map((op) => ({
+                    method: op.method, path: op.path, operation_id: op.operationId,
+                    ...(op.summary ? { summary: op.summary.slice(0, 120) } : {}),
+                    params: op.params, security: op.security, tool_name: oa.suggestToolName(op),
+                })),
+                total_operations: r.operations.length,
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "openapi_parse", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.16 浏览器 DOM 快照 / 整页截图（capabilities #116+#30）：lib/browser.ts
+/// 同源（引擎链 agent-browser → chromium → chrome）。snapshot 只读；screenshot
+/// 落 PNG 进工作区（Full + 审批在环）。超时预算收敛到引擎侧既有约束：
+/// timeout_ms 钳制 [1s, 60s]（对齐 $host.shell.run 的 60s 命令预算），缺省 30s。
+async fn tool_browser_snapshot(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const url = String(a.url || "");
+            if (!url) return JSON.stringify({ tool: "browser_snapshot", ok: false, error: "args.url 必填（http/https）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "browser_snapshot", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const timeoutMs = Math.max(1000, Math.min(60000, Math.floor(Number(a.timeout_ms || a.timeoutMs) || 30000)));
+            const browser = await import(root + "/lib/browser.ts");
+            const r = await browser.browserSnapshot(url, { timeoutMs });
+            if (!r.ok) return JSON.stringify({ tool: "browser_snapshot", ok: false, kind: r.kind, error: r.error, ...(r.hint ? { hint: r.hint } : {}) });
+            return JSON.stringify({
+                tool: "browser_snapshot", ok: true, engine: r.engine, url: r.url,
+                ...(r.finalUrl ? { final_url: r.finalUrl } : {}), ...(r.title ? { title: r.title } : {}),
+                text: String(r.text || "").slice(0, 16384), ms: r.ms,
+                links: (r.links || []).slice(0, 30), imgs: (r.imgs || []).slice(0, 10),
+                ...(r.hint ? { hint: r.hint } : {}),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "browser_snapshot", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+async fn tool_browser_screenshot(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const url = String(a.url || "");
+            if (!url) return JSON.stringify({ tool: "browser_screenshot", ok: false, error: "args.url 必填（http/https）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "browser_screenshot", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            // out：工作区相对（监狱）；缺省 browser-<时间戳>.png 落工作区根
+            const outRel = a.out != null && String(a.out) !== "" ? String(a.out) : ("browser-" + new Date().toISOString().replace(/[-:T.]/g, "").slice(0, 14) + ".png");
+            const outAbs = pathMod.isAbsolute(outRel) ? outRel.replace(/\\/g, "/") : pathMod.resolve(ws, outRel);
+            if (outAbs !== ws && !outAbs.startsWith(ws + pathMod.sep)) return JSON.stringify({ tool: "browser_screenshot", ok: false, error: "路径越界（out 须在工作区内）：" + outRel });
+            const timeoutMs = Math.max(1000, Math.min(60000, Math.floor(Number(a.timeout_ms || a.timeoutMs) || 30000)));
+            const browser = await import(root + "/lib/browser.ts");
+            const r = await browser.browserScreenshot(url, { out: outAbs, timeoutMs });
+            if (!r.ok) return JSON.stringify({ tool: "browser_screenshot", ok: false, kind: r.kind, error: r.error, ...(r.hint ? { hint: r.hint } : {}) });
+            return JSON.stringify({ tool: "browser_screenshot", ok: true, engine: r.engine, url: r.url, path: pathMod.relative(ws, r.path) || pathMod.basename(r.path), ms: r.ms });
+        } catch (e) {
+            return JSON.stringify({ tool: "browser_screenshot", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.16 光标处补全（capabilities #32）：lib/completion.ts 同源。
+/// line_text + column（0 基偏移，缺省行尾）或 line（1 基行号 → 读盘取行）。
+/// 只读工具。
+async fn tool_complete_at(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const file = String(a.file || a.path || "");
+            if (!file) return JSON.stringify({ tool: "complete_at", ok: false, error: "args.file 必填（工作区相对路径）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "complete_at", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const fsMod = await import("node:fs");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const abs = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(ws, file);
+            if (abs !== ws && !abs.startsWith(ws + pathMod.sep)) return JSON.stringify({ tool: "complete_at", ok: false, error: "路径越界（须在工作区内）：" + file });
+            let lineText = a.line_text != null ? String(a.line_text) : null;
+            let lineNo = 0;
+            if (lineText === null && a.line != null) {
+                const n = Math.max(1, Math.floor(Number(a.line) || 1));
+                const text = fsMod.readFileSync(abs, "utf8");
+                const lines = text.split("\n");
+                lineText = lines[n - 1] ?? "";
+                lineNo = n;
+            }
+            if (lineText === null) return JSON.stringify({ tool: "complete_at", ok: false, error: "args.line_text（当前行全文）或 args.line（1 基行号）必填其一" });
+            const column = a.column != null && Number.isFinite(Number(a.column)) ? Math.max(0, Math.floor(Number(a.column))) : lineText.length;
+            const completion = await import(root + "/lib/completion.ts");
+            // dirs:[""] = 工作区根扫描（与 symbol_search v0.5.15 同口径；lib 缺省
+            // 目录清单是 org 仓形态，agent 工作区按根扫）
+            const r = await completion.completeAt(ws, file, lineText, column, { dirs: [""] });
+            return JSON.stringify({
+                tool: "complete_at", ok: true, ...(lineNo > 0 ? { line: lineNo } : {}),
+                language: r.language, prefix: r.prefix, ...(r.reason ? { reason: r.reason } : {}),
+                candidates: r.candidates.map((c) => ({ label: c.label, kind: c.kind, detail: c.detail, score: c.score, source: c.source })),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "complete_at", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.16 项目级重命名（capabilities #56）：lib/rename.ts 同源。缺省 dryRun
+/// 预览（unified diff ≤5 文件）；dry_run:false 真写（失败即停诚实部分失败）。
+/// Full + 审批在环（预览与真写同门 —— 与 fs_write preview 同哲学）。
+async fn tool_rename_symbol(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const oldName = String(a.old || a.old_name || a.from || "");
+            const newName = String(a.new || a.new_name || a.to || "");
+            if (!oldName || !newName) return JSON.stringify({ tool: "rename_symbol", ok: false, error: "args.old/args.new 必填" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "rename_symbol", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const rename = await import(root + "/lib/rename.ts");
+            const dryRun = a.dry_run !== false && a.dryRun !== false; // 缺省 true（安全缺省：预览不落盘）
+            // dirs:[""] = 工作区根扫描（与 symbol_search/complete_at 同口径；lib 缺省
+            // 目录清单是 org 仓形态，agent 工作区按根扫）
+            const r = await rename.applyRename(ws, oldName, newName, { dryRun, dirs: [""] });
+            if (!r.ok) return JSON.stringify({ tool: "rename_symbol", ok: false, dry_run: r.dryRun, reason: r.reason ?? "计划不可执行", ...(r.plan.definition ? { definition: { kind: r.plan.definition.kind, file: r.plan.definition.file, line: r.plan.definition.line } } : {}), warnings: r.plan.warnings });
+            const files = [...new Set(r.plan.edits.map((e) => e.file))];
+            return JSON.stringify({
+                tool: "rename_symbol", ok: true, dry_run: r.dryRun,
+                definition: { kind: r.plan.definition.kind, file: r.plan.definition.file, line: r.plan.definition.line },
+                edits: r.plan.edits.length, files: files.length, warnings: r.plan.warnings,
+                ...(r.dryRun
+                    ? { previews: (r.previews || []).map((p) => ({ file: p.file, stats: p.stats, diff: p.diff.slice(0, 8192) })), files_total: r.filesTotal, ...(r.previewTruncated ? { preview_truncated: true } : {}) }
+                    : { applied: r.applied, ...(r.failed ? { failed: r.failed } : {}) }),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "rename_symbol", ok: false, error: String(e && e.message || e) });
         }
     }
 }
@@ -1265,6 +1795,19 @@ fn result_summary(result: String) -> String {
                 if (tool === "fs_write" && o.preview) return tool + " preview " + String(o.stats || "") + " " + String(o.path);
                 if (tool === "fs_edit" && o.preview) return tool + " preview " + String(o.stats || "") + " " + String(o.path);
                 if (tool === "fs_write" && o.scan_warnings > 0) return tool + " ok " + String(o.bytes) + "B ⚠密钥告警 " + String(o.scan_warnings) + " " + String(o.path);
+                // v0.5.16 治理与扩展批的观测摘要（journal 人读面）
+                if (tool === "db_diagnose") return tool + " ok steps=" + String((o.plan && o.plan.step_count) ?? "?") + " tables=" + String((o.plan && o.plan.tables || []).join(",")) + (o.plan && o.plan.full_scan ? " ⚠全表扫描" : "") + " 建议" + String((o.suggestions || []).length) + "条 " + String(o.ms ?? "?") + "ms";
+                if (tool === "git_merge" || tool === "git_rebase") return tool + (o.ok ? " ok " : " " + String(o.kind || "?") + " ") + String(o.output || o.error || "").trim().split("\n")[0].slice(0, 90) + ((o.conflicts || []).length > 0 ? " 冲突" + String(o.conflicts.length) + "已abort" : "");
+                if (tool === "rbac_check") return tool + " " + (o.allowed ? "allow" : "deny") + " " + String(o.role) + "×" + String(o.action) + " rule=" + String(o.rule);
+                if (tool === "iac_scan") return tool + " ok hits=" + String((o.hits || []).length) + "/" + String(o.files || 0) + "文件 high=" + String(o.high ?? 0) + ((o.hits && o.hits[0]) ? " top=" + String(o.hits[0].file) + ":" + String(o.hits[0].line) + "(" + String(o.hits[0].severity) + ")" : "") + " " + String(o.took_ms ?? "?") + "ms";
+                if (tool === "plugin_list") return tool + " ok " + String(o.count ?? 0) + " 个插件";
+                if (tool === "plugin_install") return tool + " ok " + String(o.name) + "@" + String(o.version) + ((o.warnings || []).length > 0 ? " ⚠" + String(o.warnings.length) : "");
+                if (tool === "plugin_remove") return tool + " ok " + String(o.name);
+                if (tool === "openapi_parse") return tool + " ok " + String(o.total_operations ?? (o.operations || []).length) + " 操作 " + String(o.version) + " " + String(o.info && o.info.title || "");
+                if (tool === "browser_snapshot") return tool + " ok engine=" + String(o.engine) + " chars=" + String((o.text || "").length) + " links=" + String((o.links || []).length) + " " + String(o.ms ?? "?") + "ms";
+                if (tool === "browser_screenshot") return tool + " ok " + String(o.path) + " (" + String(o.engine) + ", " + String(o.ms ?? "?") + "ms)";
+                if (tool === "complete_at") return tool + " ok " + String((o.candidates || []).length) + " 候选" + (o.prefix ? " prefix=" + String(o.prefix) : "") + (o.reason ? "（" + String(o.reason).slice(0, 60) + "）" : "");
+                if (tool === "rename_symbol") return tool + (o.dry_run ? " dry-run" : " applied") + " " + String(o.edits ?? "?") + " 处编辑 · " + String(o.files ?? "?") + " 文件" + ((o.warnings || []).length > 0 ? " ⚠" + String(o.warnings.length) : "");
                 return tool + " ok " + size + " chars";
             }
             // v0.5.15：错误摘要带 kind（denied/jail 拒绝可观测）

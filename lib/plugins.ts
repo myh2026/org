@@ -239,12 +239,15 @@ function cleanup(dir: string): void {
 export function pluginInstall(ws: string, source: string): PluginInstallResult {
   const pluginsDir = path.join(ws, PLUGINS_DIR_REL);
   const git = isGitSource(source);
+  // 相对本地源以 ws 为基解析（CLI/Web/工具环通用约定；绝对路径不受影响。
+  // 修复史：接线 e2e 抓出裸 statSync(source) 按 CWD 解析的错位 —— 三端统一在此收敛）
+  const src = git ? source : (path.isAbsolute(source) ? source : path.resolve(ws, source));
 
   // ---- 源就位到 staging ----
   if (!git) {
     let isDir = false;
     try {
-      isDir = fs.statSync(source).isDirectory();
+      isDir = fs.statSync(src).isDirectory();
     } catch {
       isDir = false;
     }
@@ -252,11 +255,11 @@ export function pluginInstall(ws: string, source: string): PluginInstallResult {
       return {
         ok: false,
         kind: "invalid",
-        error: `源不存在或不是目录：${source}（本地源须为插件目录；git 源须以 https://、git@ 或 file:// 开头）`,
+        error: `源不存在或不是目录：${src}（本地源须为插件目录，相对路径以工作区为基；git 源须以 https://、git@ 或 file:// 开头）`,
       };
     }
     // 快速失败：先在源目录上校验（不拷贝任何东西）
-    const pre = pluginValidate(source);
+    const pre = pluginValidate(src);
     if (!pre.valid) {
       return { ok: false, kind: "invalid", error: `插件校验失败，已整体拒绝（未安装）：\n  - ${pre.problems.join("\n  - ")}` };
     }
@@ -285,7 +288,7 @@ export function pluginInstall(ws: string, source: string): PluginInstallResult {
   }
   const staging = path.join(pluginsDir, `.staging-${process.pid}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`);
   try {
-    fs.cpSync(source, staging, { recursive: true });
+    fs.cpSync(src, staging, { recursive: true });
   } catch (e) {
     cleanup(staging);
     return { ok: false, kind: "internal", error: `拷贝插件文件失败：${e instanceof Error ? e.message : String(e)}` };

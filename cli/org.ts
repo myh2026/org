@@ -48,6 +48,15 @@ import { exportAudit, auditSummary } from "../lib/audit.ts"; // v0.5.15 审计�
 import { buildSbom, renderSpdxJson, renderSpdxTagValue } from "../lib/sbom.ts"; // v0.5.15 SBOM（#148）
 import { loadCodeowners, matchOwners, recommendReviewers } from "../lib/owners.ts"; // v0.5.15 CODEOWNERS/评审推荐（#89/#85）
 import { pdfEngines, readPdf } from "../lib/pdfread.ts"; // v0.5.15 PDF 读取降级链（#24）
+import { dbDiagnose, DBDIAG_LIMITS } from "../lib/dbdiag.ts"; // v0.5.16 数据库查询诊断（#113）
+import { gitMergeState, gitMerge, gitRebase, GIT_LIMITS } from "../lib/gitmerge.ts"; // v0.5.16 merge/rebase 安全操作（#80）
+import { loadRbac, rbacCheck, rbacRoles, rbacActions, DEFAULT_RBAC_POLICY, RBAC_POLICY_FILE } from "../lib/rbac.ts"; // v0.5.16 RBAC（#149）
+import { scanIac, IAC_RULES } from "../lib/iacscan.ts"; // v0.5.16 容器/IaC 扫描（#147）
+import { pluginList, pluginInstall, pluginRemove, pluginValidate, gitAvailable, PLUGINS_DIR_REL } from "../lib/plugins.ts"; // v0.5.16 插件市场（#132）
+import { parseOpenApiFile, suggestToolName, OPENAPI_MAX_BYTES } from "../lib/openapi.ts"; // v0.5.16 OpenAPI 解析（#134）
+import { browserEngines, browserSnapshot, browserScreenshot } from "../lib/browser.ts"; // v0.5.16 浏览器 DOM 快照/截图（#116/#30）
+import { completeAt } from "../lib/completion.ts"; // v0.5.16 代码补全（#32）
+import { applyRename } from "../lib/rename.ts"; // v0.5.16 项目级重命名（#56）
 import { listApprovals, decideApproval, clearGranted } from "../lib/approvals.ts";
 import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
@@ -2144,6 +2153,25 @@ function restBool(a: Args, name: string): boolean {
     || argv.some((r) => r.startsWith(`--${name}=`)) || a.rest.some((r) => r.startsWith(`--${name}=`));
 }
 
+/** v0.5.16：原始 argv 的位置参数提取（跳过命令本身、--flag 及其值）。
+ *  与 restFlag 同一痛点：parseArgs 把未识别 flag 连同其值都推进 a.rest，
+ *  位置参数与 flag 值在 a.rest 里无法区分（dbdiag 的 SQL 会吞掉 --setup 的
+ *  值变成「多语句」）；raw argv 保真。valueFlags = 消费下一 token 作值的
+ *  flag 名清单（布尔 flag 不列）。argv 形态对不上时兜底 a.rest 旧口径。 */
+function rawPositionals(a: Args, valueFlags: string[] = []): string[] {
+  const out: string[] = [];
+  const argv = process.argv.slice(2);
+  for (let i = 1; i < argv.length; i++) { // 0 = 命令本身
+    const t = argv[i]!;
+    if (t.startsWith("--")) {
+      if (!t.includes("=") && valueFlags.includes(t.slice(2))) i++; // 跳过该 flag 的值
+      continue;
+    }
+    out.push(t);
+  }
+  return out.length > 0 ? out : a.rest.filter((r) => !r.startsWith("--"));
+}
+
 /** org db <schema|tables|query|migrate|history> --file x.db [--sql …] [--name …] [--dry-run] [--limit N]
  *  SQLite 数据库操作（capabilities #43 数据库 Schema/迁移 + #73 迁移/操作）。 */
 async function cmdDb(a: Args): Promise<number> {
@@ -2356,6 +2384,330 @@ async function cmdRead(a: Args): Promise<number> {
   return 0;
 }
 
+// ---- v0.5.16 治理与扩展批次：dbdiag / merge / rebase / mergestate / rbac / iacscan / plugin / openapi / browser / complete / rename ----
+
+/** org dbdiag <file|:memory:> <sql> [--setup SQL] —— EXPLAIN QUERY PLAN 诊断（#113）。 */
+async function cmdDbdiag(a: Args): Promise<number> {
+  const positional = rawPositionals(a, ["setup"]);
+  if (positional.length < 2) {
+    console.error('用法：org dbdiag <x.db|:memory:> "SELECT …" [--setup "CREATE …; INSERT …"]');
+    console.error("  只读诊断：EXPLAIN QUERY PLAN + 计划解析（索引命中/全表扫描/涉及表）+ 建议");
+    console.error(`  --setup 仅 :memory: 生效（文件库传 setup 会被拒）；setup 帽 ${DBDIAG_LIMITS.maxSetupBytes / 1024}KB`);
+    return 2;
+  }
+  const [file, ...sqlParts] = positional;
+  const sql = sqlParts.join(" ");
+  const setup = restFlag(a, "setup");
+  const target = file === ":memory:" ? ":memory:" : path.resolve(file!);
+  const r = await dbDiagnose(target, sql, setup ? { setup } : {});
+  if (!r.ok) {
+    const kindText: Record<string, string> = { denied: "只读门拒绝（写语句/文件库带 setup）", syntax: "语法错误", missing: "库文件不存在或非 SQLite", internal: "内部限制" };
+    console.error(`✗ 诊断失败（${kindText[r.kind] ?? r.kind}）：${r.error}`);
+    return 1;
+  }
+  console.log(`🩺 查询计划（${r.ms}ms · ${r.plan.steps.length} 步骤 · ${r.plan.fullScan ? "⚠ 含全表扫描" : "无全表扫描"}）`);
+  for (const s of r.plan.steps) {
+    console.log(`  ${String(s.id).padStart(2)}←${String(s.parent).padStart(2)}  ${s.usesIndex ? "🔑 " : "   "}${s.detail}`);
+  }
+  console.log(`  涉及表：${r.plan.tables.length ? r.plan.tables.join(" · ") : "（无）"}`);
+  if (r.suggestions.length > 0) {
+    console.log("\n建议：");
+    for (const s of r.suggestions) console.log(`  - ${s}`);
+  }
+  return 0;
+}
+
+/** org mergestate [--repo DIR] —— merge/rebase 只读状态探测（#80）。 */
+function printMergeState(repo: string): number {
+  const s = gitMergeState(repo);
+  if (s.degraded) { console.error(`✗ ${s.degraded}`); return 1; }
+  console.log(`🌿 ${s.repo}`);
+  console.log(`  分支 ${s.branch ?? "（detached HEAD）"}${s.upstream ? ` → 上游 ${s.upstream}（ahead ${s.ahead} · behind ${s.behind}${s.diverged ? " · ⚠ 已分叉" : ""}）` : "（无上游跟踪）"}`);
+  console.log(`  工作区 ${s.dirty ? "⚠ 有未提交改动" : "干净"} · stash ${s.stashed} 条`);
+  return 0;
+}
+
+/** org merge [--no-ff] [--message M] <source> / org rebase <onto> / org mergestate（#80）。 */
+function printGitOp(tool: string, r: { ok: boolean; output: string; conflicts: string[]; aborted: boolean; kind?: string; error?: string }): number {
+  if (r.ok) {
+    console.log(r.output.trim() || `✓ ${tool} 完成`);
+    return 0;
+  }
+  const kindText: Record<string, string> = {
+    conflict: "冲突（已自动 abort，工作区回到操作前）", "not-repo": "不是 git 仓库（或目录不存在）",
+    "git-missing": "git 不可用", timeout: `超时（单命令 ${GIT_LIMITS.timeoutMs / 1000}s 预算）`, internal: "git 拒绝",
+  };
+  console.error(`✗ ${tool} 未完成（${kindText[r.kind ?? "internal"] ?? r.kind}）：${r.error ?? ""}`);
+  if (r.conflicts.length > 0) {
+    console.error(`  冲突文件（${r.conflicts.length}，绝不自动解决 —— 人工处理后重试）：`);
+    for (const c of r.conflicts) console.error(`    ${c}`);
+  }
+  if (!r.aborted && r.kind === "conflict") console.error("  ⚠ abort 未成功：工作区仍处冲突态，需人工 git merge --abort / git rebase --abort");
+  if (r.output.trim()) console.error(dim(r.output.trim().split("\n").slice(0, 6).join("\n")));
+  return 1;
+}
+
+async function cmdMerge(a: Args): Promise<number> {
+  const positional = rawPositionals(a, ["repo", "message"]);
+  if (positional.length === 0) {
+    console.error("用法：org merge [--no-ff] [--message \"合并说明\"] <source> [--repo DIR]");
+    console.error("  冲突哲学：绝不自动解决 —— 冲突即自动 abort 回滚 + 冲突清单（单命令 30s 预算）");
+    return 2;
+  }
+  const repo = restFlag(a, "repo") ? path.resolve(restFlag(a, "repo")!) : defaultWorkspace(a);
+  const message = restFlag(a, "message");
+  const r = gitMerge(repo, { source: positional[0]!, ...(message ? { message } : {}), noFf: restBool(a, "no-ff") });
+  return printGitOp("merge", r);
+}
+
+async function cmdRebase(a: Args): Promise<number> {
+  const positional = rawPositionals(a, ["repo"]);
+  if (positional.length === 0) {
+    console.error("用法：org rebase <onto> [--repo DIR]");
+    console.error("  冲突哲学：绝不自动解决 —— 冲突即自动 abort 回原分支 + 冲突清单");
+    return 2;
+  }
+  const repo = restFlag(a, "repo") ? path.resolve(restFlag(a, "repo")!) : defaultWorkspace(a);
+  const r = gitRebase(repo, { onto: positional[0]! });
+  return printGitOp("rebase", r);
+}
+
+async function cmdMergestate(a: Args): Promise<number> {
+  const repo = restFlag(a, "repo") ? path.resolve(restFlag(a, "repo")!) : defaultWorkspace(a);
+  return printMergeState(repo);
+}
+
+/** org rbac [list|check <role> <action>|policy] —— SSO/RBAC 角色权限（#149）。 */
+async function cmdRbac(a: Args): Promise<number> {
+  const verb = a.rest[0] ?? "list";
+  const ws = defaultWorkspace(a);
+  const { policy, file, fallbackReason } = loadRbac(ws);
+  if (verb === "list" || verb === "policy") {
+    if (fallbackReason) console.log(`⚠ ${fallbackReason}`);
+    console.log(`🛂 RBAC 策略（${file ?? "内建兜底"} · ${rbacRoles(policy).length} 角色 · 动作命名空间 tool:*/cli:*）`);
+    for (const role of rbacRoles(policy)) {
+      const ra = rbacActions(policy, role);
+      console.log(`  ${role.padEnd(12)} allow: ${ra.allow.length ? ra.allow.join(" ") : "（空 → 默认全拒）"}${ra.deny.length ? `\n  ${" ".repeat(12)} deny:  ${ra.deny.join(" ")}（deny 优先）` : ""}`);
+    }
+    console.log(`\n  判定次序：未知角色拒 → deny 命中拒 → allow 命中放 → 默认拒`);
+    console.log(`  模板播种：echo '${JSON.stringify(DEFAULT_RBAC_POLICY)}' > ${path.join(ws, RBAC_POLICY_FILE)}`);
+    console.log(`  工具环启用：ORG_RBAC_ROLE=<角色> 启动（未设 = 门控完全不启用，单机缺省 owner 全放行）`);
+    return 0;
+  }
+  if (verb === "check") {
+    const [_, role, action] = a.rest;
+    if (!role || !action) { console.error("用法：org rbac check <角色> <动作（如 tool:fs_write / cli:db）>"); return 2; }
+    const d = rbacCheck(policy, role, action);
+    console.log(`${d.allowed ? "✓ 放行" : "✗ 拒绝"} · ${d.role} × ${d.action} · rule=${d.rule}`);
+    if (d.reason) console.log(`  ${d.reason}`);
+    return d.allowed ? 0 : 1;
+  }
+  console.error(`未知子命令：${verb}（list|check）`);
+  return 2;
+}
+
+/** org iacscan [dirs…] —— 容器/IaC 静态扫描（#147）。 */
+async function cmdIacscan(a: Args): Promise<number> {
+  const ws = defaultWorkspace(a);
+  const dirs = a.rest.filter((r) => !r.startsWith("--"));
+  const r = scanIac(ws, dirs.length > 0 ? { dirs } : {});
+  console.log(`🛡 IaC 扫描：${r.scanned}/${r.files} 候选文件 · ${r.hits.length} 命中 · ${r.tookMs}ms（${IAC_RULES.length} 条规则：Dockerfile/compose/terraform）${r.truncated ? "（超文件帽截断）" : ""}`);
+  if (r.skippedBinary + r.skippedOversize + r.skippedRead > 0) {
+    console.log(`  降级跳过：二进制 ${r.skippedBinary} · 超限 ${r.skippedOversize} · 读失败 ${r.skippedRead}`);
+  }
+  if (r.hits.length === 0) { console.log("\n✓ 未发现 IaC 风险模式"); return 0; }
+  const order = { high: 0, medium: 1, low: 2 } as const;
+  const hits = [...r.hits].sort((x, y) => order[x.severity] - order[y.severity]);
+  for (const h of hits) console.log(`  [${h.severity.toUpperCase().padEnd(6)}] ${h.ruleId}  ${h.file}:${h.line}\n         ${h.message}\n         💡 ${h.hint}`);
+  const high = hits.filter((h) => h.severity === "high").length;
+  console.log(`\n  ${high} 条高危`);
+  return high > 0 ? 1 : 0;
+}
+
+/** org plugin [list|install <source>|remove <name>|validate <dir>] —— 插件市场（#132）。 */
+async function cmdPlugin(a: Args): Promise<number> {
+  const verb = a.rest[0] ?? "list";
+  const ws = defaultWorkspace(a);
+  if (verb === "list") {
+    const { plugins, dir } = pluginList(ws);
+    console.log(`🧩 插件清单（${dir} · ${plugins.length} 个 · 本模块只装不执行，执行面是路线图）`);
+    if (!gitAvailable()) console.log("  ⚠ git 缺席：install 的远程源不可用（本地目录源不受影响）");
+    if (plugins.length === 0) { console.log(`\n（空 —— org plugin install <本地目录|git URL>）`); return 0; }
+    for (const p of plugins) {
+      const m = p.manifest;
+      if (!m) { console.log(`  ✗ ${path.basename(p.path)}（manifest 不可解析）`); continue; }
+      console.log(`  ${p.valid ? "✓" : "✗"} ${m.name}@${m.version}${m.permissions.length ? ` · 权限 ${m.permissions.join(" ")}` : " · ⚠ 无权限声明（RBAC 联动缺位）"}`);
+      console.log(`      ${m.description}${p.problems.length ? `\n      问题：${p.problems.join("；")}` : ""}`);
+    }
+    return 0;
+  }
+  if (verb === "install") {
+    const source = a.rest[1];
+    if (!source) { console.error("用法：org plugin install <本地插件目录|https://…|file://…>"); return 2; }
+    const r = pluginInstall(ws, source);
+    if (!r.ok) {
+      const kindText: Record<string, string> = { conflict: "重名冲突（原件未动）", invalid: "manifest 校验失败", "tool-absent": "git 缺席（远程源不可用）", internal: "内部错误" };
+      console.error(`✗ 安装失败（${kindText[r.kind] ?? r.kind}）：${r.error}`);
+      return 1;
+    }
+    console.log(`✓ 已安装 ${r.name}@${r.version} → ${path.relative(ws, r.path)}（${PLUGINS_DIR_REL}/）`);
+    for (const w of r.warnings) console.log(`  ⚠ ${w}`);
+    return 0;
+  }
+  if (verb === "remove") {
+    const name = a.rest[1];
+    if (!name) { console.error("用法：org plugin remove <name>"); return 2; }
+    const r = pluginRemove(ws, name);
+    if (!r.ok) { console.error(`✗ 移除失败（${r.kind}）：${r.error}`); return 1; }
+    console.log(`✓ 已移除 ${r.name}（${path.relative(ws, r.path)}）`);
+    return 0;
+  }
+  if (verb === "validate") {
+    const dir = a.rest[1];
+    if (!dir) { console.error("用法：org plugin validate <目录>（市场预览，纯只读）"); return 2; }
+    const r = pluginValidate(path.resolve(dir));
+    console.log(`${r.valid ? "✓ 可安装" : "✗ 不可安装"}（${dir}）`);
+    for (const p of r.problems) console.log(`  - ${p}`);
+    return r.valid ? 0 : 1;
+  }
+  console.error(`未知子命令：${verb}（list|install|remove|validate）`);
+  return 2;
+}
+
+/** org openapi <spec.json> —— OpenAPI/Swagger 解析 + 工具命名建议（#134）。 */
+async function cmdOpenapi(a: Args): Promise<number> {
+  const file = a.rest.find((r) => !r.startsWith("--"));
+  if (!file) {
+    console.error("用法：org openapi <spec.json>");
+    console.error(`  OpenAPI 3.x / Swagger 2.0（JSON；YAML 指引转换）；spec 帽 ${OPENAPI_MAX_BYTES / 1024}KB`);
+    console.error("  输出：servers · 操作清单（method/path/operationId/参数/security）· suggestToolName 建议名");
+    return 2;
+  }
+  const r = parseOpenApiFile(path.resolve(file));
+  if (!r.ok) {
+    const kindText: Record<string, string> = { missing: "文件不存在", syntax: "JSON 解析失败", unsupported: "版本不支持（支持 3.x / 2.0）", internal: "内部限制" };
+    console.error(`✗ ${kindText[r.kind] ?? r.kind}：${r.error}`);
+    return 1;
+  }
+  console.log(`🔌 ${r.info.title} v${r.info.version}（OpenAPI ${r.version} · ${r.operations.length} 操作 · ${r.schemas} schema）`);
+  if (r.servers.length) console.log(`  servers：${r.servers.join(" · ")}`);
+  for (const op of r.operations) {
+    const params = op.params.map((p) => `${p.in}:${p.name}${p.required ? "!" : ""}`).join(" ");
+    console.log(`  ${op.method.padEnd(6)} ${op.path.padEnd(28)} ${op.operationId}${op.security ? " 🔒" : ""}`);
+    if (params) console.log(`         参数：${params}`);
+    if (op.summary) console.log(`         ${op.summary.slice(0, 100)}`);
+    console.log(`         工具名建议：${suggestToolName(op)}`);
+  }
+  return 0;
+}
+
+/** org browser [status|snapshot <url>|screenshot <url>] —— DOM 快照/截图多引擎降级（#116/#30）。 */
+async function cmdBrowser(a: Args): Promise<number> {
+  const verb = a.rest[0] ?? "status";
+  const engines = browserEngines();
+  if (verb === "status" || verb === "engines") {
+    console.log(`🌐 浏览器引擎链：agent-browser ${engines.agentBrowser ? "✓" : "✗"} → chromium ${engines.chromium ? "✓" : "✗"} → chrome ${engines.chrome ? "✓" : "✗"}`);
+    if (engines.hint) console.log(`  ${engines.hint}`);
+    console.log("\n  org browser snapshot <url>   —— DOM 快照（标题/正文/链接/图片清单）");
+    console.log("  org browser screenshot <url> [--out F] —— 整页截图 PNG");
+    return engines.agentBrowser || engines.chromium || engines.chrome ? 0 : 1;
+  }
+  const url = a.rest[1];
+  if (!url || (verb !== "snapshot" && verb !== "screenshot")) {
+    console.error("用法：org browser snapshot <url> | org browser screenshot <url> [--out file.png] [--timeout 30000]");
+    return 2;
+  }
+  const tRaw = Number(restFlag(a, "timeout") ?? 30_000);
+  const timeoutMs = Number.isFinite(tRaw) ? Math.max(1_000, Math.min(60_000, tRaw)) : 30_000;
+  if (verb === "snapshot") {
+    const r = await browserSnapshot(url, { timeoutMs });
+    if (!r.ok) { console.error(`✗ [${r.kind}] ${r.error}`); if (r.hint) console.error(`  ${r.hint}`); return 1; }
+    console.log(`🌐 ${r.url}${r.finalUrl && r.finalUrl !== r.url ? ` → ${r.finalUrl}` : ""} · 引擎 ${r.engine} · ${r.ms}ms${r.title ? `\n标题：${r.title}` : ""}\n`);
+    console.log(r.text);
+    if (r.links && r.links.length > 0) {
+      console.log(`\n链接（${r.links.length}）：`);
+      for (const l of r.links.slice(0, 20)) console.log(`  ${l.text.slice(0, 40).padEnd(40)} ${l.href}`);
+      if (r.links.length > 20) console.log(`  …（${r.links.length - 20} 更多）`);
+    }
+    if (r.hint) console.log(`\n⚠ ${r.hint}`);
+    return 0;
+  }
+  const out = restFlag(a, "out");
+  const r = await browserScreenshot(url, { timeoutMs, ...(out ? { out: path.resolve(out) } : {}) });
+  if (!r.ok) { console.error(`✗ [${r.kind}] ${r.error}`); if (r.hint) console.error(`  ${r.hint}`); return 1; }
+  console.log(`📸 ${r.url} → ${r.path} · 引擎 ${r.engine} · ${r.ms}ms`);
+  return 0;
+}
+
+/** org complete <file> <line> <col> —— 光标处补全（#32）。 */
+async function cmdComplete(a: Args): Promise<number> {
+  const positional = rawPositionals(a);
+  if (positional.length < 3) {
+    console.error("用法：org complete <file> <line> <col>（line/col 均 1 基）");
+    console.error("  三级候选：同文件符号 > 项目符号 > 语言关键字（HSL/TS/PY）");
+    console.error("  诚实边界：点后成员补全/类型推断是 LSP 路线图（空候选附原因，绝不臆造）");
+    return 2;
+  }
+  const [file, lineS, colS] = positional;
+  const ws = defaultWorkspace(a);
+  const abs = path.isAbsolute(file!) ? file! : path.join(ws, file!);
+  let lineText: string;
+  try {
+    const lines = fs.readFileSync(abs, "utf8").split("\n");
+    lineText = lines[Number(lineS) - 1] ?? "";
+  } catch (e) {
+    console.error(`✗ 无法读取 ${file}：${(e as Error).message}`);
+    return 1;
+  }
+  // dirs:[""] = 工作区根扫（用户工作区是通用布局而非 org 仓形态 —— 与工具环 complete_at / Web 端点同规）
+  const r = await completeAt(ws, file!, lineText, Math.max(0, Number(colS) - 1), { dirs: [""] });
+  console.log(`⌨ ${file}:${lineS}:${colS}（${r.language}${r.prefix ? ` · 前缀 "${r.prefix}"` : ""}）`);
+  if (r.candidates.length === 0) {
+    console.log(`（无候选 —— ${r.reason ?? "前缀无命中"}）`);
+    return 0;
+  }
+  for (const c of r.candidates) console.log(`  ${String(c.score).padStart(4)}  ${c.kind.padEnd(8)} ${c.label.padEnd(28)} ${c.source} · ${c.detail.slice(0, 60)}`);
+  return 0;
+}
+
+/** org rename <old> <new> [--apply] —— 项目级重命名（#56；缺省 dryRun 预览）。 */
+async function cmdRename(a: Args): Promise<number> {
+  const positional = rawPositionals(a);
+  if (positional.length < 2) {
+    console.error("用法：org rename <旧名> <新名> [--apply]");
+    console.error("  缺省 dryRun：计划 + 逐文件 unified diff 预览（≤5 文件）不落盘；--apply 真写");
+    console.error("  拒绝面：找不到定义 / 目标名冲突 / 新名非法或关键字 —— 附原因");
+    return 2;
+  }
+  const [oldName, newName] = positional;
+  const ws = defaultWorkspace(a);
+  // dirs:[""] = 工作区根扫（同 cmdComplete —— 与工具环 rename_symbol / Web 端点同规）
+  const r = await applyRename(ws, oldName!, newName!, { dryRun: !restBool(a, "apply"), dirs: [""] });
+  if (!r.ok) {
+    console.error(`✗ 不可执行：${r.reason ?? "计划不可执行"}`);
+    if (r.plan.definition) console.error(`  定义：${r.plan.definition.file}:${r.plan.definition.line}`);
+    for (const w of r.plan.warnings) console.error(`  ⚠ ${w}`);
+    return 1;
+  }
+  const def = r.plan.definition!;
+  console.log(`${r.dryRun ? "🔍 dryRun 预览" : "✓ 已应用"}：${def.kind} ${oldName} → ${newName}（定义 ${def.file}:${def.line} · ${r.plan.edits.length} 处编辑 · ${new Set(r.plan.edits.map((e) => e.file)).size} 文件）`);
+  for (const w of r.plan.warnings) console.log(`  ⚠ ${w}`);
+  if (r.dryRun) {
+    for (const p of r.previews ?? []) {
+      console.log(`\n--- ${p.file}（${p.stats}）`);
+      const lines = p.diff.split("\n").slice(2); // 剥掉 --- a/+++ b 头两行（CLI 已给文件名）
+      for (const l of lines.slice(0, 24)) console.log(`  ${l}`);
+      if (lines.length > 24) console.log(`  …（${lines.length - 24} 更多行）`);
+    }
+    if (r.previewTruncated) console.log(`\n  …（预览帽 5 文件，共 ${r.filesTotal} 文件 —— 全量用 org rename --apply）`);
+    console.log(`\n  落盘：org rename ${oldName} ${newName} --apply`);
+  } else {
+    for (const f of r.applied ?? []) console.log(`  ✓ ${f.file}（${f.lines} 行 · ${f.occurrences} 处）`);
+    if (r.failed) console.error(`  ✗ 止步于 ${r.failed.file}：${r.failed.error}`);
+  }
+  return r.failed ? 1 : 0;
+}
+
 // ---- org memory：专家长期记忆（v0.5.3） ----------------------------------------
 
 async function cmdMemory(a: Args): Promise<number> {
@@ -2519,6 +2871,18 @@ export async function orgMain(): Promise<number> {
     case "sbom": return cmdSbom(a);
     case "owners": case "codeowners": return cmdOwners(a);
     case "read": return cmdRead(a);
+    // v0.5.16 治理与扩展批次（capabilities #113/#80/#149/#147/#132/#134/#116/#30/#32/#56）
+    case "dbdiag": return cmdDbdiag(a);
+    case "merge": return cmdMerge(a);
+    case "rebase": return cmdRebase(a);
+    case "mergestate": return cmdMergestate(a);
+    case "rbac": return cmdRbac(a);
+    case "iacscan": case "iac": return cmdIacscan(a);
+    case "plugin": case "plugins": return cmdPlugin(a);
+    case "openapi": return cmdOpenapi(a);
+    case "browser": return cmdBrowser(a);
+    case "complete": return cmdComplete(a);
+    case "rename": return cmdRename(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -2638,6 +3002,37 @@ export async function orgMain(): Promise<number> {
   org read <file.pdf> [--max-pages N]
       PDF 文本提取三层降级链（v0.5.15 · #24）：pdftotext → uv+pypdf
       （零全局污染）→ 诚实失败附安装指引
+  org dbdiag <x.db|:memory:> "SELECT …" [--setup SQL]
+      数据库查询诊断（v0.5.16 · #113）：EXPLAIN QUERY PLAN + 计划解析
+      （索引命中/全表扫描/涉及表）+ 建议；:memory: 瞬态可 --setup 播种
+  org merge [--no-ff] [--message M] <source> [--repo DIR]
+  org rebase <onto> [--repo DIR] / org mergestate
+      merge/rebase 安全操作（v0.5.16 · #80）：冲突绝不自动解决 —— 冲突即
+      自动 abort 回滚 + 冲突清单；mergestate 只读探测（分支/上游/分叉/脏树）
+  org rbac [list|check <角色> <动作>]
+      RBAC 角色权限（v0.5.16 · #149）：.org/rbac.json 策略（缺失 = 单机
+      owner 兜底）；check 输出判定（deny 优先 → allow → 默认拒）；
+      工具环启用：ORG_RBAC_ROLE=<角色>（未设 = 门控完全不启用）
+  org iacscan [dirs…]
+      容器/IaC 静态扫描（v0.5.16 · #147）：16 条规则三族（Dockerfile/
+      compose/terraform：root 用户/特权容器/0.0.0.0 ingress/硬编码密钥…）
+  org plugin [list|install|remove|validate]
+      插件市场（v0.5.16 · #132）：事务性安装（staging → 校验 → 原子
+      rename，绝不留半成品）· manifest 契约（name/version/entry/
+      permissions）· permissions 与 RBAC 联动（执行面是路线图，本模块只装不执行）
+  org openapi <spec.json>
+      OpenAPI/Swagger 解析（v0.5.16 · #134）：3.x/2.0 双识别 + 操作清单
+      （method/path/参数/security）+ suggestToolName 工具命名建议
+  org browser [status|snapshot <url>|screenshot <url>]
+      浏览器 DOM 快照/截图（v0.5.16 · #116/#30）：多引擎降级链
+      agent-browser → chromium → chrome；快照出标题/正文/链接/图片清单；
+      console/网络面板是路线图（诚实边界）
+  org complete <file> <line> <col>
+      代码补全（v0.5.16 · #32）：三级候选（同文件符号 > 项目符号 > 语言
+      关键字 · HSL/TS/PY）；空候选附原因（成员补全/类型推断是 LSP 路线图）
+  org rename <旧名> <新名> [--apply]
+      项目级重命名（v0.5.16 · #56）：缺省 dryRun 预览（unified diff ≤5
+      文件）· --apply 真写（写前读 → 行级词边界替换 → 复读校验，失败即停）
   org providers [ledger]
       服务商健康面板：全部注册预设 + 命名车道 + 环境变量发现状态 +
       调用台账（key 轮换归因 · 失败统计）
