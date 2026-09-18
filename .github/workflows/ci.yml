@@ -174,9 +174,17 @@ jobs:
       - name: 安装 ruff（图灵语料 ruff 对拍依赖）
         shell: bash
         run: |
-          PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
-          "$PY" -m pip install --quiet ruff
-          "$PY" -m ruff --version || true
+          # macOS runner 的系统 python 是 externally-managed（PEP 668）拒绝
+          # pip install —— Linux/macOS 走 ruff 官方安装器（astral.sh，零 python
+          # 依赖）；Windows runner 的 python 无此限制走 pip。
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            PY=python; command -v python >/dev/null 2>&1 || PY=python3
+            "$PY" -m pip install --quiet ruff
+          else
+            curl -LsSf https://astral.sh/ruff/install.sh | sh
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+          command -v ruff >/dev/null 2>&1 && ruff --version || echo "(ruff 不在 PATH —— 测试侧将优雅降级 skip)"
 
       - name: dhv check 全部 HSL 源码（hsl/ + probe/ + dist/ 铸出专家）
         shell: bash

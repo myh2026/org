@@ -82,9 +82,14 @@ interface Engines { pdftotext: string | null; uv: string | null }
  */
 function detectEngines(): Engines {
   const pdftotext = which("pdftotext");
+  // v0.5.15：运行期 HOME 优先（Node os.homedir() 的文档语义是 $HOME 优先，
+  // Bun 实测对运行期 HOME 修改有进程级缓存 —— 显式读 env 保持可测性与语义）
+  const home = process.env.HOME
+    ?? (process.platform === "win32" ? process.env.USERPROFILE : undefined)
+    ?? os.homedir();
   let uv = which("uv", [
-    path.join(os.homedir(), ".local", "bin"),
-    path.join(os.homedir(), ".cargo", "bin"),
+    path.join(home, ".local", "bin"),
+    path.join(home, ".cargo", "bin"),
   ]);
   if (uv) {
     try {

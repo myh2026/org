@@ -38,6 +38,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Windows 句柄瞬态锁对策（bun:sqlite close 后延迟释放，EBUSY 实录）
+  for (let i = 0; i < 5; i++) {
+    try { fs.rmSync(WS, { recursive: true, force: true }); return; }
+    catch { Bun.sleepSync(200); }
+  }
   fs.rmSync(WS, { recursive: true, force: true });
 });
 
@@ -284,9 +289,20 @@ describe("v0.5.15 工具环扩展 e2e（scripted 剧本驱动）", () => {
 
   const pdfReady = pdfEngines().pdftotext || pdfEngines().uv;
   (pdfReady ? test : test.skip)("read_pdf：PDF 文本提取（引擎在场才跑）", () => {
-    // 引擎在场：用 uv + fpdf 生成真 PDF（或 pdftotext 配套工具）—— 生成侧
-    // 统一走 uv（本机/CI ubuntu 均有 uv 或 pdftotext 之一）
-    const gen = Bun.spawnSync(["uv", "run", "--with", "fpdf", "python", "-c",
+    // 引擎在场：用 uv + fpdf 生成真 PDF —— 生成侧统一走 uv（解析全路径：
+    // Bun 的 Windows spawn 不自动补 .exe，CI 实录 ENOENT）
+    const uvExe = (() => {
+      const ext = process.platform === "win32" ? ".exe" : "";
+      for (const d of (process.env.PATH ?? "").split(path.delimiter)) {
+        for (const n of [`uv${ext}`, "uv"]) {
+          const p = path.join(d, n);
+          if (fs.existsSync(p)) return p;
+        }
+      }
+      return null;
+    })();
+    if (!uvExe) return; // 解析不到 uv 全路径（如引擎是 pdftotext）→ 本用例让位
+    const gen = Bun.spawnSync([uvExe, "run", "--with", "fpdf", "python", "-c",
       "from fpdf import FPDF; p=FPDF(); p.add_page(); p.set_font('Helvetica', size=16); p.cell(200,10,'Hello ORG PDF', ln=True); p.output('pdf-out/ok.pdf')"],
       { cwd: TEST_RUN, stdout: "pipe", stderr: "pipe" });
     if (gen.exitCode !== 0) return; // 生成失败（离线环境）→ 本用例静默跳过语义

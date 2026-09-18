@@ -36,8 +36,18 @@ const SCRATCH = path.join(TEST_RUN, "db");
 
 // ---- 测试基建 ----------------------------------------------------------------
 
-beforeEach(() => {
+/** Windows 句柄瞬态锁对策：bun:sqlite close() 后句柄释放有延迟（实测 EBUSY），
+ * 重试 5×200ms 兜住；仍失败则让用例自然失败（暴露真锁而不是静默跳过）。 */
+function rmScratch(): void {
+  for (let i = 0; i < 5; i++) {
+    try { fs.rmSync(SCRATCH, { recursive: true, force: true }); return; }
+    catch { Bun.sleepSync(200); }
+  }
   fs.rmSync(SCRATCH, { recursive: true, force: true });
+}
+
+beforeEach(() => {
+  rmScratch();
   fs.mkdirSync(SCRATCH, { recursive: true });
 });
 
