@@ -1,5 +1,63 @@
 # CHANGELOG
 
+## v0.5.17（2026-09-19）—— 三簇主攻批：LSP/DAP 深度 + 云生态 + 团队协作（⬜10→⬜3）
+
+v0.5.16.1 CI 全绿基线之上，能力矩阵剩余 ⬜ 项三簇并进（子智能体 14-A/14-B/14-C
+并行批次，主 Agent 统一收尾）：7 项 ⬜→✅（#26/#108/#67/#68/#72/#74/#87），
+主表 **✅ 115/150**（🟡32 · ⬜3：#44 IaC 深度实现 / #117 移动端调试 / #133 远程 Agent）。
+测试 867 → **977**（+110：lsp 41 · cloud 43 · collab 26）。
+
+### 一、LSP/DAP 深度簇（#26 + #108）—— lib/lsp.ts 880 行 · lib/debug.ts 471 行
+
+- **#26 LSP/DAP 协议集成**：JSON-RPC 2.0 分帧层（Content-Length 流式解码：
+  粘包/半包/CJK 字节精确/坏帧跳过）+ 构造器全家桶（request/response/notification）
+  + initialize→initialized→shutdown→exit 完整生命周期；**双车道**——内置符号索引
+  车道（definition/references/hover，LSP 0 基 uri/range + 人读 1 基双形，零依赖）
+  与外部 server 车道（detectLspServers 7 家 which 探测 + spawnLspServer/LspClient
+  真协议对话）。echo 型假 LSP server 测试锁定协议层真实可用。
+- **#108 断点/调试建议**：suggestBreakpoints（symbol 级入口 + heuristic 级
+  分支/循环/return 前一行，confidence 双级 + reason）+ DAP 构造器四件套
+  （与 LSP 分帧层共用）+ debugPlan（7 步调试计划）。诚实边界：真 DAP attach
+  是路线图，协议封装已就绪。
+- 三端接线：CLI `lsp`（definition/references/hover/servers/protocol 五子命令）+
+  `debug`（suggest/plan/dap）；工具环 6 工具（lsp_definition/lsp_references/
+  lsp_hover/lsp_servers/debug_breakpoints/debug_plan）；Web `/api/govex/lsp`（5
+  动作）+ `/api/govex/debug`（3 动作）+ 🐞 LSP/DAP 面板。
+
+### 二、云生态簇（#67/#68/#72/#74）—— lib/cloud.ts 五层降级
+
+- **#67 Docker**：白名单子命令封装（build/run/ps/inspect 等，破坏性命令一律
+  拒绝）+ 数组参数 spawn + daemon 探测；降级车道 dockerfileFor（node/bun/
+  python/rust 四型多阶段模板）+ composeFor + dockerPlan（可粘贴命令序列）。
+- **#68 SSH**：host 白名单门控（ssh-hosts.allow 文件，缺省拒绝 + 创建指引）+
+  BatchMode/ConnectTimeout/StrictHostKeyChecking 安全参数；降级车道
+  sshConfigTemplate + sshPlan；scp 同门控。
+- **#72 K8s/Terraform**：kubectl 白名单 + 集群可达性探测；降级车道
+  k8sManifestFor（Deployment/Service/Ingress/ConfigMap/PVC，带资源限额/探针）
+  + terraform 骨架。
+- **#74 云 CLI**：10 家注册表（aws/gcloud/az/gh/vercel/flyctl/railway/heroku/
+  doctl/oci）批量探测 + installHint，与 21 家模型服务商注册表全景联动。
+- **探测灵魂**：cloudProbeAll() 全景探测单一入口（存在≠可用，坏安装按缺席
+  降级），CLI `cloud` / 工具环 6 工具 / Web ☁ 云生态区块三端同源。
+
+### 三、团队协作簇（#87）—— lib/collab.ts 向后兼容铁律
+
+- 单用户会话账本（lib/sessions.ts）之上叠多用户协作层：**runtime/collab/
+  threads/*.jsonl append-only 协议**（seq 单调 + replyTo 回复树 + @mention
+  自动抽取 + sinceSeq 增量读）；协作者视图（collaborators 去重计数）+ 协作
+  摘要（collabSummary）；**桥（bridgeSession）**把单用户账本镜像成团队线程
+  （kind:"system"，只镜像不改写——tests 前后 hash 对拍锁定）。
+- lib/sessions.ts 一行不改（向后兼容铁律），既有 session 测试原样全绿。
+- 三端接线：CLI `collab`（whoami/user/threads/feed/post/comment/users/
+  summary/bridge）；工具环 5 工具；Web 👥 团队协作面板（发帖/评论表单 +
+  回复树渲染 + XSS 转义）。
+
+### 验证
+
+- 三簇定向 165/165（lsp 41 · cloud 43 · collab 26 · check 守卫 55）+ 全量
+  **973 pass / 0 fail / 4 skip**（977 例 · 53 文件 · 5413 断言 · 338s）。
+- capabilities.md 统计行新口径与表格实态由防漂移守卫锁定一致。
+
 ## v0.5.16.1（2026-09-19）—— CI 红灯清零补丁：win32 监狱混形 + gitmerge CRLF + payload 编译态
 
 3a7af68（v0.5.16 合并推送）后 CI 五 job 两红（run 35367288947）：verify 的

@@ -64,6 +64,46 @@
 // 并落审计（journal rbac_denied 事件 + runtime/rbac.jsonl 决策账本）。
 // 插件 manifest 的 permissions 字段（"tool:shell_run" 形态）与该命名空间
 // 联动 —— 插件执行面是路线图（本仓库只装不执行，permissions 先行声明）。
+//
+// v0.5.17 新增（LSP/DAP 深度簇 · 6 工具，native 块 await import(root+
+// "/lib/lsp.ts" / "/lib/debug.ts") 与 lib 同源 —— 行为等价由构造保证；
+// 全部只读：符号索引查询 / 源码扫描 / 纯内存协议层）：
+//   lsp_definition {name}            符号→声明位置（内置车道，#26）
+//   lsp_references {name, max_hits?} 符号引用列表（call/mention）
+//   lsp_hover     {name}             符号 kind + 所在文件行上下文
+//   lsp_servers   {}                 外部 LSP server which 探测（缺席诚实降级）
+//   debug_breakpoints {file}         断点建议（入口/分支/循环/return 前，#108）
+//   debug_plan    {file}             调试计划（步骤 + DAP 协议就绪消息序列）
+//
+// v0.5.17 新增（云生态簇 · 6 工具，native 块 await import(root+"/lib/cloud.ts")
+// 与 lib 同源 —— 行为等价由构造保证；#67/#68/#72/#74）：
+//   只读（ReadOnly 模式可用）：
+//   cloud_probe   {}                  全景探测（docker/ssh/k8s/tf/云CLI 五面，
+//                                    工具缺席诚实降级 + 指引）
+//   cloud_dockerfile {project_type}  生产级 Dockerfile 模板（node/bun/python/
+//                                    rust 四型，多阶段 + 非 root + healthcheck）
+//   cloud_clis    {}                 10 家云 CLI 探测表（aws/gcloud/az/gh/…）
+//   执行车道（Full 模式 + process_spawn 门 + 审批在环）：
+//   cloud_docker  {args:[...], context?}  docker 白名单子命令封装（16 子命令；
+//                                    build 的 context/Dockerfile 过监狱）
+//   cloud_ssh     {host, command} | {host, upload_local, upload_remote}
+//                                    host 须在 <ws>/ssh-hosts.allow；BatchMode
+//                                    +ConnectTimeout+accept-new；scp local 过监狱
+//   cloud_k8s     {args:[...]}       kubectl 白名单（get/describe/apply/logs…）；
+//                                    apply -f 路径过监狱，-f -（stdin）拒绝
+//
+// v0.5.17 新增（协作簇 · 5 工具，native 块 await import(root+"/lib/collab.ts")
+// 与 lib 同源 —— 行为等价由构造保证；#87 团队共享会话/评论。append-only JSONL
+// 团队线程 + 回复树 + @mention + 身份层 + 会话账本桥，诚实边界：本地文件协议，
+// 多进程强并发不在面内）：
+//   只读（ReadOnly 模式可用）：
+//   collab_threads {}                 线程清单 + 工作区协作摘要
+//   collab_feed    {thread, since_seq?} 增量读（seq > since_seq 的平铺回复树）
+//   collab_summary {}                 协作总览（线程/帖/评论/用户 + 协作者 + 我是谁）
+//   写动作（Full 模式 + file_write 门 + 审批在环）：
+//   collab_post    {thread, text, user?}  发帖（@user mentions 自动抽取；
+//                                    user 缺省取当前协作者身份）
+//   collab_comment {thread, seq, text, user?} 评论指定楼层（replyTo 树）
 // ============================================================================
 
 import { CapabilityPolicy, AccessMode } from "../policy/capability.hsl";
@@ -123,6 +163,21 @@ export fn tools_prompt(mode: ToolMode) -> String {
     out.push_str("- plugin_list {} — list installed plugins (.org/plugins; manifest name/version/entry/permissions). Installing executes nothing — plugin execution is roadmap; permissions map to RBAC actions.\n");
     out.push_str("- browser_snapshot {\"url\":\"https://example.com\",\"timeout_ms\":30000?} — fetch a page DOM snapshot (title/text/links/images) via engine chain agent-browser → chromium → chrome. timeout_ms clamped to 1-60s. Console/network panels are roadmap (honest boundary).\n");
     out.push_str("- complete_at {\"file\":\"src/app.ts\",\"line_text\":\"const va\",\"column\":7?} — code completion at cursor (HSL/TS/PY): same-file symbols > project symbols > language keywords, prefix-ranked. column is a 0-based char offset into line_text (defaults to end of line). Member completion/type inference are LSP roadmap; empty results carry an honest reason.\n");
+    // v0.5.17 协作簇（#87 团队共享会话/评论 —— 只读三件，ReadOnly 模式可用）
+    out.push_str("- collab_threads {} — list team threads (runtime/collab/threads/*.jsonl, append-only): id/title/participants/post counts + workspace summary. Team collaboration layer over the single-user session ledger.\n");
+    out.push_str("- collab_feed {\"thread\":\"t1\",\"since_seq\":5?} — incremental thread read (posts with seq > since_seq) as a flattened reply tree with depth; efficient lane for collaboration polling.\n");
+    out.push_str("- collab_summary {} — collaboration overview: threads/posts/comments/users + collaborators with post counts + who am I (identity file or ORG_COLLAB_USER).\n");
+    // v0.5.17 LSP/DAP 深度簇（只读工具，零审批门槛）
+    out.push_str("- lsp_definition {\"name\":\"startRun\"} — symbol → declaration sites (built-in symbol-index lane of the LSP integration; returns both LSP canonical uri/range 0-based and human file:line:column). External-server lane (spawnLspServer) available via lib/lsp.ts from CLI/tests.\n");
+    out.push_str("- lsp_references {\"name\":\"startRun\",\"max_hits\":200?} — symbol references list (call vs mention, definition lines excluded); same symbol-index lane.\n");
+    out.push_str("- lsp_hover {\"name\":\"startRun\"} — hover info for a symbol: kind + definition site + source line context (plain-text contents; type inference is roadmap).\n");
+    out.push_str("- lsp_servers {} — probe known external language servers (typescript-language-server/pylsp/gopls/rust-analyzer/clangd…) via which; absence is an honest degrade to the built-in lane, not a failure.\n");
+    out.push_str("- debug_breakpoints {\"file\":\"src/app.ts\"} — breakpoint suggestions for a source file: function/graph entry lines (symbol-level confidence) + if/else branch, loop-head and pre-return lines (heuristic confidence), each with a reason. HSL/TS/TSX/PY only.\n");
+    out.push_str("- debug_plan {\"file\":\"src/app.ts\"} — a debug plan: ordered steps (attach → entry breakpoints → branch/loop → stack inspection) + protocol-ready DAP message sequence (initialize/setBreakpoints/threads/stackTrace). Real debug-adapter attach is roadmap (honest boundary).\n");
+    // v0.5.17 云生态簇（#67/#68/#72/#74 —— 只读三件：探测/模板/注册表，零审批门槛）
+    out.push_str("- cloud_probe {} — one-shot cloud ecosystem probe (docker CLI+daemon / ssh / kubectl+cluster / terraform / 10 cloud CLIs). Absence is an honest degrade with install hints + template-lane pointers, never a silent failure.\n");
+    out.push_str("- cloud_dockerfile {\"project_type\":\"node\"|\"bun\"|\"python\"|\"rust\"} — production-grade multi-stage Dockerfile template (non-root USER + HEALTHCHECK + pinned tags). The degrade-lane deliverable when docker itself is absent.\n");
+    out.push_str("- cloud_clis {} — probe the 10-CLI cloud registry (aws/gcloud/az/gh/vercel/flyctl/railway/heroku/doctl/oci): availability + version + install hint each.\n");
     if mode == ToolMode::Full {
         out.push_str("- fs_write {\"path\":\"...\",\"content\":\"...\",\"preview\":true?} — write a file (may require approval). preview:true returns a unified diff WITHOUT writing (dry-run). Content is scanned for secrets: high-severity key patterns (sk-/ghp_/AKIA… ) are refused — never persist real credentials.\n");
         out.push_str("- fs_edit {\"path\":\"...\",\"old\":\"exact unique text\",\"new\":\"replacement\",\"preview\":true?} — precise edit (may require approval); preview:true returns the diff without writing.\n");
@@ -136,6 +191,13 @@ export fn tools_prompt(mode: ToolMode) -> String {
         out.push_str("- plugin_remove {\"name\":\"my-plugin\"} — remove an installed plugin directory. May require approval.\n");
         out.push_str("- browser_screenshot {\"url\":\"https://example.com\",\"out\":\"shot.png\",\"timeout_ms\":30000?} — full-page screenshot to a PNG in the workspace (out is workspace-relative, default browser-<ts>.png; engine chain as browser_snapshot; PNG magic verified on disk). May require approval.\n");
         out.push_str("- rename_symbol {\"old\":\"startRun\",\"new\":\"startRunV2\",\"dry_run\":true?} — project-wide rename (HSL/TS/PY symbol index; word-boundary line edits; definition+references+mentions). dry_run defaults to true (unified-diff preview, ≤5 files); dry_run:false writes with read→replace→verify per file, stopping at first failure. Refuses: missing definition / target-name clash / invalid identifier. May require approval.\n");
+        // v0.5.17 协作簇写动作（发帖/评论 —— 线程文件追加，file_write 门 + 审批在环）
+        out.push_str("- collab_post {\"thread\":\"t1\",\"text\":\"finding: … @alice\",\"user\":\"bob\"?} — post to a team thread (append-only JSONL; @user mentions auto-extracted; user defaults to the current collaborator identity). May require approval.\n");
+        out.push_str("- collab_comment {\"thread\":\"t1\",\"seq\":3,\"text\":\"agree\",\"user\":\"bob\"?} — comment on a specific post (replyTo tree; same identity semantics as collab_post). May require approval.\n");
+        // v0.5.17 云生态簇执行车道（#67/#68/#72 —— process_spawn 门 + 审批在环）
+        out.push_str("- cloud_docker {\"args\":[\"ps\",\"-a\"],\"context\":\".\",\"dockerfile\":\"Dockerfile\"?,\"tag\":\"app:1.0.0\"?} — run a whitelisted docker subcommand (16 allowed: version/info/ps/images/build/run/create/start/stop/rm/rmi/logs/inspect/pull/tag/push; destructive ones like system prune are NEVER allowed — refusal happens before any spawn). Array args = zero shell-injection surface; 30s hard timeout. args[0]=\"build\" uses the jailed context/dockerfile/tag fields instead. May require approval.\n");
+        out.push_str("- cloud_ssh {\"host\":\"deploy.example.com\",\"command\":\"systemctl status app\"} — run a remote command (host MUST be listed in the workspace ssh-hosts.allow file; absent file = refuse everything). BatchMode=yes + ConnectTimeout=10 + StrictHostKeyChecking=accept-new. Upload form: {host, upload_local, upload_remote} runs scp with the local path jailed to the workspace. May require approval.\n");
+        out.push_str("- cloud_k8s {\"args\":[\"get\",\"pods\",\"-n\",\"prod\"]} — run a whitelisted kubectl subcommand (get/describe/apply/logs/rollout/top/config…; delete/edit/scale/exec are NEVER allowed). apply -f paths are jailed to the workspace; -f - (stdin) is refused. May require approval.\n");
         out.push_str("- shell_run {\"cmd\":\"git status\"} — run an allowlisted command (may require approval)\n");
         out.push_str("- agent_spawn {\"goal\":\"...\",\"mode\":\"run\"|\"ask\",\"expert\":\"name\",\"reuse\":false?} — spawn a sub-organization (team mission via org run, or direct expert via org ask). Depth+budget governed recursion (child budget halves each level); similar goals hit the spawn pool and are REUSED at zero cost (pass reuse:false to force a fresh spawn). Use it ONLY when the task genuinely needs multi-step decomposition or another expert's specialty; for trivial lookups use fs_read/fs_list first. The child inherits your model lane.\n");
         out.push_str("- audio_compose {\"timbre\":\"strings\",\"chords\":\"D3:canon:arp\",\"tempo\":90} — compose from chord progression + timbre (8 instruments: piano/strings/flute/organ/harpsichord/music-box/guitar/bell; 7 progressions: canon/pop/epic/circle/jazz/blues/romance); or explicit notes [{\"freq\":261.63,\"start_beat\":0,\"beats\":1}]. Engine renders playable .wav + .mid alongside your reply (deliverable = audio, not sheet).\n");
@@ -250,13 +312,20 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "agent_spawn" | "audio_compose" => String::from("agent_spawn"),
         // v0.5.16：git/插件/截图/重命名都是工作区写动作（file_write 门 + 审批在环）
         "git_merge" | "git_rebase" | "plugin_install" | "plugin_remove" | "browser_screenshot" | "rename_symbol" => String::from("file_write"),
+        // v0.5.17：协作发帖/评论是工作区写动作（线程文件追加 —— file_write 门 + 审批在环）
+        "collab_post" | "collab_comment" => String::from("file_write"),
+        // v0.5.17 云生态簇：docker/ssh/kubectl 执行车道（外部子进程 —— process_spawn
+        // 门 + 审批在环；白名单拒绝发生在门与 spawn 之前，lib/cloud.ts 内部先判）
+        "cloud_docker" | "cloud_ssh" | "cloud_k8s" => String::from("process_spawn"),
         _ => String::from("file_read"), // v0.5.15：db_schema/db_query（只读门内建）/symbol_search/read_pdf/review_suggest 均只读
     };
     // 写门例外清单（只读工具 + agent_spawn/audio_compose 自带门）：v0.5.15 新增
     // db_schema/db_query（lib/db.ts 只读门双层：词法白名单 + readonly 连接）、
     // symbol_search/read_pdf/review_suggest（纯读）；v0.5.16 新增 db_diagnose（EQP
     // 只读通道 + 词法门）/rbac_check/iac_scan/openapi_parse/plugin_list（纯查询）/
-    // browser_snapshot（导航只读）/complete_at（纯索引查询）。
+    // browser_snapshot（导航只读）/complete_at（纯索引查询）；v0.5.17 新增
+    // collab_threads/collab_feed/collab_summary（协作线程纯查询）+ cloud_probe/
+    // cloud_dockerfile/cloud_clis（云生态探测/模板/注册表 —— 纯读零副作用）。
     if name != String::from("fs_read") && name != String::from("fs_list") && name != String::from("fs_glob")
         && name != String::from("semantic_search")
         && name != String::from("agent_spawn") && name != String::from("audio_compose")
@@ -266,7 +335,14 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         && name != String::from("db_diagnose") && name != String::from("rbac_check")
         && name != String::from("iac_scan") && name != String::from("openapi_parse")
         && name != String::from("plugin_list") && name != String::from("browser_snapshot")
-        && name != String::from("complete_at") {
+        && name != String::from("complete_at")
+        && name != String::from("collab_threads") && name != String::from("collab_feed")
+        && name != String::from("collab_summary")
+        && name != String::from("lsp_definition") && name != String::from("lsp_references")
+        && name != String::from("lsp_hover") && name != String::from("lsp_servers")
+        && name != String::from("debug_breakpoints") && name != String::from("debug_plan")
+        && name != String::from("cloud_probe") && name != String::from("cloud_dockerfile")
+        && name != String::from("cloud_clis") {
         let approved = gate_write(policy, gate_cap, name.clone(), args.clone()).await;
         if approved == String::from("denied") {
             emit_tool(String::from("tool_denied"), format!("{} {}", name, "capability denied"));
@@ -312,7 +388,27 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "browser_screenshot" => tool_browser_screenshot(args.clone()).await,
         "complete_at" => tool_complete_at(args.clone()).await,
         "rename_symbol" => tool_rename_symbol(args.clone()).await,
-        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/shell_run/agent_spawn/audio_compose/audit_export/review_suggest）", name)),
+        // v0.5.17 协作簇（native 块动态 import lib —— 与 CLI/Web 同源）
+        "collab_threads" => tool_collab_threads(args.clone()),
+        "collab_feed" => tool_collab_feed(args.clone()),
+        "collab_summary" => tool_collab_summary(args.clone()),
+        "collab_post" => tool_collab_post(args.clone()),
+        "collab_comment" => tool_collab_comment(args.clone()),
+        // v0.5.17 LSP/DAP 深度簇（native 块动态 import lib —— 与 CLI/Web 同源）
+        "lsp_definition" => tool_lsp_definition(args.clone()).await,
+        "lsp_references" => tool_lsp_references(args.clone()).await,
+        "lsp_hover" => tool_lsp_hover(args.clone()).await,
+        "lsp_servers" => tool_lsp_servers(args.clone()).await,
+        "debug_breakpoints" => tool_debug_breakpoints(args.clone()).await,
+        "debug_plan" => tool_debug_plan(args.clone()).await,
+        // v0.5.17 云生态簇（native 块动态 import lib/cloud.ts —— 与 CLI/Web 同源）
+        "cloud_probe" => tool_cloud_probe(args.clone()),
+        "cloud_dockerfile" => tool_cloud_dockerfile(args.clone()),
+        "cloud_clis" => tool_cloud_clis(args.clone()),
+        "cloud_docker" => tool_cloud_docker(args.clone()),
+        "cloud_ssh" => tool_cloud_ssh(args.clone()),
+        "cloud_k8s" => tool_cloud_k8s(args.clone()),
+        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/shell_run/agent_spawn/audio_compose/audit_export/review_suggest）", name)),
     };
     emit_tool(String::from("tool_result"), result_summary(result.clone()));
     result
@@ -1129,6 +1225,489 @@ async fn tool_rename_symbol(args: String) -> String {
     }
 }
 
+// ---- v0.5.17 LSP/DAP 深度簇：6 工具（capabilities #26/#108） ---------------------
+// lib/lsp.ts / lib/debug.ts 同源（native 块动态 import）。全部只读：符号索引
+// 查询 / 源码扫描 / 纯内存协议层。file 形入参过 pathjail（与 complete_at 同规）。
+// 诚实边界：外部 server spawn 车道在 CLI/tests 侧（lib/lsp.ts spawnLspServer）；
+// 工具环只接内置符号索引车道（零依赖确定性）。真 debug adapter attach 是路线图。
+
+/// v0.5.17 符号→声明位置（#26）：lib/lsp.ts lspDefinition 同源。
+/// 输出 LSP 0 基 uri/range + 人读 1 基 file:line:column 双形。
+async fn tool_lsp_definition(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const name = String(a.name || a.symbol || "");
+            if (!name) return JSON.stringify({ tool: "lsp_definition", ok: false, error: "args.name 必填（符号名）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "lsp_definition", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const lsp = await import(root + "/lib/lsp.ts");
+            // dirs:[""] = 工作区根扫描（与 complete_at/rename_symbol 同口径）
+            const r = lsp.lspDefinition(ws, name, { dirs: [""] });
+            return JSON.stringify({
+                tool: "lsp_definition", ok: r.ok, lane: r.lane, name: r.name,
+                ...(r.reason ? { reason: r.reason } : {}),
+                definitions: r.definitions.map((d) => ({ kind: d.kind, name: d.name, file: d.file, line: d.line, column: d.column, lsp: d.lsp, snippet: d.snippet })),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "lsp_definition", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.17 符号引用列表（#26）：lib/lsp.ts lspReferences 同源（call/mention
+/// 分类 · 定义行排除 · max_hits 帽缺省 200）。
+async fn tool_lsp_references(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const name = String(a.name || a.symbol || "");
+            if (!name) return JSON.stringify({ tool: "lsp_references", ok: false, error: "args.name 必填（符号名）" });
+            const maxHits = a.max_hits != null && Number.isFinite(Number(a.max_hits)) ? Math.max(0, Math.floor(Number(a.max_hits))) : 200;
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "lsp_references", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const lsp = await import(root + "/lib/lsp.ts");
+            const r = lsp.lspReferences(ws, name, { dirs: [""], maxHits: maxHits });
+            return JSON.stringify({
+                tool: "lsp_references", ok: r.ok, lane: r.lane, name: r.name,
+                definitions: r.definitions, ...(r.truncated ? { truncated: true } : {}), ...(r.reason ? { reason: r.reason } : {}),
+                refs: r.refs.map((x) => ({ file: x.file, line: x.line, column: x.column, kind: x.kind, snippet: x.snippet, lsp: x.lsp })),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "lsp_references", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.17 符号 hover（#26）：lib/lsp.ts lspHover 同源 —— kind + 定义位置 +
+/// 所在文件行上下文（纯文本 contents；类型推断是路线图，不臆造）。
+async fn tool_lsp_hover(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const name = String(a.name || a.symbol || "");
+            if (!name) return JSON.stringify({ tool: "lsp_hover", ok: false, error: "args.name 必填（符号名）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "lsp_hover", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const lsp = await import(root + "/lib/lsp.ts");
+            const r = lsp.lspHover(ws, name, { dirs: [""] });
+            return JSON.stringify({
+                tool: "lsp_hover", ok: r.ok, lane: r.lane, name: r.name,
+                ...(r.hover ? { hover: r.hover } : { hover: null, ...(r.reason ? { reason: r.reason } : {}) }),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "lsp_hover", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.17 外部 LSP server 探测（#26）：lib/lsp.ts detectLspServers 同源。
+/// which 探测 7 个已知 server —— 缺席是诚实降级（builtin 车道常在）。
+async fn tool_lsp_servers(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "lsp_servers", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const lsp = await import(root + "/lib/lsp.ts");
+            const servers = lsp.detectLspServers();
+            return JSON.stringify({
+                tool: "lsp_servers", ok: true,
+                servers: servers.map((s) => ({ name: s.name, cmd: s.cmd, args: s.args, available: s.available })),
+                available: servers.filter((s) => s.available).length,
+                ...(servers.every((s) => !s.available) ? { note: "全部缺席 —— 内置符号索引车道常在（lsp_definition/references/hover）" } : {}),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "lsp_servers", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.17 断点建议（#108）：lib/debug.ts suggestBreakpoints 同源。
+/// file 过 pathjail（越界即拒）；入口/分支/循环/return 前，符号级 > 启发式级。
+async fn tool_debug_breakpoints(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const file = String(a.file || a.path || "");
+            if (!file) return JSON.stringify({ tool: "debug_breakpoints", ok: false, error: "args.file 必填（工作区相对路径）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "debug_breakpoints", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            // jail 铁律：与 complete_at 同一条 pathjail 真源（分隔符归一 + win32 大小写折叠）
+            const jail = await import(root + "/lib/pathjail.ts");
+            const abs = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(ws, file);
+            if (!jail.inWorkspace(ws, abs)) return JSON.stringify({ tool: "debug_breakpoints", ok: false, error: "路径越界（须在工作区内）：" + file });
+            const debug = await import(root + "/lib/debug.ts");
+            const r = debug.suggestBreakpoints(ws, file, { max: 60 });
+            return JSON.stringify({
+                tool: "debug_breakpoints", ok: r.ok, ...(r.reason ? { reason: r.reason } : {}),
+                file: r.file, language: r.language, lines: r.lines, ...(r.truncated ? { truncated: true } : {}),
+                suggestions: r.suggestions.map((s) => ({ line: s.line, kind: s.kind, reason: s.reason, confidence: s.confidence, snippet: s.snippet })),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "debug_breakpoints", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.17 调试计划（#108）：lib/debug.ts debugPlan 同源 —— 步骤说明 +
+/// DAP 协议就绪消息序列（initialize/setBreakpoints/threads/stackTrace）。
+/// 诚实边界：不 spawn 真 debug adapter —— 真 attach 是路线图。
+async fn tool_debug_plan(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const file = String(a.file || a.path || "");
+            if (!file) return JSON.stringify({ tool: "debug_plan", ok: false, error: "args.file 必填（工作区相对路径）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "debug_plan", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const jail = await import(root + "/lib/pathjail.ts");
+            const abs = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(ws, file);
+            if (!jail.inWorkspace(ws, abs)) return JSON.stringify({ tool: "debug_plan", ok: false, error: "路径越界（须在工作区内）：" + file });
+            const debug = await import(root + "/lib/debug.ts");
+            const r = debug.debugPlan(ws, file);
+            return JSON.stringify({
+                tool: "debug_plan", ok: r.ok, ...(r.reason ? { reason: r.reason } : {}),
+                file: r.file, language: r.language, suggestions: r.suggestions,
+                steps: r.steps.map((st) => ({ step: st.step, title: st.title, detail: st.detail.slice(0, 500), ...(st.breakpoints ? { breakpoints: st.breakpoints.map((s) => ({ line: s.line, kind: s.kind, reason: s.reason, confidence: s.confidence })) } : {}) })),
+                dap_messages: r.dapMessages,
+                roadmap: "真 debug adapter attach（node --inspect / debugpy / lldb-dap）是路线图 —— 本计划交付协议就绪的消息序列与步骤说明",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "debug_plan", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+// ---- v0.5.17 协作簇：5 工具（capabilities #87 团队共享会话/评论） ---------------
+// lib/collab.ts 同源（append-only JSONL 团队线程 + 回复树 + @mention + 身份）。
+// collab_threads/collab_feed/collab_summary 只读（ReadOnly 模式可用）；
+// collab_post/collab_comment 是工作区写动作（file_write 门 + 审批在环）。
+
+fn tool_collab_threads(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "collab_threads", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const collab = await import(root + "/lib/collab.ts");
+            const threads = collab.listThreads(ws);
+            const s = collab.collabSummary(ws);
+            return JSON.stringify({
+                tool: "collab_threads", ok: true,
+                threads: threads.slice(0, 50).map((t) => ({
+                    id: t.id, title: t.title, posts: t.posts, comments: t.comments,
+                    participants: t.participants, last_active: t.lastActive,
+                })),
+                summary: { threads: s.threads, posts: s.posts, comments: s.comments, users: s.users, ...(s.lastActive ? { last_active: s.lastActive } : {}) },
+                ...(threads.length > 50 ? { truncated: true } : {}),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "collab_threads", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_collab_feed(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const thread = String(a.thread || a.id || "");
+            if (!thread) return JSON.stringify({ tool: "collab_feed", ok: false, error: "args.thread 必填（线程 id）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "collab_feed", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const collab = await import(root + "/lib/collab.ts");
+            const sinceSeq = a.since_seq != null ? Math.max(0, Math.floor(Number(a.since_seq) || 0)) : 0;
+            const feed = collab.threadFeed(ws, thread, { sinceSeq });
+            const flat = collab.flattenThread(feed.posts).slice(0, 100);
+            const users = [...new Set(feed.posts.map((p) => p.user))];
+            return JSON.stringify({
+                tool: "collab_feed", ok: true, thread: thread, since_seq: sinceSeq,
+                posts: flat.map((p) => ({
+                    seq: p.seq, user: p.user, kind: p.kind, depth: p.depth,
+                    ...(p.replyTo !== undefined ? { reply_to: p.replyTo } : {}),
+                    ...(p.mentions && p.mentions.length ? { mentions: p.mentions } : {}),
+                    text: String(p.text).slice(0, 500), at: p.at,
+                })),
+                counts: { posts: feed.posts.length, comments: feed.posts.filter((p) => p.kind === "comment").length, users: users.length },
+                ...(feed.truncated ? { truncated: true } : {}),
+                ...(flat.length < collab.flattenThread(feed.posts).length ? { posts_truncated: true } : {}),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "collab_feed", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_collab_summary(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "collab_summary", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const collab = await import(root + "/lib/collab.ts");
+            const s = collab.collabSummary(ws);
+            const users = collab.collaborators(ws);
+            const who = collab.currentUser(ws);
+            return JSON.stringify({
+                tool: "collab_summary", ok: true,
+                threads: s.threads, posts: s.posts, comments: s.comments, users: s.users,
+                ...(s.lastActive ? { last_active: s.lastActive } : {}),
+                collaborators: users.slice(0, 50).map((u) => ({ user: u.user, posts: u.posts, last_active: u.lastActive })),
+                me: { user: who.user, source: who.source },
+                ...(users.length > 50 ? { collaborators_truncated: true } : {}),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "collab_summary", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_collab_post(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const thread = String(a.thread || a.id || "");
+            const text = String(a.text || a.message || "");
+            if (!thread || !text.trim()) return JSON.stringify({ tool: "collab_post", ok: false, error: "args.thread/args.text 必填" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "collab_post", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const collab = await import(root + "/lib/collab.ts");
+            // 署名：args.user 显式覆盖 > 当前协作用户（身份文件/env）
+            const user = a.user != null && String(a.user) !== "" ? String(a.user) : collab.currentUser(ws).user;
+            const r = collab.postThread(ws, thread, user, text);
+            return JSON.stringify({ tool: "collab_post", ok: true, thread: thread, seq: r.seq, user: user, mentions: r.mentions });
+        } catch (e) {
+            return JSON.stringify({ tool: "collab_post", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_collab_comment(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const thread = String(a.thread || a.id || "");
+            const seqRaw = a.seq != null ? Number(a.seq) : NaN;
+            const text = String(a.text || a.message || "");
+            if (!thread || !text.trim() || !Number.isInteger(seqRaw)) return JSON.stringify({ tool: "collab_comment", ok: false, error: "args.thread/args.seq/args.text 必填" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "collab_comment", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const collab = await import(root + "/lib/collab.ts");
+            const user = a.user != null && String(a.user) !== "" ? String(a.user) : collab.currentUser(ws).user;
+            const r = collab.commentOn(ws, thread, seqRaw, user, text);
+            return JSON.stringify({ tool: "collab_comment", ok: true, thread: thread, seq: r.seq, reply_to: seqRaw, user: user, mentions: r.mentions });
+        } catch (e) {
+            return JSON.stringify({ tool: "collab_comment", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+// ---- v0.5.17 云生态簇：6 工具（capabilities #67/#68/#72/#74） --------------------
+// lib/cloud.ts 同源（多重优雅降级：探测 → 白名单真实车道 → 模板/计划降级 →
+// 诚实拒绝）。cloud_probe/cloud_dockerfile/cloud_clis 只读（ReadOnly 可用）；
+// cloud_docker/cloud_ssh/cloud_k8s 是执行车道（process_spawn 门 + 审批在环）。
+// 路径监狱：docker build context/Dockerfile、scp local、kubectl apply -f 全过
+// lib/pathjail.ts（v0.5.16.1 比较形单点收敛）。
+
+/// 云生态全景探测（五键：docker/ssh/k8s/terraform/clis）。只读。
+fn tool_cloud_probe(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "cloud_probe", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const cloud = await import(root + "/lib/cloud.ts");
+            const r = cloud.cloudProbeAll();
+            return JSON.stringify({
+                tool: "cloud_probe", ok: true, took_ms: r.tookMs,
+                docker: { available: r.docker.available, version: r.docker.version, daemon_reachable: r.docker.daemonReachable, ...(r.docker.reason ? { reason: r.docker.reason } : {}) },
+                ssh: { available: r.ssh.available, version: r.ssh.version, ssh_dir: r.ssh.sshDirExists, config: r.ssh.configExists, known_hosts: r.ssh.knownHostsExists, ...(r.ssh.reason ? { reason: r.ssh.reason } : {}) },
+                k8s: { available: r.k8s.available, version: r.k8s.version, cluster_reachable: r.k8s.clusterReachable, ...(r.k8s.reason ? { reason: r.k8s.reason } : {}) },
+                terraform: { available: r.terraform.available, version: r.terraform.version, ...(r.terraform.reason ? { reason: r.terraform.reason } : {}) },
+                clis: r.clis.map((c) => ({ name: c.name, available: c.available, ...(c.version ? { version: c.version } : {}), install_hint: c.installHint })),
+                summary: r.summary,
+                hint: "工具缺席不是失败 —— 模板车道（cloud_dockerfile / org cloud manifest / terraform）始终可用",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "cloud_probe", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// 生产级 Dockerfile 模板（node/bun/python/rust 四型，#67 降级车道）。只读。
+fn tool_cloud_dockerfile(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "cloud_dockerfile", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const cloud = await import(root + "/lib/cloud.ts");
+            const t = String(a.project_type || a.type || a.projectType || "node");
+            let r;
+            try { r = cloud.dockerfileFor(t); } catch (e2) {
+                return JSON.stringify({ tool: "cloud_dockerfile", ok: false, error: String(e2 && e2.message || e2) + "（四型：node/bun/python/rust）" });
+            }
+            return JSON.stringify({
+                tool: "cloud_dockerfile", ok: true, project_type: r.projectType,
+                dockerfile: r.dockerfile, notes: r.notes,
+                hint: "保存为工作区内 Dockerfile 后 cloud_docker {args:[\"build\"], context:\".\"} 构建（context 过监狱）",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "cloud_dockerfile", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// 10 家云 CLI 探测表（#74）。只读。
+fn tool_cloud_clis(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "cloud_clis", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const cloud = await import(root + "/lib/cloud.ts");
+            const clis = cloud.probeCloudClis();
+            const o = cloud.cloudProvidersOverview();
+            return JSON.stringify({
+                tool: "cloud_clis", ok: true,
+                available: clis.filter((c) => c.available).length, total: clis.length,
+                clis: clis.map((c) => ({ name: c.name, available: c.available, ...(c.version ? { version: c.version } : {}), install_hint: c.installHint, docs_url: c.docsUrl })),
+                providers_overview: { model_providers: o.modelProviders, cloud_clis: o.cloudClis, total: o.total },
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "cloud_clis", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// docker 白名单子命令执行（#67 真实车道；process_spawn 门 + 审批在环）。
+/// args[0]="build" 时用 context/dockerfile/tag 字段（全过监狱）。
+fn tool_cloud_docker(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const argv = Array.isArray(a.args) ? a.args.map(String).filter((s) => s.length > 0) : [];
+            if (argv.length === 0) return JSON.stringify({ tool: "cloud_docker", ok: false, error: "args.args 必填（数组，首元素为 docker 子命令；白名单 16 子命令见 tools_prompt）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "cloud_docker", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const cloud = await import(root + "/lib/cloud.ts");
+            let r;
+            if (argv[0] === "build") {
+                // build 车道：context/dockerfile/tag 显式字段（context 与 Dockerfile 过监狱）
+                r = cloud.dockerBuild(ws, String(a.context || "."), {
+                    ...(a.dockerfile ? { dockerfile: String(a.dockerfile) } : {}),
+                    ...(a.tag ? { tag: String(a.tag) } : {}),
+                });
+            } else {
+                r = cloud.dockerRun(argv[0], argv.slice(1));
+            }
+            return JSON.stringify({
+                tool: "cloud_docker", ok: r.ok, ...(r.kind ? { kind: r.kind } : {}),
+                ...(r.reason ? { reason: r.reason } : {}),
+                argv: r.argv, exit_code: r.exitCode,
+                stdout: String(r.stdout).slice(0, 16384), stderr: String(r.stderr).slice(0, 4096),
+                took_ms: r.tookMs,
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "cloud_docker", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// 远程 SSH 执行 / scp 上传（#68 真实车道；host 须在 <ws>/ssh-hosts.allow，
+/// local 过监狱；process_spawn 门 + 审批在环）。
+fn tool_cloud_ssh(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const host = String(a.host || "");
+            if (!host) return JSON.stringify({ tool: "cloud_ssh", ok: false, error: "args.host 必填（且须在 <工作区>/ssh-hosts.allow 白名单内 —— 无此文件 = 拒绝一切远程执行）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "cloud_ssh", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const cloud = await import(root + "/lib/cloud.ts");
+            let r;
+            if (a.upload_local != null) {
+                // scp 车道：local 过工作区监狱
+                r = cloud.scpUpload(ws, host, String(a.upload_local), String(a.upload_remote || ""));
+            } else {
+                const command = String(a.command || "");
+                if (!command) return JSON.stringify({ tool: "cloud_ssh", ok: false, error: "args.command 必填（或用 upload_local/upload_remote 走 scp 车道）" });
+                r = cloud.sshRun(ws, host, command);
+            }
+            return JSON.stringify({
+                tool: "cloud_ssh", ok: r.ok, ...(r.kind ? { kind: r.kind } : {}),
+                ...(r.reason ? { reason: r.reason } : {}),
+                argv: r.argv, exit_code: r.exitCode,
+                stdout: String(r.stdout).slice(0, 16384), stderr: String(r.stderr).slice(0, 4096),
+                took_ms: r.tookMs,
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "cloud_ssh", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// kubectl 白名单子命令执行（#72 真实车道；apply -f 过监狱；process_spawn 门
+/// + 审批在环）。
+fn tool_cloud_k8s(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const argv = Array.isArray(a.args) ? a.args.map(String).filter((s) => s.length > 0) : [];
+            if (argv.length === 0) return JSON.stringify({ tool: "cloud_k8s", ok: false, error: "args.args 必填（数组，首元素为 kubectl 子命令；get/describe/apply/logs/rollout… 白名单，delete 永不在内）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "cloud_k8s", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const cloud = await import(root + "/lib/cloud.ts");
+            const r = cloud.k8sRun(ws, argv);
+            return JSON.stringify({
+                tool: "cloud_k8s", ok: r.ok, ...(r.kind ? { kind: r.kind } : {}),
+                ...(r.reason ? { reason: r.reason } : {}),
+                argv: r.argv, exit_code: r.exitCode,
+                stdout: String(r.stdout).slice(0, 16384), stderr: String(r.stderr).slice(0, 4096),
+                took_ms: r.tookMs,
+                hint: "集群不可达时降级车道：org cloud manifest <kind>（五族模板）+ terraform 骨架",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "cloud_k8s", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
 /// v0.5.8 语义检索（capabilities #19/#22）：lib/search.ts 的 ABI 内同构
 /// 实现（HSL 无法 import TS —— 分词/BM25 公式与 lib 侧一致，
 /// tests/search.test.ts 行为对拍保证排序等价；「一源多投射 + 行为级
@@ -1829,11 +2408,35 @@ fn result_summary(result: String) -> String {
                 if (tool === "browser_screenshot") return tool + " ok " + String(o.path) + " (" + String(o.engine) + ", " + String(o.ms ?? "?") + "ms)";
                 if (tool === "complete_at") return tool + " ok " + String((o.candidates || []).length) + " 候选" + (o.prefix ? " prefix=" + String(o.prefix) : "") + (o.reason ? "（" + String(o.reason).slice(0, 60) + "）" : "");
                 if (tool === "rename_symbol") return tool + (o.dry_run ? " dry-run" : " applied") + " " + String(o.edits ?? "?") + " 处编辑 · " + String(o.files ?? "?") + " 文件" + ((o.warnings || []).length > 0 ? " ⚠" + String(o.warnings.length) : "");
+                // v0.5.17 LSP/DAP 深度簇的观测摘要（journal 人读面）
+                if (tool === "lsp_definition") return tool + " ok defs=" + String((o.definitions || []).length) + " top=" + String((o.definitions && o.definitions[0] && o.definitions[0].file + ":" + o.definitions[0].line) || "-");
+                if (tool === "lsp_references") return tool + " ok refs=" + String((o.refs || []).length) + " calls=" + String((o.refs || []).filter(function (x) { return x.kind === "call"; }).length) + " defs=" + String(o.definitions ?? 0) + ((o.refs && o.refs[0]) ? " top=" + String(o.refs[0].file + ":" + o.refs[0].line) : "");
+                if (tool === "lsp_hover") return tool + (o.hover ? " ok " + String(o.hover.kind) + " " + String(o.hover.name) + " " + String(o.hover.file) + ":" + String(o.hover.line) : " 空 " + String(o.reason || "?").slice(0, 60));
+                if (tool === "lsp_servers") return tool + " ok 可用 " + String((o.servers || []).filter(function (s) { return s.available; }).length) + "/" + String((o.servers || []).length);
+                if (tool === "debug_breakpoints") return tool + " ok 建议" + String((o.suggestions || []).length) + "处" + (o.language ? " " + String(o.language) : "") + ((o.suggestions && o.suggestions[0]) ? " top=" + String(o.suggestions[0].line) + "(" + String(o.suggestions[0].kind) + ")" : "") + (o.reason ? "（" + String(o.reason).slice(0, 60) + "）" : "");
+                if (tool === "debug_plan") return tool + " ok " + String(o.suggestions ?? 0) + "断点 · " + String((o.steps || []).length) + "步 · DAP消息" + String((o.dap_messages || o.dapMessages || []).length) + "条";
+                // v0.5.17 云生态簇的观测摘要（journal 人读面）
+                if (tool === "cloud_probe") {
+                    const s = o.summary || {};
+                    return tool + " ok docker=" + String(s.dockerDaemon ? "daemon✓" : (s.dockerAvailable ? "CLI" : "✗")) + " ssh=" + String(s.sshAvailable ? "✓" : "✗") + " k8s=" + String(s.k8sCluster ? "cluster✓" : (s.k8sAvailable ? "CLI" : "✗")) + " tf=" + String(s.terraformAvailable ? "✓" : "✗") + " clis=" + String(s.clisAvailable ?? "?") + "/" + String(s.clisTotal ?? "?") + " " + String(o.took_ms ?? "?") + "ms";
+                }
+                if (tool === "cloud_dockerfile") return tool + " ok " + String(o.project_type) + " 模板 " + String((o.dockerfile || "").length) + "字符（多阶段·非root·healthcheck）";
+                if (tool === "cloud_clis") return tool + " ok " + String(o.available ?? "?") + "/" + String(o.total ?? "?") + " 家在场 · 模型商" + String((o.providers_overview || {}).model_providers ?? "?") + "家";
+                if (tool === "cloud_docker" || tool === "cloud_ssh" || tool === "cloud_k8s") {
+                    return tool + " ok " + String((o.argv || []).slice(0, 4).join(" ")) + " " + String(o.took_ms ?? "?") + "ms";
+                }
+                // v0.5.17 协作簇的观测摘要（journal 人读面；feed 按「N 帖·M 评论·K 用户」口径）
+                if (tool === "collab_threads") { const s = o.summary || {}; return tool + " ok " + String(s.threads ?? (o.threads || []).length) + " 线程 · " + String(s.posts ?? "?") + " 帖 · " + String(s.users ?? "?") + " 用户" + ((o.threads && o.threads[0]) ? " top=" + String(o.threads[0].id) : ""); }
+                if (tool === "collab_feed") { const c = o.counts || {}; return tool + " ok " + String(o.thread) + " " + String(c.posts ?? (o.posts || []).length) + "帖·" + String(c.comments ?? "?") + "评论·" + String(c.users ?? "?") + "用户 since=" + String(o.since_seq ?? 0); }
+                if (tool === "collab_summary") return tool + " ok threads=" + String(o.threads) + " posts=" + String(o.posts) + " comments=" + String(o.comments) + " users=" + String(o.users) + " me=" + String((o.me && o.me.user) || "?");
+                if (tool === "collab_post") return tool + " ok " + String(o.thread) + " #" + String(o.seq) + " " + String(o.user) + ((o.mentions || []).length > 0 ? " @" + String(o.mentions.join(" @")) : "");
+                if (tool === "collab_comment") return tool + " ok " + String(o.thread) + " #" + String(o.seq) + " ↳#" + String(o.reply_to) + " " + String(o.user);
                 return tool + " ok " + size + " chars";
             }
-            // v0.5.15：错误摘要带 kind（denied/jail 拒绝可观测）
+            // v0.5.15：错误摘要带 kind（denied/jail 拒绝可观测）；v0.5.17：
+            // cloud_* 执行车道的失败面用 reason 字段（白名单/host 门控/监狱拒因）
             const kind = o.kind !== undefined ? " [" + String(o.kind) + "]" : o.refused !== undefined ? " [" + String(o.refused) + "]" : "";
-            return tool + " error" + kind + " " + String(o.error || "").slice(0, 120);
+            return tool + " error" + kind + " " + String(o.error || o.reason || "").split("\n")[0].slice(0, 120);
         } catch (e) {
             return "result " + String(result).slice(0, 100);
         }
