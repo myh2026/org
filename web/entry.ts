@@ -168,6 +168,8 @@ import { cloudProbeAll, probeDocker, probeSsh, probeK8s, probeTerraform, probeCl
          sshRun, scpUpload, sshConfigTemplate, sshPlan, k8sRun, k8sManifestFor, terraformPlan } from "../lib/cloud.ts"; // v0.5.17 云生态统一模块（#67/#68/#72/#74）
 import { suggestBreakpoints, debugPlan, dapSelfTest } from "../lib/debug.ts"; // v0.5.17 断点/调试建议（#108）
 import { probeMobile, mobileDevices, mobileLogcat, mobileDebugPlan, mobileSelfTest, MOBILE_PLAN_PLATFORMS } from "../lib/mobile.ts"; // v0.5.18 移动端调试（#117）
+import { probeRemote, loadRemoteHosts, findRemoteHost, remotePing, remoteDeployPlan,
+         REMOTE_HOSTS_FILE } from "../lib/remote.ts"; // v0.5.18 远程 Agent 簇（#133 —— 会话/部署/计划层，与 cloud_ssh 互补）
 import { iacParseFile, iacGraph, iacPlan, iacGenerate, probeIac, iacValidate } from "../lib/iac.ts"; // v0.5.18 IaC 深度实现层（#44）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
@@ -1765,6 +1767,60 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
             return json({ ok: false, error: (err as Error).message }, 500);
           }
         }
+        if (route === "GET /api/govex/remote") {
+          const action = String(url.searchParams.get("action") ?? "probe").trim();
+          const rws = readWorkspaceOf(ws);
+          try {
+            if (action === "probe") {
+              const p = probeRemote();
+              return json({
+                ok: true,
+                ssh: { available: p.available, version_raw: p.versionRaw, open_ssh: p.openSsh },
+                rsync: { available: p.rsyncAvailable, ...(p.rsyncVersion ? { version: p.rsyncVersion } : {}) },
+                scp: { available: p.scpAvailable },
+                ssh_keygen: { available: p.sshKeygenAvailable },
+                agent_forwarding: p.agentForwarding,
+                ...(p.reason ? { reason: p.reason } : {}),
+                hint: "工具缺席不是失败 —— org remote plan（部署计划纯函数）恒可用；主机档案 remote-hosts.json 是 host 寻址的门控源",
+              });
+            }
+            if (action === "hosts") {
+              const report = loadRemoteHosts(rws);
+              return json({
+                ok: true, file: report.file, exists: report.exists, count: report.hosts.length,
+                hosts: report.hosts, errors: report.errors,
+                ...(report.hosts.length === 0 ? { note: `档案为空或未创建 —— host 寻址一律拒绝（安全缺省）。创建：<ws>/${REMOTE_HOSTS_FILE} 数组 [{name, host, user, port?, identity?}]（identity 只接受路径，私钥内容/密码字段会被校验拒绝）` } : {}),
+              });
+            }
+            if (action === "plan") {
+              const mode = String(url.searchParams.get("mode") ?? "all");
+              const hostParam = String(url.searchParams.get("host") ?? "").trim();
+              // host 在档案 → 实参化（user/host 就位）；不在档案也照出计划（占位形态）
+              const entry = hostParam ? findRemoteHost(rws, hostParam).entry : null;
+              const p = remoteDeployPlan({
+                host: entry ? entry.host : hostParam,
+                user: entry ? entry.user : String(url.searchParams.get("user") ?? "").trim(),
+                mode,
+              });
+              return json({ ok: true, mode: p.mode, target: p.target, ...(entry ? { roster_host: entry.name } : {}), phases: p.phases });
+            }
+            if (action === "ping") {
+              const host = String(url.searchParams.get("host") ?? "").trim();
+              if (!host) return json({ ok: false, error: "host 必填（且须在 <工作区>/remote-hosts.json 档案内）" }, 400);
+              const roundsParam = url.searchParams.get("rounds");
+              const rounds = roundsParam !== null ? Math.max(1, Math.floor(Number(roundsParam) || 0)) : undefined;
+              const r = remotePing(rws, { host, ...(rounds ? { rounds } : {}) });
+              return json({
+                ok: r.ok, ...(r.kind ? { kind: r.kind } : {}), ...(r.reason ? { reason: r.reason } : {}),
+                host, rounds: r.rounds, failures: r.failures,
+                ...(r.stats ? { stats: r.stats, times: r.times } : {}),
+              });
+            }
+            return json({ ok: false, error: `未知 action：${action || "（空）"}（probe/hosts/plan/ping —— 只读四动作；执行车道走工具环 remote_exec / CLI org remote exec）` }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
         // v0.5.18 ⚒ IaC 深度（#44）：GET ?action=parse|plan|graph&file=… | generate&manifest=<JSON 串>
         // | probe | validate&dir=…。与 CLI org iac / 工具环 iac_* 同源 lib/iac.ts
         // （内置 HCL 子集解析器主车道；probe 探测 terraform/tofu/tflint，缺席诚实降级）。
@@ -2360,6 +2416,7 @@ export async function webMain(argv: string[]): Promise<number> {
   console.log(`  协作面     GET/POST /api/govex/collab（v0.5.17 #87：threads/feed/users/summary/whoami + post/comment/user/bridge）`);
   console.log(`  云生态     GET/POST /api/govex/cloud（v0.5.17 #67/#68/#72/#74：probe 全景/dockerfile/compose/manifest/terraform 模板 + docker/ssh/k8s 白名单执行）`);
   console.log(`  移动端     GET /api/govex/mobile（v0.5.18 #117：probe 三面探测/devices 设备清单/logcat dump 五元组/plan 计划保底 + selftest —— 只读动作）`);
+  console.log(`  远程 Agent  GET /api/govex/remote（v0.5.18 #133：probe 四工具探测/hosts 主机档案/plan 部署计划四式/ping 心跳 —— 只读四动作）`);
   console.log(`  IaC 深度   GET /api/govex/iac（v0.5.18 #44：HCL 解析/依赖图/人读 Plan/manifest 逆向生成 + probe 五面探测；与 iacscan 扫描互补）`);
   console.log(`  模型       ${p.model}（GUI 可切 scripted/deepseek，请求体可逐次覆盖）`);
   // v0.4.13：网关三件套可见性 —— 直连服务商（DeepSeek 等）的鉴权/模型/超时
@@ -3402,7 +3459,7 @@ function renderIndexHtml(): string {
   <button id="toolboxBtn" class="rchip" type="button" title="工具箱（v0.5.15）— 🗄 SQLite 查询 · 🔎 符号跳转 · 🛡 密钥扫描 · 📦 审计导出 · 📋 SBOM · 👥 评审推荐">
     <span class="rc-label">🧰 工具箱</span>
   </button>
-  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16+）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🐞 LSP/DAP 调试 · 🌿 merge/rebase · 👥 团队协作 · ☁ 云生态 · 📱 移动端调试 · ⚒ IaC深度">
+  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16+）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🐞 LSP/DAP 调试 · 🌿 merge/rebase · 👥 团队协作 · ☁ 云生态 · 📱 移动端调试 · ⚒ IaC深度 · 🛰 远程 Agent">
     <span class="rc-label">🛡 治理与扩展</span>
   </button>
   <span class="tstats" id="topStats"></span>
@@ -3542,7 +3599,7 @@ function renderIndexHtml(): string {
 <div id="govexScrim" aria-hidden="true"></div>
 <div id="govexPane" role="dialog" aria-modal="true" aria-labelledby="gxTitle">
   <div class="schhead">
-    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git · 👥 协作 · ☁ 云生态 · 📱 移动端 · ⚒ IaC深度（v0.5.16+）</div>
+    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git · 👥 协作 · ☁ 云生态 · 📱 移动端 · ⚒ IaC深度 · 🛰 远程（v0.5.16+）</div>
     <button class="schclose" type="button" onclick="closeGovex()" title="关闭（Esc）" aria-label="关闭治理与扩展面板">✕</button>
     <div class="tbtabs" role="tablist">
       <button class="tbtab on" id="gxTabIac" type="button" role="tab" onclick="gxTab('iac')">🛡 IaC</button>
@@ -3558,6 +3615,7 @@ function renderIndexHtml(): string {
       <button class="tbtab" id="gxTabCloud" type="button" role="tab" onclick="gxTab('cloud')">☁ 云生态</button>
       <button class="tbtab" id="gxTabMobile" type="button" role="tab" onclick="gxTab('mobile')">📱 移动端</button>
       <button class="tbtab" id="gxTabIacx" type="button" role="tab" onclick="gxTab('iacx')">⚒ IaC深度</button>
+      <button class="tbtab" id="gxTabRemote" type="button" role="tab" onclick="gxTab('remote')">🛰 远程 Agent</button>
     </div>
   </div>
 
@@ -3781,6 +3839,25 @@ function renderIndexHtml(): string {
         <button type="button" onclick="gxIacGenerate()">⚙ 生成 .tf</button>
       </div>
       <div class="tbout" id="gxIacGenOut" style="max-height:320px"><div class="schempty">JSON manifest → 合法 .tf（terraform/provider 块 + variable 提取（$ref 自动补声明）+ resource 块 + output）；生成结果可被本面板解析器再解析（往返自洽）。只返回文本不写盘 —— 采纳时复制保存。</div></div>
+    </section>
+
+    <section class="tbsec" id="gxSecRemote" hidden>
+      <div class="tbbar">
+        <button type="button" onclick="gxRemoteProbe()">🛰 工具链探测</button>
+        <button type="button" onclick="gxRemoteHosts()">📇 主机档案</button>
+        <span class="tbmeta" id="gxRemoteMeta"></span>
+      </div>
+      <div class="tbout" id="gxRemoteOut" style="margin-bottom:10px"><div class="schempty">远程 Agent（#133）：ssh/scp/rsync/ssh-keygen 四工具探测（OpenSSH 版本解析 + SSH_AUTH_SOCK agent 环境，缺席诚实降级）· 主机档案 remote-hosts.json（name→host/user/port/identity，host 不在档案 = 拒绝不猜默认）。CLI 同款 org remote probe/hosts。</div></div>
+      <div class="tbbar">
+        <input id="gxRmtHost" type="text" placeholder="主机名（须在 remote-hosts.json 档案）" autocomplete="off" aria-label="远程主机名" style="max-width:210px">
+        <button type="button" onclick="gxRemotePing()">📡 心跳</button>
+        <select id="gxRmtPlanMode" aria-label="部署模式" style="max-width:130px">
+          <option value="all">plan: all</option><option value="git">plan: git</option><option value="rsync">plan: rsync</option><option value="container">plan: container</option>
+        </select>
+        <button type="button" onclick="gxRemotePlan()">📋 部署计划</button>
+        <span class="tbmeta">计划是纯函数（工具缺席也交付）</span>
+      </div>
+      <div class="tbout" id="gxRmtPlanOut" style="max-height:320px"><div class="schempty">部署计划：目标机摸底（bun/git/磁盘/端口）→ 部署三式（git clone / rsync 工作区 / 容器）→ run 队列远程化（org web + 网关模型）→ 回滚。心跳 = ssh echo 往返 min/avg/max。CLI 同款 org remote ping/plan。执行车道（remote exec）走工具环/CLI（process_spawn 门 + 审批在环）。</div></div>
     </section>
   </div>
 
@@ -5431,7 +5508,81 @@ function closeGovex() {
   document.getElementById("govexPane").classList.remove("on");
   document.getElementById("govexScrim").classList.remove("on");
 }
-var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Lsp", "lsp"], ["Git", "git"], ["Collab", "collab"], ["Cloud", "cloud"], ["Mobile", "mobile"], ["Iacx", "iacx"]];
+// ---- 🛰 远程 Agent 面板（v0.5.18：#133 —— 工具链探测 · 主机档案 · 心跳 · 部署计划，只读四动作） ----
+function gxRemoteProbe() {
+  const out = document.getElementById("gxRemoteOut"), meta = document.getElementById("gxRemoteMeta");
+  out.innerHTML = '<div class="schempty">探测中…（ssh which + -V 探活 + OpenSSH 版本解析；缺席诚实降级）</div>';
+  fetch("/api/govex/remote?action=probe").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    meta.textContent = "ssh/scp/rsync/ssh-keygen + agent 环境";
+    let h = "";
+    const row = function (icon, name, ok, extra) {
+      return '<div class="tbrow">' + icon + " <b>" + name + "</b> " + (ok ? '<span class="spwc">✓ 在场' + (extra ? "（" + esc(String(extra).slice(0, 64)) + "）" : "") + "</span>" : "⬜ 缺席") + "</div>";
+    };
+    h += row("🔐", "ssh", j.ssh.available, j.ssh.available ? (j.open_ssh ? "OpenSSH " + j.open_ssh.major + "." + j.open_ssh.minor : j.ssh.version_raw) : "");
+    h += row("📤", "rsync", j.rsync.available, j.rsync.available ? j.rsync.version : "");
+    h += row("📥", "scp", j.scp.available, j.scp.available ? "rsync 缺席时的降级车道" : "");
+    h += row("🔑", "ssh-keygen", j.ssh_keygen.available, j.ssh_keygen.available ? "密钥生成指引可行" : "");
+    h += '<div class="tbrow">🔁 agent ' + (j.agent_forwarding ? '<span class="spwc">✓ SSH_AUTH_SOCK 在场</span>（BatchMode 下 agent 密钥可用；socket 路径绝不回显）' : "✗ 无 agent 转发环境") + "</div>";
+    if (j.reason) h += '<div class="tbmeta">⚠ ' + esc(String(j.reason).slice(0, 160)) + "</div>";
+    h += '<div class="tbrow" style="margin-top:4px">💡 ' + esc(j.hint) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxRemoteHosts() {
+  const out = document.getElementById("gxRemoteOut"), meta = document.getElementById("gxRemoteMeta");
+  out.innerHTML = '<div class="schempty">读取档案中…</div>';
+  fetch("/api/govex/remote?action=hosts").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    meta.textContent = j.exists ? j.count + " 个主机在册" : "档案未创建";
+    let h = '<div class="tbmeta">' + esc(j.file) + (j.exists ? "" : " —— 缺席 = host 寻址一律拒绝（安全缺省）") + "</div>";
+    if (!(j.hosts || []).length) { h += '<div class="schempty">（空 —— ' + esc(j.note || "创建档案后 host 寻址放行") + "）</div>"; }
+    for (const e of j.hosts || []) {
+      h += '<div class="tbrow">🛰 <b>' + esc(e.name) + "</b> → " + esc(e.user) + "@" + esc(e.host) + ":" + (e.port || 22) + (e.identity ? ' · <span class="tbmeta">key ' + esc(e.identity) + "</span>" : "") + "</div>";
+    }
+    for (const e of j.errors || []) h += '<div class="tbrow">⚠ ' + esc(e) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxRemotePing() {
+  const host = document.getElementById("gxRmtHost").value.trim();
+  const out = document.getElementById("gxRmtPlanOut");
+  if (!host) { out.innerHTML = '<div class="schempty">先输入主机名（须在 remote-hosts.json 档案内 —— 不在档案 = 拒绝不猜默认）</div>'; return; }
+  out.innerHTML = '<div class="schempty">心跳中…（ssh echo 往返计时，缺省 4 轮）</div>';
+  fetch("/api/govex/remote?action=ping&host=" + encodeURIComponent(host)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) {
+      const kindText = { "host-not-found": "host 未在档案（不猜默认）", "tool-absent": "ssh CLI 缺席", refused: "拒连/不可达" };
+      out.innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(kindText[j.kind] || "") + " —— " + esc(String(j.reason || j.error || "").split("\\n")[0].slice(0, 200)) + "</div>";
+      return;
+    }
+    let h = '<div class="tbsym">📡 ' + esc(j.host) + "：" + j.rounds + " 轮 echo 往返（失败 " + j.failures + " 轮）</div>";
+    h += '<div class="tbrow">延迟 min/avg/max = <b>' + j.stats.min + "/" + j.stats.avg + "/" + j.stats.max + "</b> ms" + (j.failures > 0 ? "（部分降级：统计只计成功轮）" : "") + "</div>";
+    h += '<div class="tbmeta">逐轮：' + esc((j.times || []).map(function (t) { return t + "ms"; }).join(" · ")) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxRemotePlan() {
+  const host = document.getElementById("gxRmtHost").value.trim();
+  const mode = document.getElementById("gxRmtPlanMode").value;
+  const out = document.getElementById("gxRmtPlanOut");
+  out.innerHTML = '<div class="schempty">生成计划中…（纯函数 —— 不 spawn 不落盘）</div>';
+  let url = "/api/govex/remote?action=plan&mode=" + encodeURIComponent(mode);
+  if (host) url += "&host=" + encodeURIComponent(host);
+  fetch(url).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    let h = '<div class="tbsym">📋 部署计划（模式 ' + esc(j.mode) + " · 目标 " + esc(j.target) + (j.roster_host ? " · 档案 " + esc(j.roster_host) : "（占位 —— 未在档案实参化）") + "）</div>";
+    for (const ph of j.phases || []) {
+      h += '<div class="tbmeta" style="margin-top:8px">' + esc(ph.title) + "</div>";
+      for (const [i, s] of (ph.steps || []).entries()) {
+        h += '<div class="tbrow">' + (i + 1) + ". <code>" + esc(s.cmd.split("\\n")[0].slice(0, 150)) + "</code></div>";
+        h += '<div class="tbmeta">　# ' + esc(s.note) + (s.expect ? " ▸ " + esc(s.expect) : "") + "</div>";
+      }
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+
+var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Lsp", "lsp"], ["Git", "git"], ["Collab", "collab"], ["Cloud", "cloud"], ["Mobile", "mobile"], ["Iacx", "iacx"], ["Remote", "remote"]];
 function gxTab(sec) {
   for (const [k, id] of GX_TABS) {
     document.getElementById("gxTab" + k).classList.toggle("on", id === sec);
