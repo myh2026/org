@@ -616,8 +616,13 @@ describe("云生态：CLI 冒烟（org cloud）", () => {
     expect(p.stdout).toContain("terraform");
     // v0.5.17.1 环境自适应：云 CLI 在场数随 runner 而变（沙箱 0/10 · GitHub CI 4/10）
     expect(p.stdout).toMatch(/\d+\/10 家在场/);
-    // 降级车道指引：terraform 缺席时展示（在场时展示探测成功 —— 两形态都诚实）
-    if (p.stdout.includes("terraform ✗")) expect(p.stdout).toContain("降级车道即主车道");
+    // 降级车道指引段：仅「全缺席」（anyUp=false）环境展示（v0.5.17.3 修正：
+    // 混合在场态跳过该段——此前按 terraform 单面条件断言在 CI 混合态假红）；
+    // 展示时验证指引行完整性，不展示时零断言（形态由 anyUp 决定，不锁环境）。
+    if (p.stdout.includes("降级车道即主车道")) {
+      expect(p.stdout).toContain("org cloud dockerfile");
+      expect(p.stdout).toContain("org cloud manifest");
+    }
     const c = runOrg(["cloud", "clis"]);
     expect(c.ok).toBe(true);
     expect(c.stdout).toContain("aws");
