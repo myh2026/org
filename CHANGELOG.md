@@ -1,5 +1,58 @@
 # CHANGELOG
 
+## v0.5.15（2026-09-18）—— 桌面 Agent 补全批 + CI 红灯清零 + 漂移治理
+
+实测驱动的三线交付：**① org CI 连续 8 run 红灯的根因清零**（payload 过期 /
+跨平台测试假红 / notify 超时）；**② 能力矩阵 12 项升级，主表 ✅ 破百
+（100/150）**——数据库 / diff 干跑 / 符号跳转 / PDF / 密钥扫描 / 审计导出 /
+SBOM / CODEOWNERS，每项 = lib 实现 + 测试 + CLI + 工具环 + Web 工具箱五端；
+**③ 治理漂移修订**（capabilities.md 三处滞后条目 + 统计行防漂移守卫）。
+测试 668/668 全绿（31 文件，+118 例）。
+
+### 一、CI 红灯清零（P0）
+
+- **payload 再生**：v0.5.6–v0.5.14 源码变更未再生 build/payload.json
+  （verify job 的「payload 新鲜度」闸门连续 8 run 红）—— 再生后指纹入库。
+- **跨平台测试五重防御**：turing.test.ts 工具缺席优雅降级（ruff/rustc/g++/
+  python3 缺失 → test.skip 可见理由，裸检出 bun test 不假红）+ win32 可执行
+  后缀（rustc/g++ 产物 .exe，execFileSync 不自动补）+ CRLF 归一（MSVC CRT
+  文本模式 \r\n）+ cross-platform-tests job 补装 ruff（原先只有 ubuntu 装）+
+  ruff-gate/ruff.test findRuff 的 win32 .exe 兼容。
+- **notify 双修**：desktopNotify tryCmd 预算 5s→3s（headless Windows
+  powershell toast 挂满 5s 拖爆 bun 默认用例超时，CI 实录 5334ms）+ 用例
+  显式 15s 超时。
+
+### 二、能力补全（12 项，主表 ✅ 91→100）
+
+全部遵循「lib 单一实现 → CLI / 工具环 / Web 三端消费」与「动态 import 同源」
+（工具环 native 块 `await import(root + "/lib/x.ts")` —— 行为等价由构造保证）：
+
+| 能力 | 实现 | 三端入口 |
+|:--|:--|:--|
+| #43/#73 数据库 Schema/迁移/操作 | lib/db.ts（bun:sqlite 零依赖 · 双层只读门 · 版本化迁移账本） | org db / db_schema·db_query·db_migrate / Web 🗄 |
+| #49/#60 diff 预览/干跑 | lib/diff.ts（GNU diff -u 对拍一致 · LCS + 快速路径） | org diff / fs_write·fs_edit preview:true / Web |
+| #20 符号定义/引用 | lib/symbols.ts（HSL/TS/PY 词法索引 · 600 文件帽） | org symbols / symbol_search / Web 🔎 |
+| #52 文件移动 | 工具环 fs_move（审批在环 + 双层监狱 + 防自嵌套） | fs_move / — / — |
+| #24 PDF 读取 | lib/pdfread.ts（pdftotext → uv+pypdf → 诚实失败） | org read / read_pdf / — |
+| #141 密钥扫描 | lib/scan.ts（18 类模式 · 脱敏预览） | org scan / fs_write 写入拦截 / Web 🛡 |
+| #150 审计导出 | lib/audit.ts（零依赖 zip + md 摘要） | org audit / audit_export / Web 📦 |
+| #148 SBOM | lib/sbom.ts（SPDX-2.3 · spdx-tools 校验 0 错） | org sbom / — / Web 📋 |
+| #85/#89 评审推荐/CODEOWNERS | lib/owners.ts（GitHub 兼容子集 · 启发式降级） | org owners / review_suggest / Web 👥 |
+
+fs_write 密钥拦截策略：高危（sk-/ghp_/AKIA/私钥…）拒绝落盘（ORG_SCAN=off
+逃生口）· 中低危告警放行；preview 干跑 = 执行语义（锚点唯一性同样校验）。
+
+### 三、治理漂移（P1）
+
+- capabilities.md：#128 定时任务 ⬜→✅（v0.5.5 已落地）、#127 出站 webhook
+  🟡→✅（v0.5.5）、B9 语义检索 ⬜→✅（v0.5.8）三处滞后修订；统计行重算
+  （91/34/25 → 实态 88/36/26 → 交付后 100/30/20）。
+- **统计行防漂移守卫**（tests/check.test.ts 4 例）：主表 150 行齐全 + 专家
+  表 25 行齐全 + 统计行与表格实态机械一致 + 截断残留防复发 —— 改表不改行
+  CI 当场红，漂移治理从「人工对齐」变「机械锁定」。
+- 21 家服务商计数修正（provider-registry 注释与 CLI help 均写「20 家」）；
+  dashscope 拼写修正（dashqueue → dashscope）。
+
 ## v0.5.14（2026-09-16）—— 直连车道语义地板 + 救援（B-22）
 
 agent-browser QA 驱动 Web GUI 直连模式发现：**GUI 缺省专家 notice-parser +

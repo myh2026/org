@@ -3,7 +3,7 @@
 // ----------------------------------------------------------------------------
 // 独立模块（无内部依赖）：被 lib/config.ts（预设）与 lib/providers.ts（车道
 // 解析）共同引用，避免两者互相 import 的初始化环。
-// 「支持所有主流 API key 模式」的单一事实来源：20 家服务商的 OpenAI 兼容
+// 「支持所有主流 API key 模式」的单一事实来源：21 家服务商的 OpenAI 兼容
 // 端点、缺省模型、key 的环境变量名、附加头。国内主流（DeepSeek/智谱/月之
 // 暗面/通义/MiniMax/硅基流动）与海外主流（OpenAI/Anthropic/Gemini/
 // OpenRouter/Groq/Mistral/xAI/Together/Fireworks/Cerebras/Perplexity/

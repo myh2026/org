@@ -40,6 +40,14 @@ import { scanAndRenderArtifacts } from "../lib/audio.ts"; // v0.5.6 音频产物
 import { semanticSearch } from "../lib/search.ts"; // v0.5.8 语义检索（capabilities #19/#22）
 import { synthesizeSpeech, voiceStatus, VOICES } from "../lib/voice.ts"; // v0.5.12 语音入口（ASR/TTS）
 import { analyzeImages, visionStatus, VISION_MAX_IMAGES } from "../lib/vision.ts"; // v0.5.13 视觉入口（VLM）
+import { dbSchema, dbTables, dbQuery, dbMigrations, dbApplyMigration, DB_LIMITS } from "../lib/db.ts"; // v0.5.15 数据库操作层（capabilities #43/#73）
+import { diffText, diffFiles, renderUnified, renderStats } from "../lib/diff.ts"; // v0.5.15 diff 预览（#49/#60）
+import { indexSymbols, lookupDef, findRefs } from "../lib/symbols.ts"; // v0.5.15 符号定义/引用（#20）
+import { scanWorkspace, scanText, SECRET_PATTERNS } from "../lib/scan.ts"; // v0.5.15 密钥扫描（#141）
+import { exportAudit, auditSummary } from "../lib/audit.ts"; // v0.5.15 审计导出（#150）
+import { buildSbom, renderSpdxJson, renderSpdxTagValue } from "../lib/sbom.ts"; // v0.5.15 SBOM（#148）
+import { loadCodeowners, matchOwners, recommendReviewers } from "../lib/owners.ts"; // v0.5.15 CODEOWNERS/评审推荐（#89/#85）
+import { pdfEngines, readPdf } from "../lib/pdfread.ts"; // v0.5.15 PDF 读取降级链（#24）
 import { listApprovals, decideApproval, clearGranted } from "../lib/approvals.ts";
 import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
@@ -2112,6 +2120,242 @@ async function cmdSpawn(a: Args): Promise<number> {
   return errs > 0 ? 1 : 0;
 }
 
+// ---- v0.5.15 桌面 Agent 补全批次：db / diff / symbols / scan / audit / sbom / owners / read ----
+
+/** rest 里的 --flag value / --flag=value 提取。
+ *  直接扫 process.argv 而非 a.rest —— parseArgs 会消费部分 flag（--name/--run/
+ *  --out/--dry-run 进 Args 字段），rest 里看不到；argv 扫描对两种形态与大小写原样
+ *  透明（--name 的 lowercase 副作用也不受影响）。 */
+function restFlag(a: Args, name: string): string | undefined {
+  const argv = process.argv.slice(2);
+  const i = argv.indexOf(`--${name}`);
+  if (i >= 0 && i + 1 < argv.length && !argv[i + 1]!.startsWith("--")) return argv[i + 1];
+  const pre = argv.find((r) => r.startsWith(`--${name}=`));
+  if (pre) return pre.split("=").slice(1).join("=");
+  // 兜底：未被 parseArgs 消费的 flag 仍在 a.rest（双形态等价）
+  const j = a.rest.indexOf(`--${name}`);
+  if (j >= 0 && j + 1 < a.rest.length && !a.rest[j + 1]!.startsWith("--")) return a.rest[j + 1];
+  const pre2 = a.rest.find((r) => r.startsWith(`--${name}=`));
+  return pre2 ? pre2.split("=").slice(1).join("=") : undefined;
+}
+function restBool(a: Args, name: string): boolean {
+  const argv = process.argv.slice(2);
+  return argv.includes(`--${name}`) || a.rest.includes(`--${name}`)
+    || argv.some((r) => r.startsWith(`--${name}=`)) || a.rest.some((r) => r.startsWith(`--${name}=`));
+}
+
+/** org db <schema|tables|query|migrate|history> --file x.db [--sql …] [--name …] [--dry-run] [--limit N]
+ *  SQLite 数据库操作（capabilities #43 数据库 Schema/迁移 + #73 迁移/操作）。 */
+async function cmdDb(a: Args): Promise<number> {
+  const verb = a.rest[0] ?? "schema";
+  const file = restFlag(a, "file");
+  const positional = a.rest.filter((r) => !r.startsWith("--"));
+  if (!file && verb !== "help") {
+    console.error('用法：org db schema|tables|query|migrate|history --file <x.db> [--sql "SELECT …"] [--name 迁移名] [--dry-run] [--limit N]');
+    console.error("  只读门：query 仅单条 SELECT/WITH/EXPLAIN/PRAGMA table_info（写操作走 migrate 专用通道）");
+    console.error("  迁移协议：_org_migrations 版本账本 + 伴车 <x.db>.migrations.json 双写");
+    return 2;
+  }
+  const f = path.resolve(file!);
+  if (verb === "schema") {
+    const s = dbSchema(f);
+    if (s.missing) { console.error(`✗ 无法打开：${f}（${s.journalMode ?? "文件不存在或不是 SQLite 库"}）`); return 1; }
+    console.log(`🗄 ${f}（${(s.sizeBytes / 1024).toFixed(1)} KB · journal=${s.journalMode}）`);
+    for (const t of s.tables) {
+      const cols = t.columns.map((c) => `${c.name}${c.pk ? " PK" : ""}${c.notNull ? "!" : ""}`).join(", ");
+      console.log(`  表 ${t.name}（${t.rowCount === null ? "行数未抽查（>10MB）" : `${t.rowCount} 行`}）：${cols}`);
+    }
+    if (s.indexes.length) console.log(`  索引：${s.indexes.join(" · ")}`);
+    if (s.views.length) console.log(`  视图：${s.views.join(" · ")}`);
+    return 0;
+  }
+  if (verb === "tables") {
+    const t = dbTables(f);
+    if (t.length === 0) { console.error(`✗ 无法打开或无表：${f}`); return 1; }
+    console.log(t.join("\n"));
+    return 0;
+  }
+  if (verb === "query") {
+    const sql = restFlag(a, "sql");
+    if (!sql) { console.error('用法：org db query --file x.db --sql "SELECT * FROM t LIMIT 5"'); return 2; }
+    const limitRaw = Number(restFlag(a, "limit") ?? DB_LIMITS.defaultRowLimit);
+    const r = dbQuery(f, sql, { limit: Number.isFinite(limitRaw) ? limitRaw : DB_LIMITS.defaultRowLimit });
+    if (!r.ok) {
+      const kindText: Record<string, string> = { denied: "只读门拒绝（写语句走 migrate 通道）", syntax: "语法错误", missing: "库文件不存在", readonly: "内核只读拦截", internal: "内部限制" };
+      console.error(`✗ 查询失败（${kindText[r.kind] ?? r.kind}）：${r.error}`);
+      return 1;
+    }
+    const { columns, rows, rowCount, ms, truncated } = r.result;
+    console.log(`📊 ${rowCount} 行 · ${ms}ms${truncated ? `（截断至 ${rows.length} 行，--limit 提高帽，上限 ${DB_LIMITS.maxRowLimit}）` : ""}`);
+    if (columns.length > 0) console.log(`  ${columns.join(" | ")}`);
+    for (const row of rows) console.log(`  ${row.map((c) => (c === null ? "NULL" : String(c))).join(" | ")}`);
+    return 0;
+  }
+  if (verb === "migrate") {
+    const sql = restFlag(a, "sql");
+    const name = restFlag(a, "name") ?? `migration-${Date.now().toString(36)}`;
+    if (!sql) { console.error('用法：org db migrate --file x.db --name "add users table" --sql "CREATE TABLE …" [--dry-run]'); return 2; }
+    const r = dbApplyMigration(f, name, sql, { dryRun: restBool(a, "dry-run") });
+    if (!r.ok) { console.error(`✗ 迁移失败（${r.kind}）：${r.error}`); return 1; }
+    console.log(`${r.dryRun ? "🔍 dry-run 验证通过（已回滚，未落盘）" : "✓"} 迁移 v${r.version} · ${name} · ${r.durMs}ms`);
+    return 0;
+  }
+  if (verb === "history") {
+    const list = dbMigrations(f);
+    if (list.length === 0) { console.log(`（无迁移记录 —— ${f}.migrations.json 不存在或为空）`); return 0; }
+    for (const m of list) console.log(`  v${m.version}  ${m.appliedAt ?? "?"}  ${m.name}`);
+    return 0;
+  }
+  console.error(`未知子命令：${verb}（schema|tables|query|migrate|history）`);
+  return 2;
+}
+
+/** org diff <旧> <新> [--context N] —— unified diff 预览（#49/#60）。 */
+async function cmdDiff(a: Args): Promise<number> {
+  const positional = a.rest.filter((r) => !r.startsWith("--"));
+  if (positional.length < 2) {
+    console.error("用法：org diff <旧文件> <新文件> [--context 3]");
+    console.error("  旧文件不存在 = 全新增；GNU diff -u 格式对拍一致");
+    return 2;
+  }
+  const [oldF, newF] = positional;
+  const ctxRaw = Number(restFlag(a, "context") ?? 3);
+  const r = diffFiles(path.resolve(oldF!), path.resolve(newF!), { context: Number.isFinite(ctxRaw) ? Math.max(0, ctxRaw) : 3 });
+  if (!r.ok) {
+    const why: Record<string, string> = { missing: "新文件不存在", binary: "二进制文件不支持 diff", read: "读取失败" };
+    console.error(`✗ ${why[r.kind] ?? r.kind}：${r.error}`);
+    return 1;
+  }
+  if (r.result.identical) { console.log("（两文件内容一致）"); return 0; }
+  console.log(renderStats(r.result));
+  console.log(renderUnified(r.result, oldF!, newF!));
+  return 0;
+}
+
+/** org symbols <名字> [--refs] [--substring] —— 符号定义/引用跳转（#20）。 */
+async function cmdSymbols(a: Args): Promise<number> {
+  const name = a.rest.find((r) => !r.startsWith("--"));
+  if (!name) {
+    console.error("用法：org symbols <名字> [--refs] [--substring] [--workspace DIR]");
+    console.error("  定义清单缺省；--refs 附引用（call/mention 两类）；--substring 子串匹配");
+    return 2;
+  }
+  const ws = defaultWorkspace(a);
+  const idx = indexSymbols(ws, [""]); // v0.5.15：工作区根扫描（runtime/out-*/spawn 已排除）
+  const defs = lookupDef(idx.symbols, name, !restBool(a, "substring"));
+  console.log(`🔎 符号索引：${idx.files} 文件 · ${idx.symbols.length} 符号 · ${idx.builtMs}ms${idx.truncated ? "（超文件帽截断）" : ""}`);
+  if (defs.length === 0) {
+    console.log(`\n（无定义命中 —— ${restBool(a, "substring") ? "" : "试 --substring 子串匹配；"}或换 org search 语义检索）`);
+    return 0;
+  }
+  for (const d of defs) console.log(`  ${d.kind.padEnd(9)} ${d.name}  ${d.file}:${d.line}\n           ${d.snippet.slice(0, 110)}`);
+  if (restBool(a, "refs")) {
+    const refs = findRefs(ws, name, { dirs: [""] });
+    console.log(`\n引用（${refs.length}）：`);
+    for (const r of refs) console.log(`  ${r.kind.padEnd(7)} ${r.file}:${r.line}  ${r.snippet.slice(0, 100)}`);
+  }
+  return 0;
+}
+
+/** org scan —— 密钥/敏感信息扫描（#141）。 */
+async function cmdScan(a: Args): Promise<number> {
+  const ws = defaultWorkspace(a);
+  const dirsFlag = restFlag(a, "dirs");
+  const r = scanWorkspace(ws, dirsFlag ? { dirs: dirsFlag.split(",").map((d) => d.trim()).filter(Boolean) } : {});
+  console.log(`🛡 密钥扫描：${r.scanned}/${r.files} 文件 · ${r.hits.length} 命中 · ${r.tookMs}ms${r.truncated ? "（超文件帽截断）" : ""}`);
+  if (r.skippedBinary + r.skippedOversize > 0) {
+    console.log(`  降级跳过：二进制 ${r.skippedBinary} · 超限 ${r.skippedOversize}`);
+  }
+  if (r.hits.length === 0) { console.log("\n✓ 未发现密钥模式（18 类：OpenAI/Anthropic/GitHub/AWS/私钥/JWT/.env 赋值…）"); return 0; }
+  const order = { high: 0, medium: 1, low: 2 } as const;
+  const hits = [...r.hits].sort((x, y) => order[x.severity] - order[y.severity]);
+  for (const h of hits) console.log(`  [${h.severity.toUpperCase()}] ${h.pattern}  ${h.file}:${h.line}\n         ${h.preview.slice(0, 130)}`);
+  const high = hits.filter((h) => h.severity === "high").length;
+  console.log(`\n  ${high} 条高危 —— 建议立即轮换密钥；工具环 fs_write 已同款拦截（写入前 scanText）`);
+  return high > 0 ? 1 : 0;
+}
+
+/** org audit [--run out-a] [--out FILE] —— 审计导出（#150）。 */
+async function cmdAudit(a: Args): Promise<number> {
+  const ws = defaultWorkspace(a);
+  const runFlag = restFlag(a, "run");
+  const outFlag = restFlag(a, "out");
+  const r = exportAudit(ws, { run: runFlag, out: outFlag ? path.resolve(outFlag) : undefined });
+  if (!r.ok) { console.error(`✗ 导出失败：${r.warnings.join("; ")}`); return 1; }
+  console.log(`📦 审计导出：${r.zip}`);
+  console.log(`  ${r.entries} 条目 · ${(r.bytes / 1024).toFixed(1)} KB · 摘要 ${path.basename(r.report)}`);
+  for (const w of r.warnings) console.log(`  ⚠ ${w}`);
+  const sum = auditSummary(ws);
+  console.log(`\n  概览：${sum.runs.length} 次运行 · 审批 ${sum.approvals} 条 · LLM 台账 ${sum.ledgerEntries} 条`);
+  for (const run of sum.runs.slice(0, 8)) {
+    console.log(`    ${run.name.padEnd(12)} ${String(run.events).padStart(5)} 事件 · ${String(run.tokens).padStart(7)} tokens · ${run.ok === null ? "—" : run.ok ? "ok" : "err"}`);
+  }
+  return 0;
+}
+
+/** org sbom [--format json|tv] —— SPDX SBOM（#148）。 */
+async function cmdSbom(a: Args): Promise<number> {
+  const fmt = (restFlag(a, "format") ?? "json").toLowerCase();
+  const r = buildSbom(ROOT);
+  if (!r.ok) { console.error(`✗ ${r.error}`); return 1; }
+  const text = fmt === "tv" ? renderSpdxTagValue(r.doc) : renderSpdxJson(r.doc);
+  const out = a.out ? path.resolve(a.out) : path.join(DEFAULT_WORKSPACE, fmt === "tv" ? "sbom.spdx" : "sbom.spdx.json");
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, text);
+  console.log(`📋 SPDX-2.3 SBOM → ${out}`);
+  for (const p of r.doc.packages) console.log(`  ${p.scope.padEnd(9)} ${p.name}@${p.version}${p.license ? ` · ${p.license}` : ""}`);
+  return 0;
+}
+
+/** org owners [文件...] / org owners --review a.ts,b.ts —— CODEOWNERS + 评审推荐（#89/#85）。 */
+async function cmdOwners(a: Args): Promise<number> {
+  const ws = defaultWorkspace(a);
+  const { rules, file } = loadCodeowners(ws);
+  const reviewFlag = restFlag(a, "review");
+  const positional = a.rest.filter((r) => !r.startsWith("--"));
+  if (reviewFlag) {
+    const files = reviewFlag.split(",").map((s) => s.trim()).filter(Boolean);
+    const r = recommendReviewers(ws, files);
+    console.log(`👥 评审推荐（${files.length} 文件）：`);
+    for (const rev of r.reviewers) console.log(`  @${rev.name} · 覆盖 ${rev.filesCovered}/${files.length} · ${rev.reason}`);
+    if (!r.fromCodeowners) console.log(`\n  ⚠ ${r.fallbackReason ?? ""}`);
+    return 0;
+  }
+  if (rules.length === 0) {
+    console.log(`（无 CODEOWNERS —— 查找顺序 .org/CODEOWNERS → CODEOWNERS → .github/CODEOWNERS）`);
+    console.log(`  建议在 ${path.join(ws, ".org", "CODEOWNERS")} 声明，例：\n    lib/ @engine-owner\n    hsl/ @kernel-owner`);
+    return 0;
+  }
+  console.log(`📋 CODEOWNERS：${file}（${rules.length} 规则，后规则覆盖前规则）`);
+  for (const r of rules) console.log(`  L${String(r.line).padStart(3)}  ${r.pattern.padEnd(28)} ${r.owners.map((o) => (o.startsWith("@") ? o : "@" + o)).join(" ")}`);
+  if (positional.length > 0) {
+    console.log(`\n匹配（${positional.length} 文件）：`);
+    for (const m of matchOwners(ws, positional)) console.log(`  ${m.file.padEnd(40)} → ${m.owners.length ? m.owners.join(" ") : "（无规则命中）"}`);
+  }
+  return 0;
+}
+
+/** org read <file.pdf> [--max-pages N] —— PDF 文本提取三层降级链（#24）。 */
+async function cmdRead(a: Args): Promise<number> {
+  const file = a.rest.find((r) => !r.startsWith("--"));
+  if (!file) {
+    console.error("用法：org read <file.pdf> [--max-pages 50]");
+    const e = pdfEngines();
+    console.error(`  引擎探测：pdftotext ${e.pdftotext ? "✓" : "✗"} · uv+pypdf ${e.uv ? "✓" : "✗"}（三层降级：pdftotext → uv+pypdf → 诚实失败）`);
+    return 2;
+  }
+  const mpRaw = Number(restFlag(a, "max-pages") ?? 50);
+  const r = await readPdf(path.resolve(file), { maxPages: Number.isFinite(mpRaw) ? Math.max(1, mpRaw) : 50 });
+  if (!r.ok) {
+    console.error(`✗ ${r.error}`);
+    if (r.hint) console.error(`  ${r.hint}`);
+    return 1;
+  }
+  console.log(`📄 ${file} · ${r.pages} 页 · 引擎 ${r.engine} · ${r.ms}ms\n`);
+  console.log(r.text);
+  return 0;
+}
+
 // ---- org memory：专家长期记忆（v0.5.3） ----------------------------------------
 
 async function cmdMemory(a: Args): Promise<number> {
@@ -2266,6 +2510,15 @@ export async function orgMain(): Promise<number> {
     case "voice": return cmdVoice(a);
     case "vision": return cmdVision(a);
     case "spawn": return cmdSpawn(a);
+    // v0.5.15 桌面 Agent 补全批次（capabilities #43/#73/#49/#60/#20/#52/#141/#150/#148/#89/#85/#24）
+    case "db": return cmdDb(a);
+    case "diff": return cmdDiff(a);
+    case "symbols": return cmdSymbols(a);
+    case "scan": return cmdScan(a);
+    case "audit": case "audit-export": return cmdAudit(a);
+    case "sbom": return cmdSbom(a);
+    case "owners": case "codeowners": return cmdOwners(a);
+    case "read": return cmdRead(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -2321,9 +2574,9 @@ export async function orgMain(): Promise<number> {
       127.0.0.1，容器/远程场景可 0.0.0.0）：专家卡 + 会话侧栏 + 对话
       视图（观测元数据 tokens/耗时/ctx 窗口计量；scripted 占位剧本秒回）
   org config [list|get|set|unset|preset|presets|lane/use/keys/auto|path|test]
-      用户模型/API 配置（~/.org/config.json，跨版本持久）：20 家服务商
+      用户模型/API 配置（~/.org/config.json，跨版本持久）：21 家服务商
       预设（deepseek/openai/anthropic/gemini/openrouter/groq/mistral/xai/
-      zhipu/moonshot/dashqueue/…）· 命名车道 + key 池（429 自动轮换）+
+      zhipu/moonshot/dashscope/…）· 命名车道 + key 池（429 自动轮换）+
       降级链 + 日预算 · 环境变量自动发现（OPENAI_API_KEY 等即刻可用）·
       org config test 真实连通性验证 · default_lane 免每次 --model
   org task [list|submit|ask|show|cancel|pause|resume|retry|run-next|logs]
@@ -2358,6 +2611,33 @@ export async function orgMain(): Promise<number> {
       派生池观测与清理（登记 + 目录 + 孤儿；dry-run 预览）
   org voice
       语音服务状态探测 + 声音清单（🎤 转写 / 🔊 朗读需要 SDK 凭据）
+  org db <schema|tables|query|migrate|history> --file x.db [--sql "SELECT…"]
+      SQLite 数据库操作（v0.5.15 · capabilities #43/#73）：schema 表结构/
+      索引/视图 · query 只读门（单条 SELECT/WITH，行帽 200 缺省）·
+      migrate 迁移（版本化 _org_migrations 账本 + 伴车 .migrations.json +
+      --dry-run 事务回滚预演）· history 迁移历史
+  org diff <旧文件> <新文件> [--context N]
+      unified diff 预览（v0.5.15 · #49/#60）：公共头尾剥离 + LCS ·
+      GNU diff -u 对拍一致 · CRLF 归一 · 大文件快速路径
+  org symbols <名字> [--refs] [--substring]
+      符号定义/引用跳转（v0.5.15 · #20）：HSL/TS/PY 轻量索引（fn/
+      struct/enum/graph/class/def…）· --refs 引用清单（call/mention）
+  org scan [--dirs a,b] 
+      密钥/敏感信息扫描（v0.5.15 · #141）：18 类模式（OpenAI/Anthropic/
+      GitHub/AWS/私钥/JWT/.env 赋值…）· 预览行全脱敏 · 工具环 fs_write
+      同款拦截
+  org audit [--run out-a] [--out FILE.zip]
+      审计导出（v0.5.15 · #150）：events/journal/llm-stream/审批台账/
+      key 池指纹 + markdown 摘要 → 零依赖 zip（python zipfile 可验）
+  org sbom [--format json|tv]
+      SPDX-2.3 SBOM（v0.5.15 · #148）：org + 运行时依赖 + vendored
+      dhv-ts 的组件清单（spdx-tools 校验通过）
+  org owners [文件...] [--review 文件1,文件2]
+      CODEOWNERS 读取 + 评审人推荐（v0.5.15 · #89/#85）：.org/CODEOWNERS
+      优先 · 后规则覆盖 · 无文件时目录启发式降级
+  org read <file.pdf> [--max-pages N]
+      PDF 文本提取三层降级链（v0.5.15 · #24）：pdftotext → uv+pypdf
+      （零全局污染）→ 诚实失败附安装指引
   org providers [ledger]
       服务商健康面板：全部注册预设 + 命名车道 + 环境变量发现状态 +
       调用台账（key 轮换归因 · 失败统计）

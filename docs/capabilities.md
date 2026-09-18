@@ -1,4 +1,4 @@
-# ORG 能力矩阵 —— 主 Agent 150 项 / 专家 Agent 25 项对照（v0.5.4 底稿 + v0.5.6 增补）
+# ORG 能力矩阵 —— 主 Agent 150 项 / 专家 Agent 25 项对照（v0.5.4 底稿 · 持续增补至 v0.5.15）
 
 > 本文是**毕业论文的能力对照底稿**：把 ORG 当前实现（v0.5.4，357/357 测试全绿）
 > 对照「桌面 Agent 主 agent 应有的 150 项能力」（十大类）与「专家 agent 应有的
@@ -57,11 +57,11 @@
 | 17 | AGENTS.md/规则文件 | ✅ | v0.5.3：AGENTS.md / .org/rules.md 自动注入 direct 车道系统提示（8KB 截断） |
 | 18 | @文件/目录引用 | ✅ | v0.5.3 lib/mentions.ts：@路径 → 围栏内容（目录树+预览；越界/二进制/预算三防） |
 | 19 | 语义代码搜索 | ✅ | v0.5.8 `lib/search.ts` BM25 + 短语加成 + 中英混合分词（CJK bigram）；四入口：CLI `org search` / Web 🔍 面板（点击命中插入 @引用）/ 工具环 `semantic_search`（ABI 内同构实现，tests 行为对拍 top-1 一致）/ `@?查询词` RAG 注入 |
-| 20 | 符号定义/引用/跳转 | ⬜ | 未做（上游 HSL IDE 有 LSP 雏形；org 侧未接） |
+| 20 | 符号定义/引用/跳转 | ✅ | **v0.5.15** lib/symbols.ts 轻量符号索引（HSL fn/struct/enum/trait/graph/const/impl · TS fn/class/interface/type/const · PY def/class；文件帽 600 · 512KB · 二进制嗅探）→ 三端：CLI `org symbols <名> --refs`（call/mention 两类引用）· 工具环 `symbol_search`（ReadOnly 可用）· Web 🔎 工具箱。诚实边界：正则词法级非 LSP（完整 LSP 是路线图）；tests/symbols 14 例 |
 | 21 | 依赖图/调用图 | 🟡 | registry 资产图 + 专家复用/依赖归因（B/C 路径）；代码级调用图未做 |
 | 22 | RAG/向量检索 | ✅ | v0.5.8 检索增强生成的检索半环：`@?查询词` → BM25 top-5 命中展开为围栏摘要块自动织入模型上下文（org ask / 直连车道；无命中/异常附注降级不炸）。诚实边界：BM25 词频语义非 embedding 向量 —— embedding 升级是路线图（z-ai SDK 车道预留） |
 | 23 | 长期记忆 | ✅ | v0.5.3：runtime/memories/<expert>.md（跨会话注入尾部 40 行）· org memory CLI/Web/`/memory` 三端 |
-| 24 | 文档/PDF 读取 | 🟡 | 工具环 fs_read 文本类；PDF 解析未做（native 块可接 python pdf 库——逃生舱在） |
+| 24 | 文档/PDF 读取 | ✅ | **v0.5.15** lib/pdfread.ts 三层降级链：pdftotext（系统）→ uv+pypdf（零全局污染）→ 诚实失败附安装指引；魔数嗅探 · 页帽/字符帽截断标注。三端：CLI `org read` · 工具环 `read_pdf`（ReadOnly 可用）· 引擎探测 `pdfEngines()`；tests/pdfread 10 例（引擎缺席 skip） |
 | 25 | 图片/截图理解 | ✅ | v0.5.13 视觉入口：lib/vision.ts（z-ai SDK createVision · 多图 ≤4 · 魔数唤探防伪造 mime · prompt 超长诚实截断）→ Web 📷 按钮（分析→引用闭环：描述追加进输入框可编辑后派单）+ CLI org vision；401/凭据缺席降级 remedy（部署环境配好即全功能） |
 | 26 | LSP/DAP 协议集成 | ⬜ | 未做 |
 | 27 | AST、语法树与类型信息 | ✅ | **这是 HSL 的本体**：S1-S8 静态铁律 + 38 后端 AST 投射 + 语义对拍 |
@@ -85,7 +85,7 @@
 | 40 | SQL/Shell/正则生成 | 🟡 | LLM 生成面（deepseek 车道可生成任意文本；无专用验证闸门——shell 有执行白名单） |
 | 41 | 前端/UI 组件生成 | 🟡 | 同 40（文本生成可产出；无预览/验证环） |
 | 42 | API/接口契约设计 | ✅ | 信封契约（TaskSpec/StatusReport/Verdict 类型化接口 + 类型检查闸门） |
-| 43 | 数据库 Schema/迁移 | ⬜ | 未做（registry 的 git 版本演化是数据层迁移的类似物） |
+| 43 | 数据库 Schema/迁移 | ✅ | **v0.5.15** lib/db.ts（bun:sqlite 零依赖）：`dbSchema`（表/列/索引/视图/行数抽查）+ `dbApplyMigration` 版本化迁移（_org_migrations 账本 + 伴车 .migrations.json 双写 · dry_run 事务回滚预演 · 坏 SQL 整体回滚 · 冲突诊断）。三端：CLI `org db schema/query/migrate/history` · 工具环 `db_schema/db_query/db_migrate`（写半环审批在环）· Web 🗄 工具箱；tests/db 24 例 |
 | 44 | IaC/基础设施代码 | ⬜ | 未做 |
 | 45 | 注释/文档生成 | ✅ | run 报告（report.md/memory.md/评分卡）+ hsl-mirror 围栏文档 + CHANGELOG 叙事 |
 
@@ -96,10 +96,10 @@
 | 46 | 读取文件 | ✅ | 工具环 fs_read（32KB 截断可观测）+ $host.fs.read（2MB 上限 + 路径监狱） |
 | 47 | 写入文件 | ✅ | 工具环 fs_write（**能力门 + 审批在环**）+ $host.fs.write |
 | 48 | 多文件编辑 | ✅ | 工厂多文件产物 + 补丁 fs.edit 锚点替换；工具环多轮多文件 |
-| 49 | diff 预览 | 🟡 | 补丁 apply 前后的 journal 留痕；Web 运行卡叙事；无专用 diff 视图 |
+| 49 | diff 预览 | ✅ | **v0.5.15** lib/diff.ts unified diff（公共头尾剥离 + LCS DP ≤400 万格 · 大文件快速路径 · CRLF 归一），**与 GNU diff -u 对拍逐字节一致**（hunk 头行号边界实测对齐）。三端：CLI `org diff` · 工具环 fs_write/fs_edit `preview:true` 干跑 · Web 工具箱；tests/diff 16 例 |
 | 50 | patch 应用 | ✅ | merge_patch（三级分类 + 锚点编辑 + 版本归档 + 回退） |
 | 51 | 文件搜索/glob | ✅ | 工具环 fs_glob（\*\*/\* 模式 + 上限 200）+ fs_list |
-| 52 | 批量重命名/移动 | ⬜ | 未做（shell_run + git mv 的组合可覆盖，无专用入口） |
+| 52 | 批量重命名/移动 | ✅ | **v0.5.15** 工具环 `fs_move {from,to}`：Full 模式 + 审批在环 + 工作区监狱（词法判定先行 + realpath 符号链实解析双层）+ 防自嵌套 + 目标父目录自动补建。诚实边界：单文件移动语义（批量 = 工具环多轮循环，模型侧自然批处理），无 glob 批量重命名语法；tests/tools2 e2e |
 | 53 | 冲突解决 | 🟡 | 补丁唯一锚点约束（多处命中即拒绝，不猜）；git 层冲突未接 |
 | 54 | 撤销/回滚 | ✅ | `org revert`（版本回退本身可逆：当前源先归档）· 会话 fork 反悔通道 |
 | 55 | 检查点/快照 | ✅ | **git 作为资产层**（每次 mint/keep/patch 一 commit）+ N 版本冗余 + dist 快照 |
@@ -107,7 +107,7 @@
 | 57 | 多仓库/多工作区 | 🟡 | --workspace 显式多区并行（任务队列天然多区）；跨仓联动未做 |
 | 58 | 文件监听/自动同步 | 🟡 | 上游 dhv-ts watch 模式；org 侧静默更新检测 + vendored 新鲜度守卫 |
 | 59 | 编码、换行、权限处理 | ✅ | vendored fs 层 CRLF 归一化重试 + PYTHONUTF8 + UTF-8 全链（三平台 CI 实证） |
-| 60 | 编辑预览/干跑模式 | 🟡 | review 的 dry-run（org review --dry-run）+ 补丁 classify；工具环写动作审批即干跑闸 |
+| 60 | 编辑预览/干跑模式 | ✅ | **v0.5.15** fs_write/fs_edit `preview:true` 干跑：不落盘返回 unified diff（stats + 16KB diff 面）；fs_edit 预览同样要求锚点唯一命中（预览语义 = 执行语义）。叠加：org review --dry-run + 工厂补丁 classify 三闸门；tests/tools2 e2e 锁定「预览不落盘」承诺 |
 
 ## 五、执行与终端（61–75）
 
@@ -125,7 +125,7 @@
 | 70 | 超时/取消/重试 | ✅ | shell 超时 killed 标注 · LLM 180s AbortController + 3 次退避 + 路由器 key 轮换 · 任务 cancel/pause/resume/retry · web abort 票据化 |
 | 71 | CI/CD 流水线执行 | ✅ | 本仓库 CI（verify 三平台矩阵 + 单二进制冒烟 + ruff 门禁 + dist 回写）+ release 五目标交叉编译 |
 | 72 | K8s/Terraform | ⬜ | 未做 |
-| 73 | 数据库迁移/操作 | ⬜ | 未做 |
+| 73 | 数据库迁移/操作 | ✅ | **v0.5.15** lib/db.ts 查询半环 `dbQuery`：**双层只读门**（词法白名单：单语句 + SELECT/WITH/EXPLAIN/PRAGMA table_info 前导 + 内核 readonly 连接兜底 —— WITH…INSERT 漏网句实测被内核拦截零写入）+ 行帽 200（上限 1000）+ 256MB 文件帽 + 工作区监狱。三端同 #43；tests/db 24 例 |
 | 74 | 云服务/云 CLI | ⬜ | 未做 |
 | 75 | 发布/部署/回滚 | ✅ | auto-release 打 tag + release 发布 + sha256 + 版本单一来源守卫（org 资产层的发布回滚：revert + 金丝雀 + 蓝绿） |
 
@@ -142,11 +142,11 @@
 | 82 | 创建 PR/MR | 🟡 | 工程流程层（本开发系列即 PR 工作流）；org 无 API 集成 |
 | 83 | PR 审查 | ✅ | **监督回路 review 是 org 的核心**（四态 + 复发检测 + 补丁提案 + 金丝雀） |
 | 84 | 变更影响分析 | ✅ | 补丁 flow 级闸门（评测分不回退）+ 评分卡漂移 + 影子对比 |
-| 85 | 评审人推荐 | ⬜ | 未做 |
+| 85 | 评审人推荐 | ✅ | **v0.5.15** lib/owners.ts `recommendReviewers`：CODEOWNERS 规则聚合（覆盖数排序 + 模式归因 reason）；无 CODEOWNERS → 目录启发式降级（fromCodeowners:false + 诚实说明）。三端：CLI `org owners --review a,b` · 工具环 `review_suggest`（ReadOnly）· Web 工具箱；tests/owners 14 例 |
 | 86 | Issue/工单集成 | 🟡 | 开发流程层（issue 驱动交付，本系列 #28-#31）；org 运行时无 tracker API |
 | 87 | 团队共享会话/评论 | ⬜ | 未做（会话账本是单用户文件协议） |
 | 88 | 多人协作与角色权限 | 🟡 | 审批决定者署名（by: web/cli）+ 能力三态；RBAC 未做 |
-| 89 | CODEOWNERS | ⬜ | 未做 |
+| 89 | CODEOWNERS | ✅ | **v0.5.15** lib/owners.ts `loadCodeowners`：GitHub 兼容子集（glob 模式 + @owner + 注释 + 后规则覆盖语义）；查找顺序 .org/CODEOWNERS → CODEOWNERS → .github/CODEOWNERS；`matchOwners` 最长匹配。CLI `org owners` + 匹配清单；tests/owners 14 例 |
 | 90 | 发布说明/变更日志 | ✅ | CHANGELOG 叙事纪律（本仓库即实例）+ release notes 自动截取 |
 
 ## 七、测试与质量（91–105）
@@ -199,8 +199,8 @@
 | 124 | 工作流编排 | ✅ | **HSL graph**（node/edge/guard + G 拓扑校验）+ 监督回路四阶段 + 工厂管线 |
 | 125 | 多模型切换 | ✅ | 21 服务商车道 + key 池 + 降级链 + `/model`/`:model`/Web 段控热切换 |
 | 126 | 本地模型/API 模型 | ✅ | ollama/lmstudio/vllm 预设免 key 即用 + OpenAI 兼容一条协议打天下 |
-| 127 | Webhook/API 调用 | 🟡 | 路由器 fetch 全链 + 工具环 shell/net；出站 webhook 通知未接 |
-| 128 | 定时任务 | ⬜ | 未做（taskd 常驻 + 文件协议已具备底座，缺 cron 触发器） |
+| 127 | Webhook/API 调用 | ✅ | 路由器 fetch 全链 + **v0.5.5 出站 webhook**（`notify_webhook_url` 三通道：存储/桌面/webhook 互不影响，5s 超时静默降级，事件过滤 `notify_webhook_events`）+ 工具环 shell/net。诚实边界：入站 webhook 服务端未做（org 是发起方不是接收方） |
+| 128 | 定时任务 | ✅ | **v0.5.5 定时触发器**：lib/schedule.ts 五段 cron + @every 区间 + UTC 语义 + misfire 策略（skip/run）+ 到期自动入队 TaskRunner；CLI `org schedule list/add/rm/on/off/test` + Web ⏰ 面板 + previewNext 预览；v055.test.ts 33 例锁定 |
 | 129 | 多 Agent 协作 | ✅ | **org 本体**：主控-专家监督回路 + 工厂铸专家 + 池化 + 暖移交 + 金丝雀双跑 |
 | 130 | 工具注册/发现 | ✅ | 工具环注册表 + registry manifest + adapter 登记 |
 | 131 | SDK/API Server | ✅ | cliMain 可编程入口 + startWebServer({port:0}) + $host.dhv 嵌入执行面 |
@@ -218,16 +218,16 @@
 | 138 | 危险命令拦截 | ✅ | 首词白名单 + sh_quote POSIX 转义 + 路径监狱 + 模板目录只读守卫 + rmSync 脚枪防线 |
 | 139 | 工作区信任 | ✅ | dist/demo 只读守卫（Web 全动词覆盖）+ 工作区标记检查 |
 | 140 | 密钥/环境变量保护 | ✅ | maskSecret 全端（首 3 尾 4）+ key 指纹脱敏台账 + 用户环境不可覆盖层 |
-| 141 | 密钥/漏洞扫描 | 🟡 | 危险命令面拦截；依赖漏洞扫描未做 |
+| 141 | 密钥/漏洞扫描 | ✅ | **v0.5.15** lib/scan.ts **18 类密钥模式**（OpenAI/Anthropic/GitHub/GitLab/AWS/Google/Slack/Stripe/DeepSeek/智谱/通义/私钥/JWT/数据库连接串/Telegram/微信… 先精确后宽泛归属）· 预览行全脱敏（前 4 后 2）。三端：CLI `org scan`（高危 exit 1）· **工具环 fs_write 写入前拦截**（高危拒绝落盘 · 中低危告警放行 · ORG_SCAN=off 逃生口）· Web 🛡 工具箱；tests/scan 18 例 + tools2 e2e |
 | 142 | 审计日志 | ✅ | journal（人读）+ events（结构化）+ approvals resolved 留痕 + llm-ledger + replay 确定性重演 |
 | 143 | 成本/Token 限额 | ✅ | 计量全链 + 日预算（budget_requests 路由器强制 429）+ 成本时间线面板 |
 | 144 | 数据脱敏 | ✅ | key/args 摘要截断 + preview 60 字符；全量脱敏管道未做 |
 | 145 | 登录/API Key/配置管理 | ✅ | org config v3（车道/key 池/降级链/预算）+ env 自动发现 + 连通测试 |
 | 146 | SAST/DAST | 🟡 | dhv check 是 SAST 的语言级形态（编译期处决）；通用 SAST 未接 |
 | 147 | 容器/IaC 扫描 | ⬜ | 未做 |
-| 148 | SBOM/许可证合规 | 🟡 | LICENSE 全仓 + vendored 许可证保留；SBOM 未做 |
+| 148 | SBOM/许可证合规 | ✅ | **v0.5.15** lib/sbom.ts SPDX-2.3 生成器：application（org 本体）+ runtime（z-ai-web-dev-sdk，bun.lock 三层宽容解析 JSONC 尾随逗号）+ vendored（dhv-ts）；JSON 与 tag:value 双渲染，**spdx-tools 全量校验 0 错误**；CLI `org sbom --format json|tv` + Web 📋 工具箱；tests/sbom 12 例 |
 | 149 | SSO/RBAC/数据驻留 | ⬜ | 未做（单机 Agent 边界） |
-| 150 | 隐私模式/审计导出 | 🟡 | DHV_LLM_DISABLE_SDK 零外联开关 + 产物全本地；审计导出入口未做 |
+| 150 | 隐私模式/审计导出 | ✅ | **v0.5.15** lib/audit.ts 审计导出：out-*/ 七件套 + runtime 审批台账/LLM 台账/通知/key 池指纹 + git-chain → **零依赖手写 zip**（CRC-32 与 python zlib 对拍 · EOCD 偏移 bug 实测抓修）+ markdown 摘要；缺文件警告不炸。三端：CLI `org audit [--run]` · 工具环 `audit_export`（审批在环）· Web 📦 工具箱；tests/audit 11 例。隐私模式（DHV_LLM_DISABLE_SDK 零外联）v0.5.4 起在册 |
 
 ---
 
@@ -246,8 +246,8 @@
 | B6 结构扫描 | ✅ | 工具环 fs_list/fs_glob + 工作区播种 |
 | B7 规则文件 | ✅ | AGENTS.md 注入（codex 同形） |
 | B8 @引用 | ✅ | lib/mentions 三防展开 |
-| B9 语义检索 | ⬜ | 同 #19 |
-| B10 文档/图理解 | 🟡 | 文本全链；PDF/图未接 |
+| B9 语义检索 | ✅ | 同 #19（v0.5.8 四入口：CLI org search / Web 🔍 / 工具环 semantic_search / @? RAG 注入，tests 行为对拍 top-1 一致） |
+| B10 文档/图理解 | ✅ | 文本全链 + **图片理解（v0.5.13 视觉入口：lib/vision.ts 多图 ≤4 + 魔数唤探 + Web 📷 分析→引用闭环 + CLI org vision）** + **PDF 读取（v0.5.15：lib/pdfread.ts 三层降级链 pdftotext → uv+pypdf → 诚实失败 · org read CLI + read_pdf 工具环）** |
 | C11 工具调用 | ✅ | 工具环六工具 + 能力门 + 审批在环 |
 | C12 MCP/插件注册 | 🟡 | org import + adapter 登记（协议翻译路线图） |
 | C13 工作流编排 | ✅ | HSL graph（拓扑可验证的 SOP） |
@@ -264,7 +264,11 @@
 | E24 成本限额/多模型 | ✅ | 预算水位 + 21 车道 + key 池轮换 |
 | E25 评测/配置管理 | ✅ | 评分卡归因 + org config v3 |
 
-**统计**：主 Agent 150 项 → ✅ 91 · 🟡 34 · ⬜ 25；专家 25 项 → ✅ 21 · 🟡 3 · ⬜ 1。（v0.5.8：#19
+**统计（v0.5.15 交付后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 100 · 🟡 30 · ⬜ 20；专家 25 项 → ✅ 24 · 🟡 1 · ⬜ 0。
+
+> v0.5.15 交付 12 项升级（6 ⬜→✅：#20 符号/#43 Schema/#52 移动/#73 迁移操作/#85 评审推荐/#89 CODEOWNERS；6 🟡→✅：#24 PDF/#49 diff/#60 干跑/#141 密钥扫描/#148 SBOM/#150 审计导出）——**主表 ✅ 破百（100/150）**；专家表 B10 随 PDF 补齐升 ✅（24/25）。
+>
+历史统计行曾停留在 v0.5.4 口径且被截断（91/34/25），与表格实态漂移 —— v0.5.15 按表逐行重算并修订三处滞后条目：#128 定时任务 ⬜→✅（v0.5.5 已落地）、#127 出站 webhook 🟡→✅（v0.5.5 已落地）、B9 语义检索 ⬜→✅（v0.5.8 已落地，与 #19 自相矛盾的行）。
 
 ---
 
@@ -276,6 +280,6 @@
 2. **专家即流程**：25 项专家能力中 21 项落地的方式是**结构化**（graph SOP + 闸门 +
    资产沉淀），对照主流「系统提示词 + 工具白名单」的人设式专家——这是 ORG 的
    核心创新点（论文第 4 章主材料）。
-3. **诚实边界**：27 项未做集中三类——语义检索/向量（RAG 派）、IDE/LSP/调试器
-   （工具派）、云生态（K8s/多云/合规派）。每项都有明确的路线图挂点（上游 IDE、
-   native 逃生舱、网关扩展），这是「知道边界在哪」的工程证据而非缺点。
+3. **诚实边界**：20 项未做集中三类——IDE/LSP/调试器深度（工具派：补全/断点/LSP 重命名）、
+   云生态（K8s/Terraform/多云/远程执行）、多人协作（RBAC/共享会话/SSO）。每项都有明确的
+   路线图挂点（上游 IDE、native 逃生舱、网关扩展），这是「知道边界在哪」的工程证据而非缺点。

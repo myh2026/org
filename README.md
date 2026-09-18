@@ -5,8 +5,8 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.5.14_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
-[![Tests](https://img.shields.io/badge/tests-550%2F550_passing-brightgreen.svg)](#-测试与验证状态)
+[![Status](https://img.shields.io/badge/status-v0.5.15_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Tests](https://img.shields.io/badge/tests-686%2F686_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.66-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
 [![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-三平台单二进制分发)
@@ -19,11 +19,7 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **v0.5.14 当前状态**：可运行实现，**550/550 机制级测试全绿**（30 文件）。本版落地**直连车道语义地板 + 救援（B-22）**：GUI 缺省专家 + scripted 模型问域外问题（如「你好」/「请创作卡农」）不再返回公告域罐头答案 —— `directAskGateOf` 三岔口（域内放行 / 域外换专家救援 + `lane_rescue` 事件留痕 + 工具环 / 完全域外零消耗诚实降级，Web askOnce/askStreamOnce + CLI cmdAsk 双入口同构）；导入专家的占位剧本（元应答）与空问题两条旁路；GUI 救援轮 `⇄ 救援自 <原专家>` 琥珀徽标 · 降级轮 `◌ 零消耗` 暗色气泡；附带修复：无 direct 轨道专家的 FIXTURE_EXHAUSTED 硬失败变三岔口 · vision 端点 images[] 字符串 data URL 宽容解析 · cli/org.ts 潜伏 `dim` 未定义雷（v0.5.3 引入）。
->
-> **v0.5.13 历史状态**：可运行实现，**536/536 机制级测试全绿**（29 文件 · 2412 expect）。本版落地**视觉入口与双 UI 修复**：📷 图片分析（capabilities #25 ⬜→✅：lib/vision.ts 封装 z-ai SDK createVision · 多图 ≤4 · 魔数唤探防伪造 mime · 分析→引用闭环）· 语音面板 🔊 试听钮（vocard 一键自我介绍）· 派生池清理（org spawn prune CLI + DELETE /api/spawns + 面板 🧹/🗑 三入口）；**B-20 修复**（`[h[hidden]` 全局防护 —— .mictx/.schmeta 幽灵浮条从页面加载即显示的 CSS 特异性回归）· **B-21 修复**（Enter 派发与 send 按钮同构 —— 团队模式切换后回车曾无条件走直连车道）；多重优雅降级：401/凭据缺席明确 remedy，`DHV_VISION_DISABLE_SDK=1` 零外联开关。
->
-> **v0.5.12 语音入口**（capabilities #15 🟡→✅）：Web 🎤 录音转写（MediaRecorder → ASR → 转写进输入框）· 🔊 回复朗读（TTS → 24kHz WAV · 7 声音 × 语速 0.5-2.0 · 句子边界分段 PCM 拼接 · 4K 截断诚实标注 · LRU 缓存）· 🎙 语音面板；CLI `org speak`（TTS 落盘）/ `org voice`（状态+清单）；`DHV_VOICE_DISABLE_SDK=1` 零外联开关。
+> **v0.5.15 当前状态**：可运行实现，**686/686 机制级测试全绿**（39 文件）。本版三线交付：**① CI 红灯清零**（payload 再生 + 跨平台测试五重防御：工具缺席优雅降级 / win32 .exe / CRLF 归一 / job 补装 ruff / notify 超时双修）；**② 能力矩阵 12 项升级 · 主表 ✅ 破百（100/150 · 专家 24/25）**——数据库（org db · db_query/db_migrate 双层只读门）、diff 干跑（fs_write preview:true · GNU diff -u 对拍一致）、符号跳转（org symbols · symbol_search）、文件移动（fs_move 审批+监狱）、PDF 读取（org read 三层降级链）、密钥扫描（org scan · fs_write 高危拦截）、审计导出（org audit 零依赖 zip）、SBOM（org sbom · spdx-tools 校验）、CODEOWNERS/评审推荐（org owners）——每项 lib 单一实现 + CLI/工具环/Web 工具箱（🧰 新面板 · 7 端点）三端消费；**③ 治理漂移**：capabilities.md 三处滞后条目修订 + 统计行防漂移守卫（改表不改行 → CI 红）。工具环与 lib 同源新范式：native 块 `await import(root+"/lib/x.ts")` 动态导入 —— 行为等价由构造保证，零重复。
 
 > **v0.5.11 历史状态**：可运行实现，**491/491 机制级测试全绿**（27 文件 · 2160 expect）。本版深化**子生孙递归派生**：**预算继承**（ORG_SPAWN_BUDGET 缺省 100 份 × ORG_SPAWN_DECAY 缺省 0.5 —— 子预算 = floor(父预算 × 衰减率) 随深度指数衰减；用量 tokens/model_calls 回填观测）· **池化重档**（<ws>/spawn/pool.json 登记每次派生，相似 goal 词面重合 ≥0.6 命中即零成本复用，reuse:false 强制新派生）· **Web 🌳 派生池面板**（树形视图 + 统计条 + 递归挂孙 + legacy 孤儿兜底 + 点击展开详情/复制路径）· agent_spawn 专属运行卡（🌳 调用 / ♻ 复用 / 预算拒绝三态）。
 
@@ -108,7 +104,7 @@
 flowchart LR
     subgraph FRONT["前端层 · 三端同权"]
         direction TB
-        CLI["org CLI<br/>cli/org.ts · 15 子命令"]
+        CLI["org CLI<br/>cli/org.ts · 40 子命令"]
         CHAT["chat REPL<br/>cli/chat.ts · 流式渲染"]
         TUI["TUI 驾驶舱<br/>tui/ · 零依赖渲染器"]
         WEB["Web GUI<br/>web/entry.ts · 端口 4600"]
@@ -118,11 +114,11 @@ flowchart LR
         direction TB
         ENG["engine.ts<br/>startRun · dhvRun"]
         EVT["events.ts<br/>三路事件流归一化"]
-        VER["version.ts<br/>版本单一来源 0.4.15"]
+        VER["version.ts<br/>版本单一来源 0.5.15"]
         RT["root.ts<br/>源码 / 单二进制双形态"]
     end
 
-    subgraph DHV["vendored 解释器 toolchain/dhv-ts v0.2.61"]
+    subgraph DHV["vendored 解释器 toolchain/dhv-ts v0.2.66"]
         direction TB
         SUBP["子进程车道<br/>Bun.spawn 嵌套解释器"]
         INPROC["进程内车道<br/>ORG_FORCE_INPROC=1"]
@@ -756,7 +752,7 @@ journal → fixture 沉淀（`runtime/fixture-miner.hsl`，生产即出题）：
 
 ## 🧬 与 HSL 的关系
 
-ORG 是 [HSL（Harness Specification Language）](https://github.com/myh2026/harness-specification-language)的旗舰应用：主控、工厂管线、专家本体全部以 HSL 编写，运行于 dhv-ts 解释器。当前基于 **BNF v1.5.0** 严格文法，不依赖未发布的语言特性；仓库 vendored **dhv-ts v0.2.61**（`toolchain/dhv-ts/`，克隆即跑，零环境依赖）。
+ORG 是 [HSL（Harness Specification Language）](https://github.com/myh2026/harness-specification-language)的旗舰应用：主控、工厂管线、专家本体全部以 HSL 编写，运行于 dhv-ts 解释器。当前基于 **BNF v1.5.0** 严格文法，不依赖未发布的语言特性；仓库 vendored **dhv-ts v0.2.66**（`toolchain/dhv-ts/`，克隆即跑，零环境依赖）。
 
 开发过程中对 HSL 做了多次真实实测并回推修复（详见 [BUGFIXES.md](BUGFIXES.md) 与上游 CHANGELOG）：`Vec::iter_mut` 与 `String::push(char)` 缺失于解释器内建方法面；i64 位运算 BigInt 语义；`String::find` 码点索引；S-20 struct 字面量字段校验；`nextReview` 耗尽抛错；`fs.list` 深度可配；路径监狱 symlink 实解析；流式 `stream/track` 参数。
 
@@ -764,7 +760,7 @@ ORG 是 [HSL（Harness Specification Language）](https://github.com/myh2026/har
 
 ## 🎓 创新点（毕业论文核心）
 
-> 每条创新点附一句**实证**——全部来自本仓库真实代码、`org demo` 可复现叙事、205 个机制级测试与 DeepSeek 官方 API 的 E2E 实测记录（详见 [✅ 测试与验证状态](#-测试与验证状态)）。
+> 每条创新点附一句**实证**——全部来自本仓库真实代码、`org demo` 可复现叙事、686 个机制级测试与 DeepSeek 官方 API 的 E2E 实测记录（详见 [✅ 测试与验证状态](#-测试与验证状态)）。
 
 1. **Harness 即代码** —— 专家不是「提示词 + 工具白名单」，而是用 HSL 语言（BNF v1.5.0 严格文法）描述的可编译校验程序：node 是物理依赖、edge 是带守卫的消息通道、`#[capability]` 注解在编译期执行最小权限。**实证**：`org check` 对 hsl/ 源码 + dist/ 铸出专家共 34 个模块执行 dhv check（S1–S8 / G1–G6 / P 铁律 + S-20 字面量字段）全绿；v0.4.12 DeepSeek 实测中基座模型产出的 Rust 风格「harness」被结构闸门正确拒绝。
 2. **组织化多智能体监督回路** —— 分解 → 路由 → 派单（契约先行：交付物规格/验收标准/预算水位/返工上限）→ 审查（客观闸门先行 + 四态裁决 + 有界返工）→ 汇总 → 资产沉淀，主控为唯一手写内核，事件拓扑 microkernel。**实证**：`org demo` 全叙事 2.3s 复现 model_calls **5 → 1 → 0**、返工 1 → 1 → 0；README 走读与动力学点火测试逐条断言（tests/demo.test.ts 25 例 + dynamics.test.ts）。
@@ -775,7 +771,7 @@ ORG 是 [HSL（Harness Specification Language）](https://github.com/myh2026/har
 7. **治理铁律：调度权可绕，知情权与记账权不可绕** —— 团队/转接/直连三通道共享事件总线、独立记账科目、纪要回写三件不可协商义务；权限跟随委托链；能力天花板调升仅属用户（`ORG_CAPABILITY_APPROVED=1` 环境门）。**实证**：每次直连发 `direct_open`/`direct_close` 事件 + `direct-ledger.jsonl` 独立记账 + `runtime/direct-memos.md` 纪要回写；chat REPL 零旁路复用同一治理（v0.4.15）。
 8. **观测面三端贯通 + Codex 风格 ctx 窗口计量** —— CLI chat 流式 REPL / TUI 驾驶舱 / Web GUI（SSE）三端共享同一事件流与 token 级流式（reasoning / content / reset 三通道）；每轮 `[ctx] ▓░░ 8.4k/131.1k（6.4%）` 计量条 + 账本 `ctx_tokens` 字段 + `/compact` 上下文压缩。**实证**：DeepSeek E2E：chat REPL 思考 889 chars 流式指示 → 逐 token 正文 → `turn 1 · 47 tokens · 1.7s`；Web GUI 160 个 SSE delta 事件；848 行增量（1 reset + 357 reasoning + 490 content）保序落盘。
 9. **零依赖单二进制分发** —— `bun build --compile` 五目标交叉编译（linux-x64/arm64 · darwin-x64/arm64 · windows-x64）；hsl 源码 + vendored 解释器 + 工作区模板 + 剧本打包为 `build/payload.json` 随二进制分发，运行期按内容指纹解包 `~/.org/runtime-<sha1>/`；无 bun 环境自动切进程内车道（`$host.dhv.{check,run}`）。**实证**：无 bun 单二进制实测 `check` 全过 + 全叙事 `demo` 完整通过；`lib/version.ts` 版本单一来源根治「发版后某入口徽标忘改」的结构性漂移（v0.4.14 治理批次）。
-10. **双模型车道：scripted / deepseek** —— scripted 剧本轨道（`$host.fixture.next(track)` 按轨道名 + 序号消费）使全部机制 CI 可复现零外联、轨道名即观测面；deepseek 车道走 `$host.llm` 网关（OpenAI 兼容：鉴权 + 模型路由 + 超时 + 思考量控制 + 429 有界退避 + 流式 + 轨道归因）。**实证**：205 个机制级测试全绿零外联；DeepSeek 官方 API（deepseek-flash）直连问答 3.4s、团队模式全链路 176s（v0.4.13 E2E）。
+10. **双模型车道：scripted / deepseek** —— scripted 剧本轨道（`$host.fixture.next(track)` 按轨道名 + 序号消费）使全部机制 CI 可复现零外联、轨道名即观测面；deepseek 车道走 `$host.llm` 网关（OpenAI 兼容：鉴权 + 模型路由 + 超时 + 思考量控制 + 429 有界退避 + 流式 + 轨道归因）。**实证**：686 个机制级测试全绿零外联；DeepSeek 官方 API（deepseek-flash）直连问答 3.4s、团队模式全链路 176s（v0.4.13 E2E）。
 
 ## 🆚 对标主流 Agent
 
@@ -830,13 +826,13 @@ org/
 │   ├── types/                          #   state.hsl · errors.hsl
 │   └── probe/                          #   HSL 语言探针 10 例（含负例，上游 bug 复现）
 ├── cli/
-│   ├── org.ts                          # ✦ CLI 主入口（861 行 · 15 子命令分发）
+│   ├── org.ts                          # ✦ CLI 主入口（40 子命令分发）
 │   └── chat.ts                         # ✦ chat REPL（636 行 · 斜杠命令 + 流式渲染 + compact）
 ├── lib/
 │   ├── engine.ts                       # ✦ 引擎桥：startRun / dhvRun 双车道 / 工作区扫描（1043 行）
 │   ├── events.ts                       #   事件流归一化（events + journal + llm-stream 三路合并去重）
 │   ├── root.ts                         #   运行时根解析（源码模式 / 单二进制 payload 解包）
-│   └── version.ts                      # ✦ 版本单一来源（ORG_VERSION = "0.4.15"）
+│   └── version.ts                      # ✦ 版本单一来源（ORG_VERSION = "0.5.15"）
 ├── tui/                                # ✦ 组织驾驶舱（OpenCode 级终端前端，零依赖）
 │   ├── main.tsx / entry.ts             #   入口（org tui 进程内复用同一入口）
 │   ├── app.tsx / store.ts              #   主应用（键盘路由 + 引擎接线）/ useReducer 单 store

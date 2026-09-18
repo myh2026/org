@@ -142,6 +142,12 @@ import { expandMentions } from "../lib/mentions.ts"; // @文件引用（v0.5.3�
 import { listMemories, addMemory, removeMemory, allMemories } from "../lib/memories.ts"; // 长期记忆（v0.5.3）
 import { semanticSearch } from "../lib/search.ts"; // 语义检索（v0.5.8 · capabilities #19/#22）
 import { scanAndRenderArtifacts } from "../lib/audio.ts"; // 音频收尾（v0.5.9：GUI 直连车道的三入口同钩子）
+import { dbSchema, dbQuery, dbTables } from "../lib/db.ts"; // v0.5.15 数据库操作层（#43/#73）
+import { indexSymbols, lookupDef, findRefs } from "../lib/symbols.ts"; // v0.5.15 符号索引（#20）
+import { scanWorkspace as scanSecrets, SECRET_PATTERNS } from "../lib/scan.ts"; // v0.5.15 密钥扫描（#141；别名避开 engine.ts 的 scanWorkspace）
+import { exportAudit, auditSummary } from "../lib/audit.ts"; // v0.5.15 审计导出（#150）
+import { buildSbom, renderSpdxJson } from "../lib/sbom.ts"; // v0.5.15 SBOM（#148）
+import { loadCodeowners, recommendReviewers } from "../lib/owners.ts"; // v0.5.15 CODEOWNERS/评审推荐（#89/#85）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
 
@@ -1171,8 +1177,63 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
             headers: { "Content-Type": "audio/wav", "Cache-Control": "no-store" },
           });
         }
+            // v0.5.15 工具箱：数据库 / 符号 / 密钥扫描 / 治理件（与 CLI、工具环同源 lib）
+        if (route === "GET /api/toolbox/db") {
+          // 表结构（只读）：?file=data/app.db
+          const file = String(url.searchParams.get("file") ?? "").trim();
+          if (!file) return json({ ok: false, error: "file 参数必填" }, 400);
+          const target = path.resolve(readWorkspaceOf(ws), file);
+          if (!target.startsWith(path.resolve(readWorkspaceOf(ws)) + path.sep)) return json({ ok: false, error: "路径越界（须在工作区内）" }, 400);
+          const schema = dbSchema(target);
+          if (schema.missing) return json({ ok: false, error: "库文件不存在或不可读" }, 404);
+          return json({ ok: true, tables: schema.tables, indexes: schema.indexes, views: schema.views });
+        }
+        if (route === "POST /api/toolbox/db-query") {
+          const body = (await req.json().catch(() => ({}))) as { file?: string; sql?: string; limit?: number };
+          const file = String(body.file ?? "").trim();
+          const sql = String(body.sql ?? "").trim();
+          if (!file || !sql) return json({ ok: false, error: "file/sql 必填" }, 400);
+          const wsAbs = path.resolve(readWorkspaceOf(ws));
+          const target = path.resolve(wsAbs, file);
+          if (!target.startsWith(wsAbs + path.sep)) return json({ ok: false, error: "路径越界（须在工作区内）" }, 400);
+          const limit = Math.max(1, Math.min(200, Math.floor(Number(body.limit) || 50)));
+          const r = dbQuery(target, sql, { limit });
+          if (!r.ok) return json({ ok: false, kind: r.kind, error: r.error }, 400);
+          return json({ ok: true, columns: r.result.columns, rows: r.result.rows, row_count: r.result.rowCount, truncated: r.result.truncated, ms: r.result.ms });
+        }
+        if (route === "GET /api/toolbox/symbols") {
+          const name = String(url.searchParams.get("name") ?? "").trim();
+          if (!name) return json({ ok: false, error: "name 参数必填" }, 400);
+          const rws = readWorkspaceOf(ws);
+          const idx = indexSymbols(rws, [""]);
+          const defs = lookupDef(idx.symbols, name, true);
+          const refs = findRefs(rws, name, { dirs: [""], maxHits: 50 });
+          return json({ ok: true, files: idx.files, symbols: idx.symbols.length, defs: defs.slice(0, 20), refs });
+        }
+        if (route === "GET /api/toolbox/scan") {
+          const report = scanSecrets(readWorkspaceOf(ws));
+          return json({ ok: true, ...report, patterns: SECRET_PATTERNS.length, hits: report.hits.slice(0, 200) });
+        }
+        if (route === "POST /api/toolbox/audit") {
+          const r = exportAudit(readWorkspaceOf(ws));
+          if (!r.ok) return json({ ok: false, error: (r.warnings || []).join("; ") }, 500);
+          const sum = auditSummary(readWorkspaceOf(ws));
+          return json({ ok: true, zip: path.basename(r.zip), entries: r.entries, bytes: r.bytes, summary: sum });
+        }
+        if (route === "GET /api/toolbox/sbom") {
+          const r = buildSbom(ROOT);
+          if (!r.ok) return json({ ok: false, error: r.error }, 500);
+          return json({ ok: true, packages: r.doc.packages, spdx: JSON.parse(renderSpdxJson(r.doc)) });
+        }
+        if (route === "POST /api/toolbox/review") {
+          const body = (await req.json().catch(() => ({}))) as { files?: string[] };
+          const files = Array.isArray(body.files) ? body.files.map(String).filter(Boolean).slice(0, 100) : [];
+          if (files.length === 0) return json({ ok: false, error: "files 必填" }, 400);
+          const r = recommendReviewers(readWorkspaceOf(ws), files);
+          return json({ ok: true, ...r, codeowners: loadCodeowners(readWorkspaceOf(ws)).file });
+        }
         if (route === "GET /api/spawns") {
-          // v0.5.11：派生池（agent_spawn 池化重档的观测面）。
+        // v0.5.11：派生池（agent_spawn 池化重档的观测面）。
           // 数据源三层：① <ws>/spawn/pool.json 登记（v0.5.11 起每次派生回写）；
           // ② 孤儿目录兜底（v0.5.6-v0.5.10 的旧派生无登记 —— 扫描
           //    spawn/*/out-spawn/run.json 合成 legacy 记录，面板不出现盲区）；
@@ -1241,7 +1302,7 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
           });
         }
         if (route === "DELETE /api/spawns") {
-          // v0.5.13：派生池清理（失败记录占位 / 全量重置 / 按id精确删）。
+        // v0.5.13：派生池清理（失败记录占位 / 全量重置 / 按id精确删）。
           // body {mode:"failed"|"all", ids?: string[]}；删除语义 = 池登记移除 +
           // 对应 spawn/<id> 目录整删（路径越界守卫：必须在本 ws 的 spawn/ 之下）。
           const body = await req.json().catch(() => ({})) as { mode?: unknown; ids?: unknown };
@@ -2688,6 +2749,9 @@ function renderIndexHtml(): string {
   <button id="voiceBtn" class="rchip" type="button" title="语音（v0.5.12）— 🎤 录音转写（ASR）· 🔊 回复朗读（TTS · 7 声音 · 语速 0.5-2.0）；凭据缺席时自动降级为文本交互">
     <span class="rc-label">🎙 语音</span>
   </button>
+  <button id="toolboxBtn" class="rchip" type="button" title="工具箱（v0.5.15）— 🗄 SQLite 查询 · 🔎 符号跳转 · 🛡 密钥扫描 · 📦 审计导出 · 📋 SBOM · 👥 评审推荐">
+    <span class="rc-label">🧰 工具箱</span>
+  </button>
   <span class="tstats" id="topStats"></span>
 </header>
 <div id="connBar" role="status" aria-live="polite">
@@ -2766,6 +2830,61 @@ function renderIndexHtml(): string {
     <div class="spwempty">尚无派生记录 —— 直连专家经 agent_spawn 工具派生子组织（团队任务 run / 直连 ask），相似 goal 自动池化复用；每次派生登记在此（预算 / 用量 / 复用计数）。</div>
   </div>
   <div class="spwfoot"><b>预算继承</b>：ORG_SPAWN_BUDGET（缺省 100 份）× ORG_SPAWN_DECAY（缺省 0.5）→ 子预算 = floor(父预算 × 衰减率)，随深度指数衰减；深度帽 ORG_SPAWN_MAX（缺省 2）仍是最外层安全线。 <b>池化复用</b>：相似 goal（词面重合 ≥0.6）命中即零成本复用，reuse:false 强制新派生。旧版本派生自动兼容显示（legacy）。</div>
+
+<div id="toolboxScrim" aria-hidden="true"></div>
+<div id="toolboxPane" role="dialog" aria-modal="true" aria-labelledby="tbTitle">
+  <div class="schhead">
+    <div class="tt" id="tbTitle">🧰 工具箱 — 桌面 Agent 操作面（v0.5.15）</div>
+    <button class="schclose" type="button" onclick="closeToolbox()" title="关闭（Esc）" aria-label="关闭工具箱面板">✕</button>
+    <div class="tbtabs" role="tablist">
+      <button class="tbtab on" id="tbTabDb" type="button" role="tab" onclick="tbTab('db')">🗄 数据库</button>
+      <button class="tbtab" id="tbTabSym" type="button" role="tab" onclick="tbTab('sym')">🔎 符号</button>
+      <button class="tbtab" id="tbTabScan" type="button" role="tab" onclick="tbTab('scan')">🛡 密钥扫描</button>
+      <button class="tbtab" id="tbTabGov" type="button" role="tab" onclick="tbTab('gov')">📦 治理件</button>
+    </div>
+  </div>
+
+  <div class="tbbody">
+    <section class="tbsec" id="tbSecDb">
+      <div class="tbbar">
+        <input id="tbDbFile" type="text" placeholder="SQLite 文件（工作区相对路径，如 data/app.db）" autocomplete="off" aria-label="数据库文件">
+        <button type="button" onclick="tbDbSchema()">表结构</button>
+      </div>
+      <div class="tbbar">
+        <input id="tbDbSql" type="text" placeholder="只读查询（单条 SELECT/WITH；写语句走 CLI org db migrate）" autocomplete="off" aria-label="SQL 查询">
+        <button type="button" onclick="tbDbQuery()">查询</button>
+      </div>
+      <div class="tbout" id="tbDbOut"><div class="schempty">🗄 输入工作区内的 .db 路径查看表结构 —— 只读门双层（词法白名单 + readonly 连接），写操作走 org db migrate（CLI）或 db_migrate（工具环，审批在环）。</div></div>
+    </section>
+
+    <section class="tbsec" id="tbSecSym" hidden>
+      <div class="tbbar">
+        <input id="tbSymName" type="text" placeholder="符号名（fn/struct/enum/graph/class/def … HSL/TS/PY）" autocomplete="off" aria-label="符号名">
+        <button type="button" onclick="tbSymSearch()">查找定义与引用</button>
+      </div>
+      <div class="tbout" id="tbSymOut"><div class="schempty">🔎 符号定义 + 引用跳转（file:line）—— 工作区根扫描（runtime/out-* 已排除）；CLI 同款：org symbols &lt;名字&gt; --refs。</div></div>
+    </section>
+
+    <section class="tbsec" id="tbSecScan" hidden>
+      <div class="tbbar">
+        <button type="button" onclick="tbScan()">🛡 扫描工作区（18 类密钥模式）</button>
+        <span class="tbmeta" id="tbScanMeta"></span>
+      </div>
+      <div class="tbout" id="tbScanOut"><div class="schempty">扫描工作区文件中的密钥/敏感信息（OpenAI/Anthropic/GitHub/AWS/Google/私钥/JWT/.env 赋值…）；预览行全脱敏。高危命中建议立即轮换密钥。</div></div>
+    </section>
+
+    <section class="tbsec" id="tbSecGov" hidden>
+      <div class="tbbar">
+        <button type="button" onclick="tbAudit()">📦 导出审计包（zip）</button>
+        <button type="button" onclick="tbSbom()">📋 生成 SBOM（SPDX-2.3）</button>
+        <button type="button" onclick="tbOwners()">👥 评审推荐</button>
+      </div>
+      <div class="tbout" id="tbGovOut"><div class="schempty">治理三件套：审计导出（events/journal/审批台账/LLM 台账 → 零依赖 zip + 摘要）· SBOM（org + 运行时依赖 + vendored 组件清单）· 评审人推荐（.org/CODEOWNERS 规则）。</div></div>
+    </section>
+  </div>
+
+  <div class="spwfoot">工具箱与 CLI / 工具环同源（lib/db · symbols · scan · audit · sbom · owners 单一实现三端消费）—— 「每个功能都有对应操作页面」的 v0.5.15 落地。</div>
+</div>
 </div>
 <div id="voiceScrim" aria-hidden="true"></div>
 <div id="voicePane" role="dialog" aria-modal="true" aria-labelledby="voTitle">
@@ -4290,6 +4409,120 @@ function refreshSpawns() {
 document.getElementById("spawnBtn").onclick = openSpawns;
 document.getElementById("spawnScrim").onclick = closeSpawns;
 
+// ---- 巧 工具箱（v0.5.15：🗄 db · 🔎 symbols · 🛡 scan · 📦 治理件） ----
+function openToolbox() {
+  document.getElementById("toolboxPane").classList.add("on");
+  document.getElementById("toolboxScrim").classList.add("on");
+}
+function closeToolbox() {
+  document.getElementById("toolboxPane").classList.remove("on");
+  document.getElementById("toolboxScrim").classList.remove("on");
+}
+function tbTab(sec) {
+  for (const k of ["Db", "Sym", "Scan", "Gov"]) {
+    document.getElementById("tbTab" + k).classList.toggle("on", k.toLowerCase() === sec.replace("db", "db").replace("sym", "sym").replace("scan", "scan").replace("gov", "gov"));
+    document.getElementById("tbSec" + (k === "Db" ? "Db" : k)).hidden = (k.toLowerCase() !== sec);
+  }
+}
+function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+function tbDbSchema() {
+  const file = document.getElementById("tbDbFile").value.trim();
+  const out = document.getElementById("tbDbOut");
+  if (!file) { out.innerHTML = '<div class="schempty">先输入 .db 路径</div>'; return; }
+  out.innerHTML = '<div class="schempty">加载中…</div>';
+  fetch("/api/toolbox/db?file=" + encodeURIComponent(file)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    let h = "";
+    for (const t of j.tables || []) {
+      h += '<div class="tbsym"><b>' + esc(t.name) + "</b> · " + String(t.rowCount == null ? "行数未抽查" : t.rowCount + " 行") + "<br><span class=\\"tbmeta\\">" + (t.columns || []).map(function (c) { return esc(c.name) + (String(c).indexOf("PK") >= 0 ? " 🔑" : ""); }).join(" · ") + "</span></div>";
+    }
+    if ((j.indexes || []).length) h += '<div class="tbmeta">索引：' + esc(j.indexes.join(" · ")) + "</div>";
+    if ((j.views || []).length) h += '<div class="tbmeta">视图：' + esc(j.views.join(" · ")) + "</div>";
+    out.innerHTML = h || '<div class="schempty">（库为空：无表）</div>';
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function tbDbQuery() {
+  const file = document.getElementById("tbDbFile").value.trim();
+  const sql = document.getElementById("tbDbSql").value.trim();
+  const out = document.getElementById("tbDbOut");
+  if (!file || !sql) { out.innerHTML = '<div class="schempty">file 与 SQL 都要填</div>'; return; }
+  out.innerHTML = '<div class="schempty">查询中…</div>';
+  fetch("/api/toolbox/db-query", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file: file, sql: sql }) })
+    .then(function (r) { return r.json(); }).then(function (j) {
+      if (!j.ok) { out.innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(j.error) + "</div>"; return; }
+      let h = '<div class="tbmeta">' + j.row_count + " 行 · " + j.ms + "ms" + (j.truncated ? "（截断）" : "") + "</div>";
+      if ((j.columns || []).length) h += '<div class="tbrow tbhdr">' + j.columns.map(function (c) { return "<b>" + esc(c) + "</b>"; }).join(" | ") + "</div>";
+      for (const row of j.rows || []) h += '<div class="tbrow">' + row.map(function (c) { return esc(c === null ? "NULL" : c); }).join(" | ") + "</div>";
+      out.innerHTML = h;
+    }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function tbSymSearch() {
+  const name = document.getElementById("tbSymName").value.trim();
+  const out = document.getElementById("tbSymOut");
+  if (!name) { out.innerHTML = '<div class="schempty">先输入符号名</div>'; return; }
+  out.innerHTML = '<div class="schempty">查找中…</div>';
+  fetch("/api/toolbox/symbols?name=" + encodeURIComponent(name)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    let h = '<div class="tbmeta">索引 ' + j.files + " 文件 · " + j.symbols + " 符号</div>";
+    if (!(j.defs || []).length) { h += '<div class="schempty">无定义命中</div>'; }
+    for (const d of j.defs || []) h += '<div class="tbsym"><b>' + esc(d.kind) + "</b> " + esc(d.name) + " · <code>" + esc(d.file) + ":" + d.line + "</code><br><span class=\\"tbmeta\\">" + esc(d.snippet) + "</span></div>";
+    if ((j.refs || []).length) {
+      h += '<div class="tbmeta" style="margin-top:8px">引用 ' + j.refs.length + "：</div>";
+      for (const r of j.refs.slice(0, 30)) h += '<div class="tbrow">' + esc(r.kind) + " · " + esc(r.file) + ":" + r.line + "</div>";
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function tbScan() {
+  const out = document.getElementById("tbScanOut");
+  const meta = document.getElementById("tbScanMeta");
+  out.innerHTML = '<div class="schempty">扫描中…</div>';
+  fetch("/api/toolbox/scan").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    meta.textContent = j.scanned + "/" + j.files + " 文件 · " + j.hits.length + " 命中 · " + j.tookMs + "ms · " + j.patterns + " 类模式";
+    if (!(j.hits || []).length) { out.innerHTML = '<div class="schempty">✓ 未发现密钥模式</div>'; return; }
+    let h = "";
+    const order = { high: 0, medium: 1, low: 2 };
+    const hits = j.hits.slice().sort(function (a, b) { return order[a.severity] - order[b.severity]; });
+    for (const hit of hits.slice(0, 100)) h += '<div class="tbsym"><b class="' + (hit.severity === "high" ? "spwc" : "") + '">[' + hit.severity.toUpperCase() + "]</b> " + esc(hit.pattern) + " · <code>" + esc(hit.file) + ":" + hit.line + "</code><br><span class=\\"tbmeta\\">" + esc(hit.preview) + "</span></div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function tbAudit() {
+  const out = document.getElementById("tbGovOut");
+  out.innerHTML = '<div class="schempty">打包中…</div>';
+  fetch("/api/toolbox/audit", { method: "POST" }).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    let h = '<div class="tbsym">📦 ' + esc(j.zip) + " · " + j.entries + " 条目 · " + (j.bytes / 1024).toFixed(1) + " KB（工作区内，org audit CLI 同款）</div>";
+    for (const r of (j.summary && j.summary.runs) || []) h += '<div class="tbrow">' + esc(r.name) + " · " + r.events + " 事件 · " + r.tokens + " tokens · " + (r.ok === null ? "—" : r.ok ? "ok" : "err") + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function tbSbom() {
+  const out = document.getElementById("tbGovOut");
+  out.innerHTML = '<div class="schempty">生成中…</div>';
+  fetch("/api/toolbox/sbom").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    let h = '<div class="tbsym">📋 SPDX-2.3 · ' + (j.packages || []).length + " 组件</div>";
+    for (const p of j.packages || []) h += '<div class="tbrow">' + esc(p.scope) + " · " + esc(p.name) + "@" + esc(p.version) + " · " + esc(p.license || "NOASSERTION") + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function tbOwners() {
+  const out = document.getElementById("tbGovOut");
+  out.innerHTML = '<div class="schempty">分析中…</div>';
+  fetch("/api/toolbox/review", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ files: ["hsl/org.hsl", "lib/engine.ts", "web/entry.ts", "cli/org.ts"] }) })
+    .then(function (r) { return r.json(); }).then(function (j) {
+      if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+      let h = '<div class="tbsym">👥 ' + (j.from_codeowners ? "CODEOWNERS：" + esc(j.codeowners || "?") : "目录启发式（无 CODEOWNERS）") + "</div>";
+      for (const rv of j.reviewers || []) h += '<div class="tbrow">@' + esc(rv.name) + " · 覆盖 " + rv.files_covered + " · " + esc(rv.reason) + "</div>";
+      out.innerHTML = h;
+    }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+document.getElementById("toolboxBtn").onclick = openToolbox;
+document.getElementById("toolboxScrim").onclick = closeToolbox;
+
+
 // ---- 语音入口（v0.5.12：🎤 录音转写 ASR + 🔊 朗读 TTS + 🎙 设置面板） ----
 var VOICE_META = ${JSON.stringify(VOICES)}; // 服务端注入声音清单（单一来源）
 var voiceCfg = {
@@ -4650,6 +4883,7 @@ document.addEventListener("keydown", function (ev) {
     { pane: "audioPane", close: closeTimbre },
     { pane: "spawnPane", close: closeSpawns },
     { pane: "voicePane", close: closeVoice },
+    { pane: "toolboxPane", close: closeToolbox },
     { pane: "tasksPane", close: closeTasks },
     { pane: "schedPane", close: closeSched },
     { pane: "notifyPane", close: closeNotify },

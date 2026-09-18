@@ -85,9 +85,18 @@ export fn tools_prompt(mode: ToolMode) -> String {
     out.push_str("- fs_list {\"dir\":\"relative/dir\",\"depth\":3} — list directory\n");
     out.push_str("- fs_glob {\"pattern\":\"src/**/*.hsl\"} — glob match files\n");
     out.push_str("- semantic_search {\"query\":\"审计 制度\",\"k\":5} — BM25 semantic search over workspace corpus (raw/ registry/ work/ factory/); returns ranked hits with snippets. Prefer this over fs_glob+fs_read loops when you need relevant context by meaning.\n");
+    // v0.5.15 桌面 Agent 补全：符号跳转 / 数据库只读面 / PDF 读取（全部只读，零审批门槛）
+    out.push_str("- symbol_search {\"name\":\"startRun\",\"refs\":true?} — definition + reference lookup for HSL/TS/Python symbols (fn/struct/enum/graph/class/def). Returns file:line for jumps.\n");
+    out.push_str("- db_schema {\"file\":\"data/app.db\"} — SQLite schema inspection (tables/columns/indexes/views; workspace-relative). Read-only.\n");
+    out.push_str("- db_query {\"file\":\"data/app.db\",\"sql\":\"SELECT …\",\"limit\":200?} — SQLite read-only query (single SELECT/WITH/EXPLAIN/PRAGMA table_info only; writes go through db_migrate).\n");
+    out.push_str("- read_pdf {\"file\":\"docs/spec.pdf\",\"max_pages\":50?} — extract text from a PDF (engine chain: pdftotext → uv+pypdf → honest failure).\n");
     if mode == ToolMode::Full {
-        out.push_str("- fs_write {\"path\":\"...\",\"content\":\"...\"} — write a file (may require approval)\n");
-        out.push_str("- fs_edit {\"path\":\"...\",\"old\":\"exact unique text\",\"new\":\"replacement\"} — precise edit (may require approval)\n");
+        out.push_str("- fs_write {\"path\":\"...\",\"content\":\"...\",\"preview\":true?} — write a file (may require approval). preview:true returns a unified diff WITHOUT writing (dry-run). Content is scanned for secrets: high-severity key patterns (sk-/ghp_/AKIA… ) are refused — never persist real credentials.\n");
+        out.push_str("- fs_edit {\"path\":\"...\",\"old\":\"exact unique text\",\"new\":\"replacement\",\"preview\":true?} — precise edit (may require approval); preview:true returns the diff without writing.\n");
+        out.push_str("- fs_move {\"from\":\"a.txt\",\"to\":\"b/c.txt\"} — move/rename files inside the workspace (may require approval).\n");
+        out.push_str("- db_migrate {\"file\":\"data/app.db\",\"name\":\"add users\",\"sql\":\"CREATE TABLE …\",\"dry_run\":true?} — versioned schema migration (_org_migrations ledger + companion .migrations.json; dry_run validates then rolls back). Requires approval.\n");
+        out.push_str("- audit_export {\"run\":\"out-a\"?} — export the audit trail (events/journal/approvals/llm-ledger) to a zip in the workspace (may require approval).\n");
+        out.push_str("- review_suggest {\"files\":[\"lib/a.ts\",\"hsl/org.hsl\"]} — CODEOWNERS-based reviewer recommendation for changed files.\n");
         out.push_str("- shell_run {\"cmd\":\"git status\"} — run an allowlisted command (may require approval)\n");
         out.push_str("- agent_spawn {\"goal\":\"...\",\"mode\":\"run\"|\"ask\",\"expert\":\"name\",\"reuse\":false?} — spawn a sub-organization (team mission via org run, or direct expert via org ask). Depth+budget governed recursion (child budget halves each level); similar goals hit the spawn pool and are REUSED at zero cost (pass reuse:false to force a fresh spawn). Use it ONLY when the task genuinely needs multi-step decomposition or another expert's specialty; for trivial lookups use fs_read/fs_list first. The child inherits your model lane.\n");
         out.push_str("- audio_compose {\"timbre\":\"strings\",\"chords\":\"D3:canon:arp\",\"tempo\":90} — compose from chord progression + timbre (8 instruments: piano/strings/flute/organ/harpsichord/music-box/guitar/bell; 7 progressions: canon/pop/epic/circle/jazz/blues/romance); or explicit notes [{\"freq\":261.63,\"start_beat\":0,\"beats\":1}]. Engine renders playable .wav + .mid alongside your reply (deliverable = audio, not sheet).\n");
@@ -187,14 +196,20 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
     }
     let gate_cap = match name.as_str() {
         "fs_read" | "fs_list" | "fs_glob" | "semantic_search" => String::from("file_read"),
-        "fs_write" | "fs_edit" => String::from("file_write"),
+        "fs_write" | "fs_edit" | "fs_move" | "db_migrate" | "audit_export" => String::from("file_write"),
         "shell_run" => String::from("process_spawn"),
         "agent_spawn" | "audio_compose" => String::from("agent_spawn"),
-        _ => String::from("file_read"),
+        _ => String::from("file_read"), // v0.5.15：db_schema/db_query（只读门内建）/symbol_search/read_pdf/review_suggest 均只读
     };
+    // 写门例外清单（只读工具 + agent_spawn/audio_compose 自带门）：v0.5.15 新增
+    // db_schema/db_query（lib/db.ts 只读门双层：词法白名单 + readonly 连接）、
+    // symbol_search/read_pdf/review_suggest（纯读）。
     if name != String::from("fs_read") && name != String::from("fs_list") && name != String::from("fs_glob")
         && name != String::from("semantic_search")
-        && name != String::from("agent_spawn") && name != String::from("audio_compose") {
+        && name != String::from("agent_spawn") && name != String::from("audio_compose")
+        && name != String::from("symbol_search") && name != String::from("db_schema")
+        && name != String::from("db_query") && name != String::from("read_pdf")
+        && name != String::from("review_suggest") {
         let approved = gate_write(policy, gate_cap, name.clone(), args.clone()).await;
         if approved == String::from("denied") {
             emit_tool(String::from("tool_denied"), format!("{} {}", name, "capability denied"));
@@ -218,7 +233,15 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "shell_run" => tool_shell_run(args.clone()),
         "agent_spawn" => tool_agent_spawn(args.clone()).await,
         "audio_compose" => tool_audio_compose(args.clone()),
-        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/fs_write/fs_edit/shell_run/agent_spawn/audio_compose）", name)),
+        "symbol_search" => tool_symbol_search(args.clone()),
+        "db_schema" => tool_db_schema(args.clone()),
+        "db_query" => tool_db_query(args.clone()),
+        "db_migrate" => tool_db_migrate(args.clone()),
+        "read_pdf" => tool_read_pdf(args.clone()).await,
+        "fs_move" => tool_fs_move(args.clone()),
+        "audit_export" => tool_audit_export(args.clone()),
+        "review_suggest" => tool_review_suggest(args.clone()),
+        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/read_pdf/fs_write/fs_edit/fs_move/db_migrate/shell_run/agent_spawn/audio_compose/audit_export/review_suggest）", name)),
     };
     emit_tool(String::from("tool_result"), result_summary(result.clone()));
     result
@@ -256,10 +279,311 @@ async fn gate_write(policy: CapabilityPolicy, capability: String, tool: String, 
 
 // ---- 工具执行体（$host ABI 直通；全部带界与容错） -----------------------------
 
+/// v0.5.15 符号定义/引用（capabilities #20）：lib/symbols.ts 动态 import（同源）。
+/// 只读工具（file_read 能力，ReadOnly 模式可用）。
+fn tool_symbol_search(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const name = String(a.name || a.symbol || "");
+            const wantRefs = a.refs !== false;
+            if (!name) return JSON.stringify({ tool: "symbol_search", ok: false, error: "args.name 必填" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "symbol_search", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const mod = await import(root + "/lib/symbols.ts");
+            const pathMod = await import("node:path");
+            const wsRaw0 = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const wsAbs = pathMod.isAbsolute(wsRaw0) ? wsRaw0 : pathMod.resolve(process.cwd(), wsRaw0);
+            const idx = mod.indexSymbols(wsAbs, [""]); // v0.5.15：工作区根扫描（runtime/out-* 已排除）
+            const defs = mod.lookupDef(idx.symbols, name, a.substring !== true);
+            const out = { tool: "symbol_search", ok: true, name, defs: defs.slice(0, 20).map((d) => ({ kind: d.kind, file: d.file, line: d.line })) };
+            if (wantRefs) {
+                const refs = mod.findRefs(wsAbs, name, { dirs: [""], maxHits: 50 });
+                out.refs = refs.map((r) => ({ kind: r.kind, file: r.file, line: r.line, snippet: String(r.snippet || "").slice(0, 100) }));
+            }
+            return JSON.stringify(out);
+        } catch (e) {
+            return JSON.stringify({ tool: "symbol_search", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.15 SQLite schema 检查（capabilities #43 读半环）：lib/db.ts 动态 import。
+/// 工作区路径监狱 + 只读连接（lib 内建）。只读工具。
+fn tool_db_schema(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const file = String(a.file || a.db || "");
+            if (!file) return JSON.stringify({ tool: "db_schema", ok: false, error: "args.file 必填（工作区相对路径或 :memory:）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "db_schema", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const guard = await (async () => {
+                try {
+                    if (file === ":memory:") return { jail: true, path: ":memory:" };
+                    const pathMod = await import("node:path");
+                    const fsMod = await import("node:fs");
+                    const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+                    const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+                    const wsReal = fsMod.realpathSync(ws);
+                    const lexical = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(wsReal, file);
+                    const inWs = (p) => p === wsReal || p.startsWith(wsReal + pathMod.sep);
+                    // 第一层：词法判定先行（../ 逃逸在此拦截 —— 即便父目录不存在也能判）
+                    if (!inWs(lexical)) return { jail: false, error: "路径越界（须在工作区内）：" + file };
+                    // 第二层：符号链实解析（父目录不存在 = 新建文件场景，词法判定已过则降级放行）
+                    try {
+                        const parent = fsMod.realpathSync(pathMod.dirname(lexical));
+                        const resolved = pathMod.join(parent, pathMod.basename(lexical));
+                        if (!inWs(resolved)) return { jail: false, error: "路径越界（符号链逃逸）：" + file };
+                        return { jail: true, path: resolved };
+                    } catch (e2) { return { jail: true, path: lexical }; }
+                } catch (e) { return { jail: false, error: String(e && e.message || e) }; }
+            })();
+            if (!guard.jail) return JSON.stringify({ tool: "db_schema", ok: false, error: guard.error });
+            const db = await import(root + "/lib/db.ts");
+            const s = db.dbSchema(guard.path);
+            if (s.missing) return JSON.stringify({ tool: "db_schema", ok: false, error: "库文件不存在或不可读：" + file });
+            return JSON.stringify({
+                tool: "db_schema", ok: true, file,
+                tables: s.tables.map((t) => ({ name: t.name, rows: t.rowCount, columns: t.columns.map((c) => c.name + (c.pk ? " PK" : "")) })),
+                indexes: s.indexes, views: s.views,
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "db_schema", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.15 SQLite 只读查询（capabilities #73 查询半环）：lib/db.ts 双层只读门
+/// （词法白名单 + readonly 连接）。只读工具 —— 写语句在两层都会被拒。
+fn tool_db_query(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const file = String(a.file || a.db || "");
+            const sql = String(a.sql || a.query || "");
+            if (!file || !sql) return JSON.stringify({ tool: "db_query", ok: false, error: "args.file/args.sql 必填" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "db_query", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const guard = await (async () => {
+                try {
+                    if (file === ":memory:") return { jail: true, path: ":memory:" };
+                    const pathMod = await import("node:path");
+                    const fsMod = await import("node:fs");
+                    const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+                    const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+                    const wsReal = fsMod.realpathSync(ws);
+                    const lexical = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(wsReal, file);
+                    const inWs = (p) => p === wsReal || p.startsWith(wsReal + pathMod.sep);
+                    // 第一层：词法判定先行（../ 逃逸在此拦截 —— 即便父目录不存在也能判）
+                    if (!inWs(lexical)) return { jail: false, error: "路径越界（须在工作区内）：" + file };
+                    // 第二层：符号链实解析（父目录不存在 = 新建文件场景，词法判定已过则降级放行）
+                    try {
+                        const parent = fsMod.realpathSync(pathMod.dirname(lexical));
+                        const resolved = pathMod.join(parent, pathMod.basename(lexical));
+                        if (!inWs(resolved)) return { jail: false, error: "路径越界（符号链逃逸）：" + file };
+                        return { jail: true, path: resolved };
+                    } catch (e2) { return { jail: true, path: lexical }; }
+                } catch (e) { return { jail: false, error: String(e && e.message || e) }; }
+            })();
+            if (!guard.jail) return JSON.stringify({ tool: "db_query", ok: false, error: guard.error });
+            const db = await import(root + "/lib/db.ts");
+            const limit = Math.max(1, Math.min(200, Math.floor(Number(a.limit) || 50)));
+            const r = db.dbQuery(guard.path, sql, { limit });
+            if (!r.ok) return JSON.stringify({ tool: "db_query", ok: false, kind: r.kind, error: r.error });
+            const res = r.result;
+            return JSON.stringify({
+                tool: "db_query", ok: true, columns: res.columns,
+                rows: res.rows.slice(0, limit).map((row) => row.map((c) => (c === null ? null : String(c).slice(0, 256)))),
+                row_count: res.rowCount, truncated: res.truncated, ms: res.ms,
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "db_query", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.15 SQLite 版本化迁移（capabilities #43/#73 写半环）：Full 模式 + 审批在环。
+/// dry_run = 事务跑完即回滚（真正验证 SQL 可执行但不落盘）。
+fn tool_db_migrate(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const file = String(a.file || a.db || "");
+            const sql = String(a.sql || "");
+            const name = String(a.name || ("migration-" + Date.now().toString(36)));
+            const dryRun = a.dry_run === true;
+            if (!file || !sql) return JSON.stringify({ tool: "db_migrate", ok: false, error: "args.file/args.sql 必填" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "db_migrate", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const guard = await (async () => {
+                try {
+                    if (file === ":memory:") return { jail: true, path: ":memory:" };
+                    const pathMod = await import("node:path");
+                    const fsMod = await import("node:fs");
+                    const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+                    const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+                    const wsReal = fsMod.realpathSync(ws);
+                    const lexical = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(wsReal, file);
+                    const inWs = (p) => p === wsReal || p.startsWith(wsReal + pathMod.sep);
+                    // 第一层：词法判定先行（../ 逃逸在此拦截 —— 即便父目录不存在也能判）
+                    if (!inWs(lexical)) return { jail: false, error: "路径越界（须在工作区内）：" + file };
+                    // 第二层：符号链实解析（父目录不存在 = 新建文件场景，词法判定已过则降级放行）
+                    try {
+                        const parent = fsMod.realpathSync(pathMod.dirname(lexical));
+                        const resolved = pathMod.join(parent, pathMod.basename(lexical));
+                        if (!inWs(resolved)) return { jail: false, error: "路径越界（符号链逃逸）：" + file };
+                        return { jail: true, path: resolved };
+                    } catch (e2) { return { jail: true, path: lexical }; }
+                } catch (e) { return { jail: false, error: String(e && e.message || e) }; }
+            })();
+            if (!guard.jail) return JSON.stringify({ tool: "db_migrate", ok: false, error: guard.error });
+            const db = await import(root + "/lib/db.ts");
+            const r = db.dbApplyMigration(guard.path, name, sql, { dryRun });
+            if (!r.ok) return JSON.stringify({ tool: "db_migrate", ok: false, kind: r.kind, error: r.error });
+            return JSON.stringify({ tool: "db_migrate", ok: true, version: r.version, name, dry_run: r.dryRun, ms: r.durMs });
+        } catch (e) {
+            return JSON.stringify({ tool: "db_migrate", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.15 PDF 文本提取（capabilities #24）：lib/pdfread.ts 三层降级链
+/// （pdftotext → uv+pypdf → 诚实失败）。只读工具。
+async fn tool_read_pdf(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const file = String(a.file || a.path || "");
+            if (!file) return JSON.stringify({ tool: "read_pdf", ok: false, error: "args.file 必填" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "read_pdf", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const guard = await (async () => {
+                try {
+                    if (file === ":memory:") return { jail: true, path: ":memory:" };
+                    const pathMod = await import("node:path");
+                    const fsMod = await import("node:fs");
+                    const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+                    const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+                    const wsReal = fsMod.realpathSync(ws);
+                    const lexical = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(wsReal, file);
+                    const inWs = (p) => p === wsReal || p.startsWith(wsReal + pathMod.sep);
+                    // 第一层：词法判定先行（../ 逃逸在此拦截 —— 即便父目录不存在也能判）
+                    if (!inWs(lexical)) return { jail: false, error: "路径越界（须在工作区内）：" + file };
+                    // 第二层：符号链实解析（父目录不存在 = 新建文件场景，词法判定已过则降级放行）
+                    try {
+                        const parent = fsMod.realpathSync(pathMod.dirname(lexical));
+                        const resolved = pathMod.join(parent, pathMod.basename(lexical));
+                        if (!inWs(resolved)) return { jail: false, error: "路径越界（符号链逃逸）：" + file };
+                        return { jail: true, path: resolved };
+                    } catch (e2) { return { jail: true, path: lexical }; }
+                } catch (e) { return { jail: false, error: String(e && e.message || e) }; }
+            })();
+            if (!guard.jail) return JSON.stringify({ tool: "read_pdf", ok: false, error: guard.error });
+            const pdf = await import(root + "/lib/pdfread.ts");
+            const maxPages = Math.max(1, Math.min(200, Math.floor(Number(a.max_pages || a.maxPages) || 30)));
+            const r = await pdf.readPdf(guard.path, { maxPages, maxChars: 128 * 1024 });
+            if (!r.ok) return JSON.stringify({ tool: "read_pdf", ok: false, error: r.error, hint: r.hint });
+            return JSON.stringify({ tool: "read_pdf", ok: true, engine: r.engine, pages: r.pages, ms: r.ms, text: String(r.text || "").slice(0, 32768) });
+        } catch (e) {
+            return JSON.stringify({ tool: "read_pdf", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.15 文件移动/重命名（capabilities #52）：Full 模式 + 审批在环 + 工作区监狱。
+/// node:fs.renameSync 直通（$host.fs 无 move 原语），jail 判定与 realpath 实解析。
+fn tool_fs_move(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const from = String(a.from || a.src || "");
+            const to = String(a.to || a.dst || "");
+            if (!from || !to) return JSON.stringify({ tool: "fs_move", ok: false, error: "args.from/args.to 必填" });
+            const pathMod = await import("node:path");
+            const fsMod = await import("node:fs");
+            const norm = (s) => String(s || "").replace(/\\/g, "/");
+            const wsRaw = norm(String($host.config.workspace || "."));
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const wsReal = fsMod.realpathSync(ws);
+            const inWs = (p) => p === wsReal || p.startsWith(wsReal + pathMod.sep);
+            const resolveIn = (p) => {
+                const lexical = pathMod.isAbsolute(p) ? norm(p) : pathMod.resolve(wsReal, p);
+                if (!inWs(lexical)) throw new Error("路径越界（须在工作区内）：" + p);
+                try {
+                    const parent = fsMod.realpathSync(pathMod.dirname(lexical));
+                    return pathMod.join(parent, pathMod.basename(lexical));
+                } catch (e2) { return lexical; } // 父目录不存在（新建场景）：词法判定已过
+            };
+            const src = resolveIn(from);
+            const dst = resolveIn(to);
+            if (!fsMod.existsSync(src)) return JSON.stringify({ tool: "fs_move", ok: false, error: "源不存在：" + from });
+            // 防自嵌套：把目录移进自己的子目录会 EINVAL/EBUSY —— 前置友好报错
+            if (dst.startsWith(src + pathMod.sep)) return JSON.stringify({ tool: "fs_move", ok: false, error: "不能把目录移动到自身内部" });
+            fsMod.mkdirSync(pathMod.dirname(dst), { recursive: true });
+            fsMod.renameSync(src, dst);
+            return JSON.stringify({ tool: "fs_move", ok: true, from, to });
+        } catch (e) {
+            return JSON.stringify({ tool: "fs_move", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.15 审计导出（capabilities #150）：lib/audit.ts 同源（events/journal/
+/// 审批台账/llm-ledger → 零依赖 zip + markdown 摘要）。写动作（落 zip）→ 审批在环。
+fn tool_audit_export(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "audit_export", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const norm = (s) => String(s || "").replace(/\\/g, "/");
+            const wsRaw = norm(String($host.config.workspace || "."));
+            const pathMod = await import("node:path");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const audit = await import(root + "/lib/audit.ts");
+            const r = audit.exportAudit(ws, a.run ? { run: String(a.run) } : {});
+            if (!r.ok) return JSON.stringify({ tool: "audit_export", ok: false, error: (r.warnings || []).join("; ") });
+            return JSON.stringify({ tool: "audit_export", ok: true, zip: pathMod.basename(r.zip), entries: r.entries, bytes: r.bytes, report: pathMod.basename(r.report) });
+        } catch (e) {
+            return JSON.stringify({ tool: "audit_export", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.15 评审人推荐（capabilities #85/#89）：lib/owners.ts 同源
+/// （CODEOWNERS 后规则覆盖 + 无文件时目录启发式降级）。只读工具。
+fn tool_review_suggest(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const files = Array.isArray(a.files) ? a.files.map(String).filter(Boolean) : [];
+            if (files.length === 0) return JSON.stringify({ tool: "review_suggest", ok: false, error: "args.files 必填（变更文件清单）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "review_suggest", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const norm = (s) => String(s || "").replace(/\\/g, "/");
+            const wsRaw = norm(String($host.config.workspace || "."));
+            const pathMod = await import("node:path");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const owners = await import(root + "/lib/owners.ts");
+            const r = owners.recommendReviewers(ws, files.slice(0, 100));
+            return JSON.stringify({
+                tool: "review_suggest", ok: true, from_codeowners: r.fromCodeowners,
+                fallback_reason: r.fallbackReason || undefined,
+                reviewers: r.reviewers.map((x) => ({ name: x.name, files_covered: x.filesCovered, reason: x.reason })),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "review_suggest", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
 /// v0.5.8 语义检索（capabilities #19/#22）：lib/search.ts 的 ABI 内同构
 /// 实现（HSL 无法 import TS —— 分词/BM25 公式与 lib 侧一致，
 /// tests/search.test.ts 行为对拍保证排序等价；「一源多投射 + 行为级
 /// 对拍」与 HSL 代码生成器同一治理手法）。只读工具（ReadOnly 模式可用）。
+/// v0.5.15 注：lib 侧其余新能力（db/symbols/scan/…）已改用动态 import 的
+/// 零重复路线；semantic_search 保留同构实现是历史兼容（对拍用例锁定中）。
 fn tool_semantic_search(args: String) -> String {
     native typescript {
         try {
@@ -421,9 +745,56 @@ fn tool_fs_write(args: String) -> String {
             const a = JSON.parse(args);
             const path = String(a.path || "");
             const content = String(a.content ?? "");
+            const preview = a.preview === true;
             if (!path) return JSON.stringify({ tool: "fs_write", ok: false, error: "args.path 必填" });
+
+            // v0.5.15 密钥拦截（capabilities #141）：写入前 scanText —— 高危密钥模式
+            // （OpenAI/Anthropic/GitHub/AWS/Google/私钥/JWT…，lib/scan.ts 同源）拒绝落盘；
+            // 中低危告警但放行。ORG_SCAN=off 可关（用户明示信任内容的逃生口）。
+            const scanOff = String($host.env.get("ORG_SCAN") || "").trim().toLowerCase() === "off";
+            let scanHits = [];
+            if (!scanOff && !preview) {
+                try {
+                    const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/");
+                    const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/);
+                    if (m) {
+                        const scan = await import(m[1] + "/lib/scan.ts");
+                        scanHits = scan.scanText(content, path);
+                    }
+                } catch (e) { /* 扫描器缺席 → 不拦截写入（降级不阻断） */ }
+            }
+            const high = scanHits.filter((h) => h.severity === "high");
+            if (high.length > 0) {
+                return JSON.stringify({
+                    tool: "fs_write", ok: false, refused: "secret_scan",
+                    error: "写入被拒：内容含 " + high.length + " 处高危密钥模式（" + high.map((h) => h.pattern).join(", ") + "）。凭据不该落盘 —— 请改用环境变量或密钥文件引用；确需写入请让用户设 ORG_SCAN=off。",
+                });
+            }
+
+            // v0.5.15 preview 干跑（capabilities #60）：不落盘，返回 unified diff。
+            // 旧文件不存在 = 全新增；diff 引擎与 lib/diff.ts 同源（GNU diff -u 对拍一致）。
+            if (preview) {
+                let oldText = "";
+                let exists = true;
+                try { oldText = String($host.fs.read(path)); } catch (e) { exists = false; }
+                try {
+                    const d0 = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/");
+                    const m0 = d0.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/);
+                    if (!m0) throw new Error("DHV_TS 缺席");
+                    const diff = await import(m0[1] + "/lib/diff.ts");
+                    const r = diff.diffText(oldText, content);
+                    return JSON.stringify({
+                        tool: "fs_write", ok: true, preview: true, wrote: false, path, exists,
+                        stats: diff.renderStats(r), diff: diff.renderUnified(r, path, path).slice(0, 16384),
+                    });
+                } catch (e) {
+                    return JSON.stringify({ tool: "fs_write", ok: false, error: "preview 降级（diff 引擎缺席）" + String(e && e.message || e) });
+                }
+            }
+
             const n = $host.fs.write(path, content);
-            return JSON.stringify({ tool: "fs_write", ok: true, bytes: n, path });
+            const warn = scanHits.length > 0 ? "（⚠ 密钥扫描：" + scanHits.length + " 处中低危模式已放行 — " + scanHits.map((h) => h.pattern).join(", ") + "）" : "";
+            return JSON.stringify({ tool: "fs_write", ok: true, bytes: n, path, scan_warnings: scanHits.length, note: warn || undefined });
         } catch (e) {
             return JSON.stringify({ tool: "fs_write", ok: false, error: String(e && e.message || e) });
         }
@@ -437,7 +808,29 @@ fn tool_fs_edit(args: String) -> String {
             const path = String(a.path || "");
             const old = String(a.old ?? "");
             const nw = String(a.new ?? "");
+            const preview = a.preview === true;
             if (!path || !old) return JSON.stringify({ tool: "fs_edit", ok: false, error: "args.path/args.old 必填" });
+
+            // v0.5.15 preview 干跑：老内容 → 新内容 unified diff，不落盘。
+            if (preview) {
+                const cur = String($host.fs.read(path));
+                if (cur.indexOf(old) < 0) return JSON.stringify({ tool: "fs_edit", ok: false, error: "old 锚点未命中（preview 同样要求锚点存在且唯一）" });
+                if (cur.indexOf(old) !== cur.lastIndexOf(old)) return JSON.stringify({ tool: "fs_edit", ok: false, error: "old 锚点多处命中（须唯一）" });
+                try {
+                    const d0 = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/");
+                    const m0 = d0.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/);
+                    if (!m0) throw new Error("DHV_TS 缺席");
+                    const diff = await import(m0[1] + "/lib/diff.ts");
+                    const r = diff.diffText(cur, cur.replace(old, nw));
+                    return JSON.stringify({
+                        tool: "fs_edit", ok: true, preview: true, wrote: false, path,
+                        stats: diff.renderStats(r), diff: diff.renderUnified(r, path, path).slice(0, 16384),
+                    });
+                } catch (e) {
+                    return JSON.stringify({ tool: "fs_edit", ok: false, error: "preview 降级（diff 引擎缺席）" + String(e && e.message || e) });
+                }
+            }
+
             const r = $host.fs.edit(path, old, nw);
             if (r && r.ok) return JSON.stringify({ tool: "fs_edit", ok: true, path });
             return JSON.stringify({ tool: "fs_edit", ok: false, error: String(r && r.error || "edit 失败（old 锚点须唯一命中）") });
@@ -860,9 +1253,23 @@ fn result_summary(result: String) -> String {
                 // v0.5.8：语义检索的观测摘要（hits 数 + top-1 路径 —— tests/
                 // search.test.ts 以此对拍 HSL 版与 lib 版的排序一致性）
                 if (tool === "semantic_search") return tool + " ok hits=" + String((o.hits || []).length) + " docs=" + String(o.total_docs ?? "?") + " top=" + String((o.hits && o.hits[0] && o.hits[0].path) || "-");
+                // v0.5.15：桌面 Agent 补全批次的观测摘要（journal 人读面）
+                if (tool === "symbol_search") return tool + " ok defs=" + String((o.defs || []).length) + (o.refs !== undefined ? " refs=" + String((o.refs || []).length) : "") + " top=" + String((o.defs && o.defs[0] && o.defs[0].file + ":" + o.defs[0].line) || "-");
+                if (tool === "db_schema") return tool + " ok tables=" + String((o.tables || []).length) + " " + (o.tables || []).map((t) => t.name).slice(0, 5).join(",");
+                if (tool === "db_query") return tool + " ok rows=" + String(o.row_count ?? (o.rows || []).length) + (o.truncated ? " (截断)" : "") + " ms=" + String(o.ms ?? "?");
+                if (tool === "db_migrate") return tool + (o.dry_run ? " dry-run ok" : " ok") + " v" + String(o.version) + " " + String(o.name || "");
+                if (tool === "fs_move") return tool + " ok " + String(o.from) + " → " + String(o.to);
+                if (tool === "read_pdf") return tool + " ok engine=" + String(o.engine) + " pages=" + String(o.pages) + " chars=" + String((o.text || "").length);
+                if (tool === "audit_export") return tool + " ok " + String(o.zip) + " entries=" + String(o.entries);
+                if (tool === "review_suggest") return tool + " ok reviewers=" + String((o.reviewers || []).map((x) => x.name).join(","));
+                if (tool === "fs_write" && o.preview) return tool + " preview " + String(o.stats || "") + " " + String(o.path);
+                if (tool === "fs_edit" && o.preview) return tool + " preview " + String(o.stats || "") + " " + String(o.path);
+                if (tool === "fs_write" && o.scan_warnings > 0) return tool + " ok " + String(o.bytes) + "B ⚠密钥告警 " + String(o.scan_warnings) + " " + String(o.path);
                 return tool + " ok " + size + " chars";
             }
-            return tool + " error " + String(o.error || "").slice(0, 120);
+            // v0.5.15：错误摘要带 kind（denied/jail 拒绝可观测）
+            const kind = o.kind !== undefined ? " [" + String(o.kind) + "]" : o.refused !== undefined ? " [" + String(o.refused) + "]" : "";
+            return tool + " error" + kind + " " + String(o.error || "").slice(0, 120);
         } catch (e) {
             return "result " + String(result).slice(0, 100);
         }
