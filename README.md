@@ -5,7 +5,7 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.5.16_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Status](https://img.shields.io/badge/status-v0.5.18_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
 [![Tests](https://img.shields.io/badge/tests-686%2F686_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.66-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
@@ -19,7 +19,11 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **v0.5.16 当前状态**：可运行实现，机制级测试全绿。本版为**治理与扩展批**：9 个新 lib 模块统一接线 CLI / 工具环 / Web 三端——数据库查询诊断（org dbdiag · db_diagnose · EXPLAIN QUERY PLAN 解析）、merge/rebase 安全操作（org merge/rebase/mergestate · git_merge/git_rebase，冲突绝不自动解决恒 abort）、**RBAC 角色权限**（org rbac · 工具环可选门控 ORG_RBAC_ROLE：未设零回归，拒绝含 rule/reason 并落审计 rbac_denied 事件 + runtime/rbac.jsonl）、容器/IaC 扫描（org iacscan · 16 规则三族）、插件市场（org plugin · 事务性安装只装不执行，permissions 与 RBAC 联动）、OpenAPI 解析（org openapi · 3.x/2.0 双识别 + 工具命名建议）、浏览器 DOM 快照/截图（org browser · agent-browser→chromium→chrome 多引擎降级）、代码补全（org complete · 三级候选）、项目级重命名（org rename · 缺省 dryRun 预览）；工具环 +13 工具（native 块动态 import 同源范式）+ Web 🛡 治理与扩展面板（8 区 11 端点，并补上 v0.5.15 工具箱面板遗漏的 display CSS）。能力矩阵 10 行修订：8 项 ⬜→✅、2 项 ⬜→🟡（诚实口径：#116 DevTools console/网络面板、#56 代码动作仍是路线图）—— 主表 ✅ 108/150。
+> **v0.5.18 当前状态**：可运行实现，机制级测试全绿。本版为**终局三 ⬜ 清零批**——能力矩阵 150 项未做项归零（✅ 118/150 · 🟡32 · ⬜0）。三簇并进：**IaC 深度实现**（#44：org iac · 内置 HCL 子集解析器（heredoc/插值/splat）→ 依赖图（拓扑/环检测）→ 人读 Plan → manifest 逆向生成往返自洽；terraform/tofu 在场时 validate 外部车道只读，缺席内置车道为主车道——与 #147 iacscan 扫描面互补）、**移动端调试**（#117：org mobile · adb devices/logcat 五元组 dump/WebView CDP forward 四层降级/apk 魔数 + plan 纯函数保底（平台×症状矩阵），全链多重优雅降级）、**远程 Agent**（#133：org remote · remote-hosts.json 主机档案门（私钥内容混入拒绝）+ 会话级 exec（白名单只读默认）+ rsync→scp→指引三层 sync + 部署计划四式——与 #68 cloud_ssh 单命令执行互补的会话/部署层）；工具环 +11 工具（iac×4/mobile×3/remote×3 只读 + remote_exec 走 process_spawn 门+审批在环）、Web +3 端点 + ⚒/📱/🛰 三面板 Tab。测试 977 → **1093**（iac 63 · mobile 60 · remote 53）。
+
+> **v0.5.17 历史状态**：可运行实现，机制级测试全绿。本版为**三簇主攻批**：LSP/DAP 深度（#26 JSON-RPC 2.0 分帧 + 双车道 + #108 断点建议/DAP 构造器）、云生态（#67/#68/#72/#74 五层降级 + docker/kubectl 白名单执行车道）、团队协作（#87 append-only JSONL 线程 + 回复树 + @mention + 会话桥）；7 项 ⬜→✅，主表 ✅ 115/150。测试 867 → 977。
+
+> **v0.5.16 历史状态**：可运行实现，机制级测试全绿。本版为**治理与扩展批**：9 个新 lib 模块统一接线 CLI / 工具环 / Web 三端——数据库查询诊断（org dbdiag · db_diagnose · EXPLAIN QUERY PLAN 解析）、merge/rebase 安全操作（org merge/rebase/mergestate · git_merge/git_rebase，冲突绝不自动解决恒 abort）、**RBAC 角色权限**（org rbac · 工具环可选门控 ORG_RBAC_ROLE：未设零回归，拒绝含 rule/reason 并落审计 rbac_denied 事件 + runtime/rbac.jsonl）、容器/IaC 扫描（org iacscan · 16 规则三族）、插件市场（org plugin · 事务性安装只装不执行，permissions 与 RBAC 联动）、OpenAPI 解析（org openapi · 3.x/2.0 双识别 + 工具命名建议）、浏览器 DOM 快照/截图（org browser · agent-browser→chromium→chrome 多引擎降级）、代码补全（org complete · 三级候选）、项目级重命名（org rename · 缺省 dryRun 预览）；工具环 +13 工具（native 块动态 import 同源范式）+ Web 🛡 治理与扩展面板（8 区 11 端点，并补上 v0.5.15 工具箱面板遗漏的 display CSS）。能力矩阵 10 行修订：8 项 ⬜→✅、2 项 ⬜→🟡（诚实口径：#116 DevTools console/网络面板、#56 代码动作仍是路线图）—— 主表 ✅ 108/150。
 
 > **v0.5.15 历史状态**：可运行实现，**686/686 机制级测试全绿**（39 文件）。本版三线交付：**① CI 红灯清零**（payload 再生 + 跨平台测试五重防御：工具缺席优雅降级 / win32 .exe / CRLF 归一 / job 补装 ruff / notify 超时双修）；**② 能力矩阵 12 项升级 · 主表 ✅ 破百（100/150 · 专家 24/25）**——数据库（org db · db_query/db_migrate 双层只读门）、diff 干跑（fs_write preview:true · GNU diff -u 对拍一致）、符号跳转（org symbols · symbol_search）、文件移动（fs_move 审批+监狱）、PDF 读取（org read 三层降级链）、密钥扫描（org scan · fs_write 高危拦截）、审计导出（org audit 零依赖 zip）、SBOM（org sbom · spdx-tools 校验）、CODEOWNERS/评审推荐（org owners）——每项 lib 单一实现 + CLI/工具环/Web 工具箱（🧰 新面板 · 7 端点）三端消费；**③ 治理漂移**：capabilities.md 三处滞后条目修订 + 统计行防漂移守卫（改表不改行 → CI 红）。工具环与 lib 同源新范式：native 块 `await import(root+"/lib/x.ts")` 动态导入 —— 行为等价由构造保证，零重复。
 
