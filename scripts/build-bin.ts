@@ -8,6 +8,11 @@
 // 运行期（lib/root.ts）按内容指纹解包到 ~/.org/runtime-<hash> 并以此为 ROOT。
 // 源码模式（bun cli/org.ts）不受影响：ROOT 仍是仓库，payload 仅编译态使用。
 //
+// v0.5.16.1：lib/ 入 payload —— 工具环 native 块在 dhv-ts 子进程里动态
+// import(root + "/lib/*.ts")，编译态 ROOT 是解包目录（原先无 lib/ → 15 个
+// 工具全断，native-smoke 只跑 check/demo/TUI 未暴露）。lib 均为自包含 TS
+//（node 内建 + lib 内相对引用 + bun:sqlite），全量嵌入免维护清单、防未来漂移。
+//
 // 用法：
 //   bun scripts/build-bin.ts                # 生成 payload + 当前平台二进制
 //   bun scripts/build-bin.ts --all          # 生成 payload + 5 目标交叉编译
@@ -23,6 +28,7 @@ const PAYLOAD = path.join(BUILD_DIR, "payload.json");
 
 const PAYLOAD_ROOTS = [
   "hsl",
+  "lib",
   "toolchain/dhv-ts/src",
   "toolchain/dhv-ts/package.json",
   "demo-ws",
