@@ -157,7 +157,7 @@ describe("图灵完备 I：Rule 110 元胞自动机（Cook 2004 TC 证明）", (
     const dir = path.join(SCRATCH, "r110-rs");
     expect(emit("fixtures/turing/rule110.hsl", dir)).toBe(true);
     const bin = path.join(dir, "rule110-bin");
-    execFileSync(toolPath("rustc"), [path.join(dir, "rule110.rs"), "-o", bin], { stdio: "pipe" });
+    execFileSync(toolPath("rustc"), [path.join(dir, "rule110.rs"), "-o", exeOf(bin)], { stdio: "pipe" }); // v0.5.15：显式 .exe —— rustc 对无扩展名 -o 产出无后缀 PE，Windows 无法执行
     const rsOut = runBin(bin);
     const interp = runHslLines("fixtures/turing/rule110.hsl", "r110c").filter((l) => /^[.#]+$/.test(l));
     const rsLines = normOut(rsOut).split("\n").filter((l) => l.trim().length > 0);
@@ -168,7 +168,7 @@ describe("图灵完备 I：Rule 110 元胞自动机（Cook 2004 TC 证明）", (
     const dir = path.join(SCRATCH, "r110-cpp");
     expect(emit("fixtures/turing/rule110.hsl", dir)).toBe(true);
     const bin = path.join(dir, "rule110-cpp-bin");
-    execFileSync(toolPath("g++"), ["-std=c++20", path.join(dir, "rule110.cpp"), "-o", bin], { stdio: "pipe" });
+    execFileSync(toolPath("g++"), ["-std=c++20", path.join(dir, "rule110.cpp"), "-o", exeOf(bin)], { stdio: "pipe" });
     const cppOut = runBin(bin);
     const interp = runHslLines("fixtures/turing/rule110.hsl", "r110d").filter((l) => /^[.#]+$/.test(l));
     const cppLines = normOut(cppOut).split("\n").filter((l) => l.trim().length > 0);
@@ -200,7 +200,7 @@ describe("图灵完备 II：图灵机（3 态忙海狸 BB(3)）", () => {
     const dir = path.join(SCRATCH, "bb-rs");
     expect(emit("fixtures/turing/busy-beaver.hsl", dir)).toBe(true);
     const bin = path.join(dir, "bb-bin");
-    execFileSync(toolPath("rustc"), [path.join(dir, "busy_beaver.rs"), "-o", bin], { stdio: "pipe" });
+    execFileSync(toolPath("rustc"), [path.join(dir, "busy_beaver.rs"), "-o", exeOf(bin)], { stdio: "pipe" });
     const rsOut = runBin(bin);
     expect(normOut(rsOut)).toContain("steps=13 configs=14 ones=6");
     expect(normOut(rsOut)).toContain("BB(3) VERIFIED");
@@ -231,7 +231,7 @@ describe("图灵完备 III：Brainfuck 解释器（用 HSL 解释 TC 语言）",
     const dir = path.join(SCRATCH, "bf-rs");
     expect(emit("fixtures/turing/bf.hsl", dir)).toBe(true);
     const bin = path.join(dir, "bf-bin");
-    execFileSync(toolPath("rustc"), [path.join(dir, "bf.rs"), "-o", bin], { stdio: "pipe" });
+    execFileSync(toolPath("rustc"), [path.join(dir, "bf.rs"), "-o", exeOf(bin)], { stdio: "pipe" });
     const rsOut = runBin(bin);
     expect(normOut(rsOut)).toContain("BF says: Hello World!");
     expect(normOut(rsOut)).toContain("executed=906 instructions");
