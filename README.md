@@ -5,7 +5,7 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.5.15_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Status](https://img.shields.io/badge/status-v0.5.16_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
 [![Tests](https://img.shields.io/badge/tests-686%2F686_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.66-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
@@ -19,7 +19,9 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **v0.5.15 当前状态**：可运行实现，**686/686 机制级测试全绿**（39 文件）。本版三线交付：**① CI 红灯清零**（payload 再生 + 跨平台测试五重防御：工具缺席优雅降级 / win32 .exe / CRLF 归一 / job 补装 ruff / notify 超时双修）；**② 能力矩阵 12 项升级 · 主表 ✅ 破百（100/150 · 专家 24/25）**——数据库（org db · db_query/db_migrate 双层只读门）、diff 干跑（fs_write preview:true · GNU diff -u 对拍一致）、符号跳转（org symbols · symbol_search）、文件移动（fs_move 审批+监狱）、PDF 读取（org read 三层降级链）、密钥扫描（org scan · fs_write 高危拦截）、审计导出（org audit 零依赖 zip）、SBOM（org sbom · spdx-tools 校验）、CODEOWNERS/评审推荐（org owners）——每项 lib 单一实现 + CLI/工具环/Web 工具箱（🧰 新面板 · 7 端点）三端消费；**③ 治理漂移**：capabilities.md 三处滞后条目修订 + 统计行防漂移守卫（改表不改行 → CI 红）。工具环与 lib 同源新范式：native 块 `await import(root+"/lib/x.ts")` 动态导入 —— 行为等价由构造保证，零重复。
+> **v0.5.16 当前状态**：可运行实现，机制级测试全绿。本版为**治理与扩展批**：9 个新 lib 模块统一接线 CLI / 工具环 / Web 三端——数据库查询诊断（org dbdiag · db_diagnose · EXPLAIN QUERY PLAN 解析）、merge/rebase 安全操作（org merge/rebase/mergestate · git_merge/git_rebase，冲突绝不自动解决恒 abort）、**RBAC 角色权限**（org rbac · 工具环可选门控 ORG_RBAC_ROLE：未设零回归，拒绝含 rule/reason 并落审计 rbac_denied 事件 + runtime/rbac.jsonl）、容器/IaC 扫描（org iacscan · 16 规则三族）、插件市场（org plugin · 事务性安装只装不执行，permissions 与 RBAC 联动）、OpenAPI 解析（org openapi · 3.x/2.0 双识别 + 工具命名建议）、浏览器 DOM 快照/截图（org browser · agent-browser→chromium→chrome 多引擎降级）、代码补全（org complete · 三级候选）、项目级重命名（org rename · 缺省 dryRun 预览）；工具环 +13 工具（native 块动态 import 同源范式）+ Web 🛡 治理与扩展面板（8 区 11 端点，并补上 v0.5.15 工具箱面板遗漏的 display CSS）。能力矩阵 10 行修订：8 项 ⬜→✅、2 项 ⬜→🟡（诚实口径：#116 DevTools console/网络面板、#56 代码动作仍是路线图）—— 主表 ✅ 108/150。
+
+> **v0.5.15 历史状态**：可运行实现，**686/686 机制级测试全绿**（39 文件）。本版三线交付：**① CI 红灯清零**（payload 再生 + 跨平台测试五重防御：工具缺席优雅降级 / win32 .exe / CRLF 归一 / job 补装 ruff / notify 超时双修）；**② 能力矩阵 12 项升级 · 主表 ✅ 破百（100/150 · 专家 24/25）**——数据库（org db · db_query/db_migrate 双层只读门）、diff 干跑（fs_write preview:true · GNU diff -u 对拍一致）、符号跳转（org symbols · symbol_search）、文件移动（fs_move 审批+监狱）、PDF 读取（org read 三层降级链）、密钥扫描（org scan · fs_write 高危拦截）、审计导出（org audit 零依赖 zip）、SBOM（org sbom · spdx-tools 校验）、CODEOWNERS/评审推荐（org owners）——每项 lib 单一实现 + CLI/工具环/Web 工具箱（🧰 新面板 · 7 端点）三端消费；**③ 治理漂移**：capabilities.md 三处滞后条目修订 + 统计行防漂移守卫（改表不改行 → CI 红）。工具环与 lib 同源新范式：native 块 `await import(root+"/lib/x.ts")` 动态导入 —— 行为等价由构造保证，零重复。
 
 > **v0.5.11 历史状态**：可运行实现，**491/491 机制级测试全绿**（27 文件 · 2160 expect）。本版深化**子生孙递归派生**：**预算继承**（ORG_SPAWN_BUDGET 缺省 100 份 × ORG_SPAWN_DECAY 缺省 0.5 —— 子预算 = floor(父预算 × 衰减率) 随深度指数衰减；用量 tokens/model_calls 回填观测）· **池化重档**（<ws>/spawn/pool.json 登记每次派生，相似 goal 词面重合 ≥0.6 命中即零成本复用，reuse:false 强制新派生）· **Web 🌳 派生池面板**（树形视图 + 统计条 + 递归挂孙 + legacy 孤儿兜底 + 点击展开详情/复制路径）· agent_spawn 专属运行卡（🌳 调用 / ♻ 复用 / 预算拒绝三态）。
 
@@ -114,7 +116,7 @@ flowchart LR
         direction TB
         ENG["engine.ts<br/>startRun · dhvRun"]
         EVT["events.ts<br/>三路事件流归一化"]
-        VER["version.ts<br/>版本单一来源 0.5.15"]
+        VER["version.ts<br/>版本单一来源 0.5.16"]
         RT["root.ts<br/>源码 / 单二进制双形态"]
     end
 
@@ -832,7 +834,7 @@ org/
 │   ├── engine.ts                       # ✦ 引擎桥：startRun / dhvRun 双车道 / 工作区扫描（1043 行）
 │   ├── events.ts                       #   事件流归一化（events + journal + llm-stream 三路合并去重）
 │   ├── root.ts                         #   运行时根解析（源码模式 / 单二进制 payload 解包）
-│   └── version.ts                      # ✦ 版本单一来源（ORG_VERSION = "0.5.15"）
+│   └── version.ts                      # ✦ 版本单一来源（ORG_VERSION = "0.5.16"）
 ├── tui/                                # ✦ 组织驾驶舱（OpenCode 级终端前端，零依赖）
 │   ├── main.tsx / entry.ts             #   入口（org tui 进程内复用同一入口）
 │   ├── app.tsx / store.ts              #   主应用（键盘路由 + 引擎接线）/ useReducer 单 store

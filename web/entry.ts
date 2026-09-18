@@ -148,6 +148,15 @@ import { scanWorkspace as scanSecrets, SECRET_PATTERNS } from "../lib/scan.ts"; 
 import { exportAudit, auditSummary } from "../lib/audit.ts"; // v0.5.15 审计导出（#150）
 import { buildSbom, renderSpdxJson } from "../lib/sbom.ts"; // v0.5.15 SBOM（#148）
 import { loadCodeowners, recommendReviewers } from "../lib/owners.ts"; // v0.5.15 CODEOWNERS/评审推荐（#89/#85）
+import { dbDiagnose } from "../lib/dbdiag.ts"; // v0.5.16 数据库查询诊断（#113）
+import { gitMergeState, gitMerge, gitRebase } from "../lib/gitmerge.ts"; // v0.5.16 merge/rebase（#80）
+import { loadRbac, rbacCheck, rbacRoles, rbacActions } from "../lib/rbac.ts"; // v0.5.16 RBAC（#149）
+import { scanIac, IAC_RULES } from "../lib/iacscan.ts"; // v0.5.16 IaC 扫描（#147）
+import { pluginList, pluginInstall, pluginRemove } from "../lib/plugins.ts"; // v0.5.16 插件市场（#132）
+import { parseOpenApiText, parseOpenApiFile, suggestToolName } from "../lib/openapi.ts"; // v0.5.16 OpenAPI（#134）
+import { browserEngines, browserSnapshot, browserScreenshot } from "../lib/browser.ts"; // v0.5.16 浏览器（#116/#30）
+import { completeAt } from "../lib/completion.ts"; // v0.5.16 代码补全（#32）
+import { applyRename } from "../lib/rename.ts"; // v0.5.16 项目级重命名（#56）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
 
@@ -1231,6 +1240,180 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
           if (files.length === 0) return json({ ok: false, error: "files 必填" }, 400);
           const r = recommendReviewers(readWorkspaceOf(ws), files);
           return json({ ok: true, ...r, codeowners: loadCodeowners(readWorkspaceOf(ws)).file });
+        }
+        // v0.5.16 治理与扩展面板（🛡 govex）：IaC 扫描 / 插件 / RBAC / OpenAPI /
+        // 浏览器 / dbdiag / 补全 / 重命名 / git —— 与 CLI、工具环同源 lib。
+        if (route === "GET /api/govex/iacscan") {
+          const r = scanIac(readWorkspaceOf(ws));
+          return json({
+            ok: true, files: r.files, scanned: r.scanned, took_ms: r.tookMs, rules: IAC_RULES.length,
+            truncated: r.truncated, high: r.hits.filter((h) => h.severity === "high").length,
+            hits: r.hits.slice(0, 200),
+          });
+        }
+        if (route === "GET /api/govex/plugins") {
+          const r = pluginList(readWorkspaceOf(ws));
+          return json({ ok: true, plugins: r.plugins.map((p) => ({ ...p, path: path.basename(p.path) })), dir: ".org/plugins" });
+        }
+        if (route === "POST /api/govex/plugin-install") {
+          // 写动作：用真实工作区（非 dist/demo 快照回退）+ 只读守卫（与 /api/memory 同规）
+          if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+            return json({ ok: false, error: "dist/demo 是入库快照（只读）。" }, 400);
+          }
+          const body = (await req.json().catch(() => ({}))) as { source?: unknown };
+          const source = String(body.source ?? "").trim();
+          if (!source) return json({ ok: false, error: "source 必填（本地目录或 git URL）" }, 400);
+          const r = pluginInstall(path.resolve(ws), source);
+          if (!r.ok) return json({ ok: false, kind: r.kind, error: r.error }, 400);
+          return json({ ok: true, name: r.name, version: r.version, warnings: r.warnings });
+        }
+        if (route === "POST /api/govex/plugin-remove") {
+          if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+            return json({ ok: false, error: "dist/demo 是入库快照（只读）。" }, 400);
+          }
+          const body = (await req.json().catch(() => ({}))) as { name?: unknown };
+          const name = String(body.name ?? "").trim();
+          if (!name) return json({ ok: false, error: "name 必填" }, 400);
+          const r = pluginRemove(path.resolve(ws), name);
+          if (!r.ok) return json({ ok: false, kind: r.kind, error: r.error }, 400);
+          return json({ ok: true, name: r.name });
+        }
+        if (route === "GET /api/govex/rbac") {
+          const rws = readWorkspaceOf(ws);
+          const { policy, file, fallbackReason } = loadRbac(rws);
+          return json({
+            ok: true, policy_file: file, ...(fallbackReason ? { fallback_reason: fallbackReason } : {}),
+            roles: rbacRoles(policy).map((role) => ({ role, ...rbacActions(policy, role) })),
+          });
+        }
+        if (route === "POST /api/govex/openapi") {
+          // body {text}（粘贴的 spec JSON）或 {file}（工作区相对路径）—— 二选一
+          const body = (await req.json().catch(() => ({}))) as { text?: unknown; file?: unknown };
+          const text = typeof body.text === "string" ? body.text : "";
+          const file = String(body.file ?? "").trim();
+          if (!text && !file) return json({ ok: false, error: "text / file 必填其一" }, 400);
+          let r;
+          if (text) {
+            r = parseOpenApiText(text);
+          } else {
+            const wsAbs = path.resolve(readWorkspaceOf(ws));
+            const target = path.resolve(wsAbs, file);
+            if (!target.startsWith(wsAbs + path.sep)) return json({ ok: false, error: "路径越界（须在工作区内）" }, 400);
+            r = parseOpenApiFile(target);
+          }
+          if (!r.ok) return json({ ok: false, kind: r.kind, error: r.error }, 400);
+          return json({
+            ok: true, version: r.version, info: r.info, servers: r.servers, schemas: r.schemas,
+            operations: r.operations.map((op) => ({ ...op, tool_name: suggestToolName(op) })),
+          });
+        }
+        if (route === "GET /api/govex/engines") {
+          const e = browserEngines();
+          return json({ ok: true, agent_browser: e.agentBrowser, chromium: e.chromium, chrome: e.chrome, ...(e.hint ? { hint: e.hint } : {}) });
+        }
+        if (route === "POST /api/govex/browser-snapshot") {
+          const body = (await req.json().catch(() => ({}))) as { url?: unknown };
+          const url = String(body.url ?? "").trim();
+          if (!url) return json({ ok: false, error: "url 必填（http/https）" }, 400);
+          // 超时预算收敛到引擎侧既有约束（与工具环同口径：1-60s 钳制，缺省 30s）
+          const r = await browserSnapshot(url, { timeoutMs: 30_000 });
+          if (!r.ok) return json({ ok: false, kind: r.kind, error: r.error, ...(r.hint ? { hint: r.hint } : {}) }, 200);
+          return json({
+            ok: true, engine: r.engine, url: r.url, ...(r.finalUrl ? { final_url: r.finalUrl } : {}),
+            ...(r.title ? { title: r.title } : {}), text: r.text.slice(0, 16384), ms: r.ms,
+            links: (r.links ?? []).slice(0, 50), imgs: (r.imgs ?? []).slice(0, 20),
+          });
+        }
+        if (route === "POST /api/govex/browser-screenshot") {
+          if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+            return json({ ok: false, error: "dist/demo 是入库快照（只读）。" }, 400);
+          }
+          const body = (await req.json().catch(() => ({}))) as { url?: unknown };
+          const url = String(body.url ?? "").trim();
+          if (!url) return json({ ok: false, error: "url 必填（http/https）" }, 400);
+          const out = path.join(path.resolve(ws), `browser-${new Date().toISOString().replace(/[-:T.]/g, "").slice(0, 14)}.png`);
+          const r = await browserScreenshot(url, { out, timeoutMs: 30_000 });
+          if (!r.ok) return json({ ok: false, kind: r.kind, error: r.error, ...(r.hint ? { hint: r.hint } : {}) }, 200);
+          return json({ ok: true, engine: r.engine, path: path.basename(r.path), ms: r.ms });
+        }
+        if (route === "POST /api/govex/dbdiag") {
+          const body = (await req.json().catch(() => ({}))) as { file?: unknown; sql?: unknown; setup?: unknown };
+          const file = String(body.file ?? "").trim();
+          const sql = String(body.sql ?? "").trim();
+          if (!file || !sql) return json({ ok: false, error: "file / sql 必填" }, 400);
+          if (file !== ":memory:") {
+            const wsAbs = path.resolve(readWorkspaceOf(ws));
+            const target = path.resolve(wsAbs, file);
+            if (!target.startsWith(wsAbs + path.sep)) return json({ ok: false, error: "路径越界（须在工作区内）" }, 400);
+          }
+          const setup = typeof body.setup === "string" && body.setup.trim().length > 0 ? body.setup : undefined;
+          const r = await dbDiagnose(file === ":memory:" ? ":memory:" : path.resolve(readWorkspaceOf(ws), file), sql, setup ? { setup } : {});
+          if (!r.ok) return json({ ok: false, kind: r.kind, error: r.error }, 400);
+          return json({ ok: true, ms: r.ms, plan: r.plan, suggestions: r.suggestions });
+        }
+        if (route === "POST /api/govex/complete") {
+          const body = (await req.json().catch(() => ({}))) as { file?: unknown; line?: unknown; column?: unknown };
+          const file = String(body.file ?? "").trim();
+          const line = Math.max(1, Math.floor(Number(body.line) || 1));
+          const column = Math.max(1, Math.floor(Number(body.column) || 1));
+          if (!file) return json({ ok: false, error: "file 必填" }, 400);
+          const rws = readWorkspaceOf(ws);
+          const wsAbs = path.resolve(rws);
+          const target = path.resolve(wsAbs, file);
+          if (!target.startsWith(wsAbs + path.sep)) return json({ ok: false, error: "路径越界（须在工作区内）" }, 400);
+          let lineText = "";
+          try {
+            lineText = fs.readFileSync(target, "utf8").split("\n")[line - 1] ?? "";
+          } catch {
+            return json({ ok: false, error: `文件不可读：${file}` }, 400);
+          }
+          const r = await completeAt(rws, file, lineText, column - 1, { dirs: [""] });
+          return json({ ok: true, line_text: lineText, ...r });
+        }
+        if (route === "POST /api/govex/rename") {
+          // body {old, new, apply?} —— 缺省 dryRun 预览（unified diff）；apply:true 真写。
+          // 写面用真实工作区（非 dist/demo 快照回退）+ 只读守卫（与 /api/memory 同规）。
+          if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+            return json({ ok: false, error: "dist/demo 是入库快照（只读）。" }, 400);
+          }
+          const body = (await req.json().catch(() => ({}))) as { old?: unknown; new?: unknown; apply?: unknown };
+          const oldName = String(body.old ?? "").trim();
+          const newName = String(body.new ?? "").trim();
+          if (!oldName || !newName) return json({ ok: false, error: "old / new 必填" }, 400);
+          const r = await applyRename(path.resolve(ws), oldName, newName, { dryRun: body.apply !== true, dirs: [""] });
+          if (!r.ok) return json({ ok: false, reason: r.reason, warnings: r.plan.warnings }, 200);
+          return json({
+            ok: true, dry_run: r.dryRun,
+            definition: { kind: r.plan.definition!.kind, file: r.plan.definition!.file, line: r.plan.definition!.line },
+            edits: r.plan.edits.length, files: new Set(r.plan.edits.map((e) => e.file)).size, warnings: r.plan.warnings,
+            ...(r.dryRun
+              ? { previews: (r.previews ?? []).map((p) => ({ file: p.file, stats: p.stats, diff: p.diff.slice(0, 8192) })), files_total: r.filesTotal, preview_truncated: r.previewTruncated ?? false }
+              : { applied: r.applied, failed: r.failed ?? null }),
+          });
+        }
+        if (route === "GET /api/govex/gitstate") {
+          const r = gitMergeState(readWorkspaceOf(ws));
+          return json({ ok: !r.degraded, state: r, ...(r.degraded ? { error: r.degraded } : {}) });
+        }
+        if (route === "POST /api/govex/git-merge") {
+          if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+            return json({ ok: false, error: "dist/demo 是入库快照（只读）。" }, 400);
+          }
+          const body = (await req.json().catch(() => ({}))) as { source?: unknown; message?: unknown; no_ff?: unknown };
+          const source = String(body.source ?? "").trim();
+          if (!source) return json({ ok: false, error: "source 必填" }, 400);
+          const r = gitMerge(path.resolve(ws), { source, ...(body.message ? { message: String(body.message) } : {}), noFf: body.no_ff === true });
+          return json({ ok: r.ok, output: r.output.slice(0, 4096), conflicts: r.conflicts, aborted: r.aborted, kind: r.kind ?? null, error: r.error ?? null });
+        }
+        if (route === "POST /api/govex/git-rebase") {
+          if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+            return json({ ok: false, error: "dist/demo 是入库快照（只读）。" }, 400);
+          }
+          const body = (await req.json().catch(() => ({}))) as { onto?: unknown };
+          const onto = String(body.onto ?? "").trim();
+          if (!onto) return json({ ok: false, error: "onto 必填" }, 400);
+          const r = gitRebase(path.resolve(ws), { onto });
+          return json({ ok: r.ok, output: r.output.slice(0, 4096), conflicts: r.conflicts, aborted: r.aborted, kind: r.kind ?? null, error: r.error ?? null });
         }
         if (route === "GET /api/spawns") {
         // v0.5.11：派生池（agent_spawn 池化重档的观测面）。
@@ -2693,6 +2876,42 @@ function renderIndexHtml(): string {
         font: 10px/1.6 var(--mono); color: var(--muted); }
   .mictx .sp { color: var(--greenb); }
 
+  /* v0.5.16：🧰 工具箱 / 🛡 治理与扩展 面板（v0.5.15 遗漏的 display 规则在此补上——
+     此前面板无 display:none，页面加载即常显；复用 spawnPane 的模态形态） */
+  #toolboxPane, #govexPane { display: none; position: fixed; top: 8vh; left: 50%; transform: translateX(-50%);
+        width: min(820px, 94vw); max-height: 82vh; z-index: 40;
+        background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+        box-shadow: 0 18px 60px rgba(0,0,0,.45); flex-direction: column; }
+  #toolboxPane.on, #govexPane.on { display: flex; }
+  #toolboxScrim, #govexScrim { display: none; position: fixed; inset: 0;
+        background: rgba(0,0,0,.5); z-index: 39; }
+  #toolboxScrim.on, #govexScrim.on { display: block; }
+  #toolboxPane .schhead, #govexPane .schhead { padding: 12px 14px; display: flex; align-items: center;
+        flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--border); }
+  #toolboxPane .schhead .tt, #govexPane .schhead .tt { font: 600 13px/1.4 var(--mono); color: var(--fg); }
+  .tbtabs { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+  .tbtab { padding: 3px 12px; border: 1px solid var(--border); background: transparent;
+        color: var(--muted); font: 11px/1.6 var(--mono); cursor: pointer; border-radius: 4px;
+        transition: border-color .12s, color .12s; }
+  .tbtab:hover { color: var(--fg); border-color: var(--muted); }
+  .tbtab.on { color: var(--greenb); border-color: rgba(16,185,129,.55); background: rgba(16,185,129,.07); }
+  .tbbody { flex: 1; overflow-y: auto; padding: 12px 14px; }
+  .tbsec { margin-bottom: 6px; }
+  .tbbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 4px 0; }
+  .tbbar input[type="text"] { flex: 1 1 160px; min-width: 120px; background: var(--bg); color: var(--fg);
+        border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px;
+        font: 11px var(--mono); outline: none; }
+  .tbbar button { padding: 4px 12px; border: 1px solid var(--border2); background: transparent;
+        color: var(--muted); font: 11px/1.6 var(--mono); cursor: pointer; border-radius: 4px; }
+  .tbbar button:hover { color: var(--fg); border-color: var(--muted); }
+  .tbout { border: 1px solid var(--border); border-radius: 7px; padding: 10px 12px; margin: 4px 0 10px;
+        max-height: 320px; overflow-y: auto; font: 11px/1.7 var(--mono); }
+  .tbmeta { font: 10px/1.7 var(--mono); color: var(--dim); word-break: break-all; }
+  .tbsym { padding: 4px 0; border-bottom: 1px dashed var(--border); word-break: break-all; }
+  .tbsym:last-child { border-bottom: none; }
+  .tbrow { padding: 2px 0; color: var(--muted); word-break: break-all; white-space: pre-wrap; }
+  .tbrow.tbhdr { color: var(--text); }
+
   /* 移动端：侧栏改抽屉（≤720px，issue #13 —— 不再 display:none 直接消失） */
   #backdrop { display: none; position: fixed; inset: 34px 0 0 0;
            background: rgba(0,0,0,.5); z-index: 25; }
@@ -2751,6 +2970,9 @@ function renderIndexHtml(): string {
   </button>
   <button id="toolboxBtn" class="rchip" type="button" title="工具箱（v0.5.15）— 🗄 SQLite 查询 · 🔎 符号跳转 · 🛡 密钥扫描 · 📦 审计导出 · 📋 SBOM · 👥 评审推荐">
     <span class="rc-label">🧰 工具箱</span>
+  </button>
+  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🌿 merge/rebase">
+    <span class="rc-label">🛡 治理与扩展</span>
   </button>
   <span class="tstats" id="topStats"></span>
 </header>
@@ -2885,6 +3107,109 @@ function renderIndexHtml(): string {
 
   <div class="spwfoot">工具箱与 CLI / 工具环同源（lib/db · symbols · scan · audit · sbom · owners 单一实现三端消费）—— 「每个功能都有对应操作页面」的 v0.5.15 落地。</div>
 </div>
+</div>
+<div id="govexScrim" aria-hidden="true"></div>
+<div id="govexPane" role="dialog" aria-modal="true" aria-labelledby="gxTitle">
+  <div class="schhead">
+    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git（v0.5.16）</div>
+    <button class="schclose" type="button" onclick="closeGovex()" title="关闭（Esc）" aria-label="关闭治理与扩展面板">✕</button>
+    <div class="tbtabs" role="tablist">
+      <button class="tbtab on" id="gxTabIac" type="button" role="tab" onclick="gxTab('iac')">🛡 IaC</button>
+      <button class="tbtab" id="gxTabPlug" type="button" role="tab" onclick="gxTab('plug')">🧩 插件</button>
+      <button class="tbtab" id="gxTabRbac" type="button" role="tab" onclick="gxTab('rbac')">🛂 RBAC</button>
+      <button class="tbtab" id="gxTabOapi" type="button" role="tab" onclick="gxTab('oapi')">🔌 OpenAPI</button>
+      <button class="tbtab" id="gxTabWeb" type="button" role="tab" onclick="gxTab('web')">🌐 浏览器</button>
+      <button class="tbtab" id="gxTabDbd" type="button" role="tab" onclick="gxTab('dbd')">🩺 诊断</button>
+      <button class="tbtab" id="gxTabCode" type="button" role="tab" onclick="gxTab('code')">⌨ 补全/重命名</button>
+      <button class="tbtab" id="gxTabGit" type="button" role="tab" onclick="gxTab('git')">🌿 git</button>
+    </div>
+  </div>
+
+  <div class="tbbody">
+    <section class="tbsec" id="gxSecIac">
+      <div class="tbbar">
+        <button type="button" onclick="gxIac()">🛡 扫描工作区（16 条 IaC 规则）</button>
+        <span class="tbmeta" id="gxIacMeta"></span>
+      </div>
+      <div class="tbout" id="gxIacOut"><div class="schempty">Dockerfile / docker-compose / .tf 的静态安全扫描（root 用户 · 特权容器 · docker.sock 挂载 · 0.0.0.0 ingress · 硬编码密钥 · :latest …）；CLI 同款 org iacscan。</div></div>
+    </section>
+
+    <section class="tbsec" id="gxSecPlug" hidden>
+      <div class="tbbar">
+        <input id="gxPlugSrc" type="text" placeholder="安装源（工作区内插件目录 或 git URL）" autocomplete="off" aria-label="插件安装源">
+        <button type="button" onclick="gxPlugInstall()">安装</button>
+        <button type="button" onclick="gxPlugList()">刷新清单</button>
+      </div>
+      <div class="tbout" id="gxPlugOut"><div class="schempty">插件市场（#132）：事务性安装（staging → 校验 → 原子 rename）· 只装不执行（permissions 与 RBAC 命名空间联动，执行面是路线图）。CLI 同款 org plugin list/install/remove。</div></div>
+    </section>
+
+    <section class="tbsec" id="gxSecRbac" hidden>
+      <div class="tbbar">
+        <button type="button" onclick="gxRbac()">查看角色与规则</button>
+        <span class="tbmeta">.org/rbac.json（缺席 = 单机 owner 兜底）</span>
+      </div>
+      <div class="tbout" id="gxRbacOut"><div class="schempty">RBAC 角色权限（#149）：判定次序 = 未知角色拒 → deny 命中拒（优先）→ allow 命中放 → 默认拒。工具环启用：ORG_RBAC_ROLE=&lt;角色&gt; 启动（未设 = 门控完全不启用）；拒绝落审计（rbac_denied 事件 + runtime/rbac.jsonl）。CLI 同款 org rbac list/check。</div></div>
+    </section>
+
+    <section class="tbsec" id="gxSecOapi" hidden>
+      <div class="tbbar">
+        <input id="gxOapiFile" type="text" placeholder="spec 文件（工作区相对路径，JSON）" autocomplete="off" aria-label="OpenAPI 文件">
+        <button type="button" onclick="gxOapi(false)">解析文件</button>
+      </div>
+      <div class="tbbar">
+        <input id="gxOapiText" type="text" placeholder="或粘贴 OpenAPI/Swagger JSON（3.x / 2.0）" autocomplete="off" aria-label="OpenAPI 文本">
+        <button type="button" onclick="gxOapi(true)">解析文本</button>
+      </div>
+      <div class="tbout" id="gxOapiOut"><div class="schempty">OpenAPI 解析（#134）：操作清单（method/path/参数/security）+ suggestToolName 工具命名建议；YAML 请先转 JSON（错误信息附指引）。CLI 同款 org openapi。</div></div>
+    </section>
+
+    <section class="tbsec" id="gxSecWeb" hidden>
+      <div class="tbbar">
+        <input id="gxWebUrl" type="text" placeholder="页面 URL（http/https）" autocomplete="off" aria-label="页面 URL">
+        <button type="button" onclick="gxWebSnapshot()">🌐 快照</button>
+        <button type="button" onclick="gxWebScreenshot()">📸 截图</button>
+      </div>
+      <div class="tbout" id="gxWebOut"><div class="schempty">浏览器入口（#116/#30）：多引擎降级链 agent-browser → chromium → chrome；快照 = 标题/正文/链接/图片清单，截图 = PNG 落工作区；console/网络面板是路线图（诚实边界）。CLI 同款 org browser snapshot/screenshot。</div></div>
+    </section>
+
+    <section class="tbsec" id="gxSecDbd" hidden>
+      <div class="tbbar">
+        <input id="gxDbdFile" type="text" placeholder="SQLite 文件（工作区相对）或 :memory:" autocomplete="off" aria-label="数据库文件">
+        <input id="gxDbdSql" type="text" placeholder="SELECT …（单条语句）" autocomplete="off" aria-label="待诊断 SQL">
+        <button type="button" onclick="gxDbdiag()">🩺 诊断</button>
+      </div>
+      <div class="tbout" id="gxDbdOut"><div class="schempty">查询诊断（#113）：EXPLAIN QUERY PLAN → 计划解析（索引命中 🔑 / 全表扫描 ⚠ / 涉及表）+ 调优建议。:memory: 瞬态通道不碰盘。CLI 同款 org dbdiag。</div></div>
+    </section>
+
+    <section class="tbsec" id="gxSecCode" hidden>
+      <div class="tbbar">
+        <input id="gxCplFile" type="text" placeholder="文件（工作区相对，.hsl/.ts/.py）" autocomplete="off" aria-label="补全文件">
+        <input id="gxCplLine" type="text" placeholder="行号（1 基）" autocomplete="off" aria-label="行号" style="max-width:90px">
+        <input id="gxCplCol" type="text" placeholder="列（1 基）" autocomplete="off" aria-label="列" style="max-width:80px">
+        <button type="button" onclick="gxComplete()">⌨ 补全</button>
+      </div>
+      <div class="tbout" id="gxCplOut" style="margin-bottom:10px"><div class="schempty">代码补全（#32）：三级候选（同文件符号 &gt; 项目符号 &gt; 语言关键字）；空候选附原因（成员补全是 LSP 路线图）。CLI 同款 org complete。</div></div>
+      <div class="tbbar">
+        <input id="gxRnOld" type="text" placeholder="旧符号名" autocomplete="off" aria-label="旧名">
+        <input id="gxRnNew" type="text" placeholder="新名" autocomplete="off" aria-label="新名">
+        <label class="tbmeta" style="display:flex;align-items:center;gap:4px"><input id="gxRnApply" type="checkbox"> 真写</label>
+        <button type="button" onclick="gxRename()">✏️ 重命名</button>
+      </div>
+      <div class="tbout" id="gxRnOut"><div class="schempty">项目级重命名（#56）：缺省 dryRun 预览（unified diff ≤5 文件）；勾选「真写」后落盘（行级词边界替换，失败即停）。CLI 同款 org rename [--apply]。</div></div>
+    </section>
+
+    <section class="tbsec" id="gxSecGit" hidden>
+      <div class="tbbar">
+        <button type="button" onclick="gxGitState()">🌿 状态探测</button>
+        <input id="gxGitSrc" type="text" placeholder="merge 源分支 / rebase 目标分支" autocomplete="off" aria-label="git 分支">
+        <button type="button" onclick="gxGitMerge()">merge</button>
+        <button type="button" onclick="gxGitRebase()">rebase</button>
+      </div>
+      <div class="tbout" id="gxGitOut"><div class="schempty">merge / rebase 安全操作（#80）：冲突绝不自动解决 —— 冲突即自动 abort 回滚 + 冲突清单。CLI 同款 org merge / org rebase / org mergestate。</div></div>
+    </section>
+  </div>
+
+  <div class="spwfoot">治理与扩展面板与 CLI / 工具环同源（lib/dbdiag · gitmerge · rbac · iacscan · plugins · openapi · browser · completion · rename 单一实现三端消费）—— v0.5.16 「每个功能都有对应操作页面」的延续。</div>
 </div>
 <div id="voiceScrim" aria-hidden="true"></div>
 <div id="voicePane" role="dialog" aria-modal="true" aria-labelledby="voTitle">
@@ -4522,6 +4847,218 @@ function tbOwners() {
 document.getElementById("toolboxBtn").onclick = openToolbox;
 document.getElementById("toolboxScrim").onclick = closeToolbox;
 
+// ---- 🛡 治理与扩展面板（v0.5.16：IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git） ----
+function openGovex() {
+  document.getElementById("govexPane").classList.add("on");
+  document.getElementById("govexScrim").classList.add("on");
+}
+function closeGovex() {
+  document.getElementById("govexPane").classList.remove("on");
+  document.getElementById("govexScrim").classList.remove("on");
+}
+var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Git", "git"]];
+function gxTab(sec) {
+  for (const [k, id] of GX_TABS) {
+    document.getElementById("gxTab" + k).classList.toggle("on", id === sec);
+    document.getElementById("gxSec" + k).hidden = (id !== sec);
+  }
+}
+function gxPost(u, body) {
+  return fetch(u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) }).then(function (r) { return r.json(); });
+}
+function gxIac() {
+  const out = document.getElementById("gxIacOut"), meta = document.getElementById("gxIacMeta");
+  out.innerHTML = '<div class="schempty">扫描中…</div>';
+  fetch("/api/govex/iacscan").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    meta.textContent = j.scanned + "/" + j.files + " 候选文件 · " + j.hits.length + " 命中 · " + j.took_ms + "ms · " + j.rules + " 条规则" + (j.truncated ? "（截断）" : "");
+    if (!(j.hits || []).length) { out.innerHTML = '<div class="schempty">✓ 未发现 IaC 风险模式</div>'; return; }
+    let h = "";
+    for (const hit of j.hits.slice(0, 100)) h += '<div class="tbsym"><b class="' + (hit.severity === "high" ? "spwc" : "") + '">[' + esc(hit.severity.toUpperCase()) + "]</b> " + esc(hit.ruleId) + " · <code>" + esc(hit.file) + ":" + hit.line + '</code><br><span class="tbmeta">' + esc(hit.message) + " 💡 " + esc(hit.hint) + "</span></div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxPlugRender(j) {
+  let h = '<div class="tbmeta">' + esc(j.dir) + " · " + (j.plugins || []).length + " 个插件 · 只装不执行（permissions 与 RBAC 联动）</div>";
+  if (!(j.plugins || []).length) { h += '<div class="schempty">（空 —— 上方输入源安装）</div>'; }
+  for (const p of j.plugins || []) {
+    const m = p.manifest;
+    h += '<div class="tbsym">' + (p.valid ? "✓" : "✗") + " <b>" + esc(m ? m.name : p.path) + "</b>" + (m ? "@" + esc(m.version) + " · " + esc(m.description || "") : "（manifest 不可解析）") +
+      (m && (m.permissions || []).length ? ' · <span class="tbmeta">权限 ' + esc((m.permissions || []).join(" ")) + "</span>" : "") +
+      ' <button type="button" onclick="gxPlugRemove(\\'' + esc(m ? m.name : p.path) + '\\')">移除</button>' +
+      ((p.problems || []).length ? '<br><span class="tbmeta">问题：' + esc((p.problems || []).join("；")) + "</span>" : "") + "</div>";
+  }
+  document.getElementById("gxPlugOut").innerHTML = h;
+}
+function gxPlugList() {
+  document.getElementById("gxPlugOut").innerHTML = '<div class="schempty">加载中…</div>';
+  fetch("/api/govex/plugins").then(function (r) { return r.json(); }).then(gxPlugRender).catch(function () { document.getElementById("gxPlugOut").innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxPlugInstall() {
+  const source = document.getElementById("gxPlugSrc").value.trim();
+  const out = document.getElementById("gxPlugOut");
+  if (!source) { out.innerHTML = '<div class="schempty">先输入安装源（工作区内目录或 git URL）</div>'; return; }
+  out.innerHTML = '<div class="schempty">安装中…（git 源最多 60s）</div>';
+  gxPost("/api/govex/plugin-install", { source: source }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(j.error) + "</div>"; return; }
+    out.innerHTML = '<div class="tbsym">✓ 已安装 ' + esc(j.name) + "@" + esc(j.version) + "</div>" + ((j.warnings || []).length ? '<div class="tbrow">⚠ ' + esc((j.warnings || []).join("；")) + "</div>" : "");
+    gxPlugList();
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxPlugRemove(name) {
+  gxPost("/api/govex/plugin-remove", { name: name }).then(function (j) {
+    if (!j.ok) { document.getElementById("gxPlugOut").innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(j.error) + "</div>"; return; }
+    gxPlugList();
+  }).catch(function () { document.getElementById("gxPlugOut").innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxRbac() {
+  const out = document.getElementById("gxRbacOut");
+  out.innerHTML = '<div class="schempty">加载中…</div>';
+  fetch("/api/govex/rbac").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    let h = '<div class="tbmeta">' + (j.policy_file ? "策略：" + esc(j.policy_file) : "内建兜底（" + esc(j.fallback_reason || "") + "）") + "</div>";
+    for (const r of j.roles || []) {
+      h += '<div class="tbsym"><b>' + esc(r.role) + "</b> · allow: " + esc((r.allow || []).join(" ") || "（空 → 默认全拒）") + " · deny: " + esc((r.deny || []).join(" ") || "（无）") + "</div>";
+    }
+    h += '<div class="tbrow">判定次序：未知角色拒 → deny 命中拒（优先）→ allow 命中放 → 默认拒</div>';
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxOapi(useText) {
+  const out = document.getElementById("gxOapiOut");
+  const body = useText ? { text: document.getElementById("gxOapiText").value } : { file: document.getElementById("gxOapiFile").value.trim() };
+  if (useText && !body.text) { out.innerHTML = '<div class="schempty">先粘贴 spec JSON</div>'; return; }
+  if (!useText && !body.file) { out.innerHTML = '<div class="schempty">先输入 spec 文件路径</div>'; return; }
+  out.innerHTML = '<div class="schempty">解析中…</div>';
+  gxPost("/api/govex/openapi", body).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(j.error) + "</div>"; return; }
+    let h = '<div class="tbsym">🔌 ' + esc(j.info.title) + " v" + esc(j.info.version) + "（OpenAPI " + esc(j.version) + " · " + (j.operations || []).length + " 操作 · " + j.schemas + " schema）</div>";
+    if ((j.servers || []).length) h += '<div class="tbmeta">servers：' + esc(j.servers.join(" · ")) + "</div>";
+    for (const op of j.operations || []) {
+      h += '<div class="tbrow"><b>' + esc(op.method) + "</b> " + esc(op.path) + " · " + esc(op.operationId) + (op.security ? " 🔒" : "") + " → 工具名 " + esc(op.tool_name) + (op.summary ? ' <span class="tbmeta">' + esc(op.summary.slice(0, 80)) + "</span>" : "") + "</div>";
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxWebSnapshot() {
+  const url = document.getElementById("gxWebUrl").value.trim();
+  const out = document.getElementById("gxWebOut");
+  if (!url) { out.innerHTML = '<div class="schempty">先输入 URL（http/https）</div>'; return; }
+  out.innerHTML = '<div class="schempty">快照中…（引擎链 agent-browser → chromium → chrome，最多 30s）</div>';
+  gxPost("/api/govex/browser-snapshot", { url: url }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(j.error) + (j.hint ? '<br><span class="tbmeta">' + esc(j.hint) + "</span>" : "") + "</div>"; return; }
+    let h = '<div class="tbsym">🌐 ' + esc(j.url) + (j.final_url && j.final_url !== j.url ? " → " + esc(j.final_url) : "") + " · 引擎 " + esc(j.engine) + " · " + j.ms + "ms" + (j.title ? " · " + esc(j.title) : "") + "</div>";
+    h += '<div class="tbrow">' + esc(String(j.text || "").slice(0, 4000)) + "</div>";
+    if ((j.links || []).length) {
+      h += '<div class="tbmeta" style="margin-top:6px">链接（' + j.links.length + "）：</div>";
+      for (const l of j.links.slice(0, 20)) h += '<div class="tbrow">· ' + esc(String(l.text || "").slice(0, 40)) + " → " + esc(l.href) + "</div>";
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxWebScreenshot() {
+  const url = document.getElementById("gxWebUrl").value.trim();
+  const out = document.getElementById("gxWebOut");
+  if (!url) { out.innerHTML = '<div class="schempty">先输入 URL（http/https）</div>'; return; }
+  out.innerHTML = '<div class="schempty">截图中…（PNG 落工作区，最多 30s）</div>';
+  gxPost("/api/govex/browser-screenshot", { url: url }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(j.error) + (j.hint ? '<br><span class="tbmeta">' + esc(j.hint) + "</span>" : "") + "</div>"; return; }
+    out.innerHTML = '<div class="tbsym">📸 ' + esc(j.url) + " → " + esc(j.path) + "（工作区内 · 引擎 " + esc(j.engine) + " · " + j.ms + "ms）</div>";
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxDbdiag() {
+  const file = document.getElementById("gxDbdFile").value.trim();
+  const sql = document.getElementById("gxDbdSql").value.trim();
+  const out = document.getElementById("gxDbdOut");
+  if (!file || !sql) { out.innerHTML = '<div class="schempty">file 与 SQL 都要填</div>'; return; }
+  out.innerHTML = '<div class="schempty">诊断中…</div>';
+  gxPost("/api/govex/dbdiag", { file: file, sql: sql }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(j.error) + "</div>"; return; }
+    let h = '<div class="tbmeta">' + j.ms + "ms · " + (j.plan.steps || []).length + " 步骤 · " + (j.plan.fullScan ? "⚠ 含全表扫描" : "无全表扫描") + " · 涉及表 " + esc((j.plan.tables || []).join(" · ") || "（无）") + "</div>";
+    for (const s of j.plan.steps || []) h += '<div class="tbrow">' + (s.usesIndex ? "🔑 " : "· ") + esc(s.detail) + "</div>";
+    if ((j.suggestions || []).length) {
+      h += '<div class="tbmeta" style="margin-top:6px">建议：</div>';
+      for (const s of j.suggestions) h += '<div class="tbrow">- ' + esc(s) + "</div>";
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxComplete() {
+  const file = document.getElementById("gxCplFile").value.trim();
+  const line = document.getElementById("gxCplLine").value.trim() || "1";
+  const col = document.getElementById("gxCplCol").value.trim() || "1";
+  const out = document.getElementById("gxCplOut");
+  if (!file) { out.innerHTML = '<div class="schempty">先输入文件路径</div>'; return; }
+  out.innerHTML = '<div class="schempty">补全中…</div>';
+  gxPost("/api/govex/complete", { file: file, line: Number(line), column: Number(col) }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    let h = '<div class="tbmeta">' + esc(j.language) + (j.prefix ? ' · 前缀 "' + esc(j.prefix) + '"' : "") + " · 行内容：" + esc(j.line_text || "") + "</div>";
+    if (!(j.candidates || []).length) { h += '<div class="schempty">无候选 —— ' + esc(j.reason || "前缀无命中") + "</div>"; }
+    for (const c of j.candidates || []) h += '<div class="tbrow">' + String(c.score).padStart(4) + " " + esc(c.kind) + " <b>" + esc(c.label) + "</b> · " + esc(c.source) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxRename() {
+  const oldName = document.getElementById("gxRnOld").value.trim();
+  const newName = document.getElementById("gxRnNew").value.trim();
+  const apply = document.getElementById("gxRnApply").checked;
+  const out = document.getElementById("gxRnOut");
+  if (!oldName || !newName) { out.innerHTML = '<div class="schempty">旧名与新名都要填</div>'; return; }
+  out.innerHTML = '<div class="schempty">' + (apply ? "真写中…（失败即停）" : "预览中…") + "</div>";
+  gxPost("/api/govex/rename", { old: oldName, new: newName, apply: apply }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ 不可执行：' + esc(j.reason || "?") + ((j.warnings || []).length ? '<br><span class="tbmeta">' + esc((j.warnings || []).join("；")) + "</span>" : "") + "</div>"; return; }
+    let h = '<div class="tbsym">' + (j.dry_run ? "🔍 dryRun 预览" : "✓ 已应用") + "：" + esc(j.definition.kind) + " " + esc(oldName) + " → " + esc(newName) + "（" + j.edits + " 处编辑 · " + j.files + " 文件）</div>";
+    for (const w of j.warnings || []) h += '<div class="tbrow">⚠ ' + esc(w) + "</div>";
+    if (j.dry_run) {
+      for (const p of j.previews || []) {
+        h += '<div class="tbmeta" style="margin-top:6px">--- ' + esc(p.file) + "（" + esc(p.stats) + "）</div>";
+        for (const l of String(p.diff || "").split("\\n").slice(2, 26)) h += '<div class="tbrow">' + esc(l) + "</div>";
+      }
+      if (j.preview_truncated) h += '<div class="tbmeta">…（预览帽 5 文件，共 ' + j.files_total + " 文件）</div>";
+    } else {
+      for (const f of j.applied || []) h += '<div class="tbrow">✓ ' + esc(f.file) + "（" + f.lines + " 行 · " + f.occurrences + " 处）</div>";
+      if (j.failed) h += '<div class="tbrow">✗ 止步于 ' + esc(j.failed.file) + "：" + esc(j.failed.error) + "</div>";
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxGitState() {
+  const out = document.getElementById("gxGitOut");
+  out.innerHTML = '<div class="schempty">探测中…</div>';
+  fetch("/api/govex/gitstate").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error || "?") + "</div>"; return; }
+    const s = j.state;
+    out.innerHTML = '<div class="tbsym">🌿 ' + esc(s.branch || "（detached HEAD）") + (s.upstream ? " → " + esc(s.upstream) + "（ahead " + s.ahead + " · behind " + s.behind + (s.diverged ? " · ⚠ 分叉" : "") + "）" : "（无上游）") + '</div><div class="tbrow">工作区 ' + (s.dirty ? "⚠ 有未提交改动" : "干净") + " · stash " + s.stashed + " 条</div>";
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxGitMerge() {
+  const source = document.getElementById("gxGitSrc").value.trim();
+  const out = document.getElementById("gxGitOut");
+  if (!source) { out.innerHTML = '<div class="schempty">先输入源分支</div>'; return; }
+  out.innerHTML = '<div class="schempty">merge 中…（冲突即自动 abort）</div>';
+  gxPost("/api/govex/git-merge", { source: source }).then(function (j) {
+    let h = j.ok ? '<div class="tbsym">✓ merge 完成</div>' : '<div class="tbsym">✗ merge 未完成（' + esc(j.kind || "?") + "）：" + esc(j.error || "") + "</div>";
+    h += '<div class="tbrow">' + esc(String(j.output || "").trim().split("\\n")[0] || "") + "</div>";
+    for (const c of j.conflicts || []) h += '<div class="tbrow">冲突：' + esc(c) + "</div>";
+    if (!j.ok && j.kind === "conflict" && !j.aborted) h += '<div class="tbrow">⚠ abort 未成功：工作区仍处冲突态，需人工处理</div>';
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxGitRebase() {
+  const onto = document.getElementById("gxGitSrc").value.trim();
+  const out = document.getElementById("gxGitOut");
+  if (!onto) { out.innerHTML = '<div class="schempty">先输入变基目标分支</div>'; return; }
+  out.innerHTML = '<div class="schempty">rebase 中…（冲突即自动 abort）</div>';
+  gxPost("/api/govex/git-rebase", { onto: onto }).then(function (j) {
+    let h = j.ok ? '<div class="tbsym">✓ rebase 完成</div>' : '<div class="tbsym">✗ rebase 未完成（' + esc(j.kind || "?") + "）：" + esc(j.error || "") + "</div>";
+    h += '<div class="tbrow">' + esc(String(j.output || "").trim().split("\\n")[0] || "") + "</div>";
+    for (const c of j.conflicts || []) h += '<div class="tbrow">冲突：' + esc(c) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+document.getElementById("govexBtn").onclick = openGovex;
+document.getElementById("govexScrim").onclick = closeGovex;
+
 
 // ---- 语音入口（v0.5.12：🎤 录音转写 ASR + 🔊 朗读 TTS + 🎙 设置面板） ----
 var VOICE_META = ${JSON.stringify(VOICES)}; // 服务端注入声音清单（单一来源）
@@ -4884,6 +5421,7 @@ document.addEventListener("keydown", function (ev) {
     { pane: "spawnPane", close: closeSpawns },
     { pane: "voicePane", close: closeVoice },
     { pane: "toolboxPane", close: closeToolbox },
+    { pane: "govexPane", close: closeGovex },
     { pane: "tasksPane", close: closeTasks },
     { pane: "schedPane", close: closeSched },
     { pane: "notifyPane", close: closeNotify },
