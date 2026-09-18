@@ -17,18 +17,20 @@
 // 端到端用例逐例 120s 超时（B-15 纪律）。
 // ============================================================================
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { TEST_RUN, runDhv, eventsOf } from "./helpers";
 import { pdfEngines } from "../lib/pdfread.ts";
 import { Database } from "bun:sqlite";
 
-const WS = path.join(TEST_RUN, "tools2-ws");
+const WS_ROOT = path.join(TEST_RUN, "tools2-ws");
+let WS = ""; // beforeEach 注入唯一子目录（v0.5.15：跨用例零删除 —— bun:sqlite 的 Windows 句柄释放滞后于 close()，删除必 EBUSY）
+let wsSeq = 0;
 const DIRECT = path.join(process.cwd(), "hsl/pool/direct.hsl");
 
 beforeEach(() => {
-  fs.rmSync(WS, { recursive: true, force: true });
+  WS = path.join(WS_ROOT, `t${String(++wsSeq).padStart(3, "0")}`);
   fs.cpSync(path.join(process.cwd(), "demo-ws"), WS, { recursive: true });
   // 预置长期放行集（file_write）—— 审批文件协议的 always 语义，
   // request_approval 命中 granted.json 缓存直接放行（不打扰测试流程）
@@ -37,13 +39,9 @@ beforeEach(() => {
     JSON.stringify({ capabilities: ["file_write"] }));
 });
 
-afterEach(() => {
-  // Windows 句柄瞬态锁对策（bun:sqlite close 后延迟释放，EBUSY 实录）
-  for (let i = 0; i < 5; i++) {
-    try { fs.rmSync(WS, { recursive: true, force: true }); return; }
-    catch { Bun.sleepSync(200); }
-  }
-  fs.rmSync(WS, { recursive: true, force: true });
+afterAll(() => {
+  // best-effort：Windows 句柄滞后不炸（CI 临时环境；唯一子目录已自然隔离）
+  try { fs.rmSync(WS_ROOT, { recursive: true, force: true }); } catch { /* 句柄滞后 */ }
 });
 
 function makeOut(name: string): string {

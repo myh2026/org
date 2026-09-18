@@ -18,7 +18,7 @@
 //                dryRun 事务回滚 / 坏 SQL 整体回滚 + 参数校验 / 双向冲突
 //                conflict 附诊断 / :memory: 瞬态迁移不落伴车
 // ============================================================================
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -32,27 +32,15 @@ import {
   dbApplyMigration,
 } from "../lib/db.ts";
 
-const SCRATCH = path.join(TEST_RUN, "db");
+const SCRATCH_ROOT = path.join(TEST_RUN, "db");
+let SCRATCH = ""; // beforeEach 注入唯一子目录（v0.5.15：跨用例零删除 —— bun:sqlite 的 Windows 句柄释放滞后于 close()，删除必 EBUSY）
+let scratchSeq = 0;
 
 // ---- 测试基建 ----------------------------------------------------------------
 
-/** Windows 句柄瞬态锁对策：bun:sqlite close() 后句柄释放有延迟（实测 EBUSY），
- * 重试 5×200ms 兜住；仍失败则让用例自然失败（暴露真锁而不是静默跳过）。 */
-function rmScratch(): void {
-  for (let i = 0; i < 5; i++) {
-    try { fs.rmSync(SCRATCH, { recursive: true, force: true }); return; }
-    catch { Bun.sleepSync(200); }
-  }
-  fs.rmSync(SCRATCH, { recursive: true, force: true });
-}
-
 beforeEach(() => {
-  rmScratch();
+  SCRATCH = path.join(SCRATCH_ROOT, `t${String(++scratchSeq).padStart(3, "0")}`);
   fs.mkdirSync(SCRATCH, { recursive: true });
-});
-
-afterEach(() => {
-  fs.rmSync(SCRATCH, { recursive: true, force: true });
 });
 
 /** 建一个真实 .db 文件（测试用 bun:sqlite 直种数据 —— 读写通道不经过被测门）。 */
@@ -481,4 +469,9 @@ describe("migrate 通道：dbApplyMigration / dbMigrations", () => {
 
     fs.rmSync(memSidecar, { force: true }); // 清理
   }, 30_000);
+});
+
+afterAll(() => {
+  // best-effort：Windows 下 bun:sqlite 句柄可能滞后到进程退出，删除失败不炸
+  try { fs.rmSync(SCRATCH_ROOT, { recursive: true, force: true }); } catch { /* 句柄滞后 */ }
 });
