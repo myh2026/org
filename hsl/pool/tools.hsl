@@ -105,6 +105,20 @@
 //                                    user 缺省取当前协作者身份）
 //   collab_comment {thread, seq, text, user?} 评论指定楼层（replyTo 树）
 //
+// v0.5.18 新增（移动端调试簇 · 3 工具，native 块 await import(root+
+// "/lib/mobile.ts") 与 lib 同源 —— 行为等价由构造保证；#117 移动端调试。
+// 多重优雅降级：adb 缺席→无设备→未授权三层；logcat -d dump 五元组；
+// plan 纯函数保底（零外部依赖永远可用）。执行面全只读 —— install/uninstall
+// 只出现在计划器的可粘贴命令里，不在任何工具执行面）：
+//   只读（ReadOnly 模式可用）：
+//   mobile_devices {}                 adb devices -l 解析（多设备/未授权/
+//                                    offline 诚实入列）+ iOS 面 idevice 探测
+//   mobile_logcat  {lines?, tag?, level?, serial?, package?}
+//                                    logcat dump 快照（-d 非尾随 · 行数铺
+//                                    1..2000 · tag/级别/包名三重过滤）
+//   mobile_plan    {platform, symptom} 调试计划（纯函数保底：android/ios/both ×
+//                                    crash/白屏/network/性能/构建/安装/webview
+//                                    症状矩阵 → 每步 命令+预期+降级指引）
 // v0.5.18 新增（IaC 深度簇 · 4 工具，native 块 await import(root+"/lib/iac.ts")
 // 与 lib 同源 —— 行为等价由构造保证；#44，与 #147 iac_scan 扫描面互补的
 // 解析/规划/生成面。全部只读（不写盘 —— generate 只返回文本）：
@@ -189,6 +203,10 @@ export fn tools_prompt(mode: ToolMode) -> String {
     out.push_str("- cloud_probe {} — one-shot cloud ecosystem probe (docker CLI+daemon / ssh / kubectl+cluster / terraform / 10 cloud CLIs). Absence is an honest degrade with install hints + template-lane pointers, never a silent failure.\n");
     out.push_str("- cloud_dockerfile {\"project_type\":\"node\"|\"bun\"|\"python\"|\"rust\"} — production-grade multi-stage Dockerfile template (non-root USER + HEALTHCHECK + pinned tags). The degrade-lane deliverable when docker itself is absent.\n");
     out.push_str("- cloud_clis {} — probe the 10-CLI cloud registry (aws/gcloud/az/gh/vercel/flyctl/railway/heroku/doctl/oci): availability + version + install hint each.\n");
+    // v0.5.18 移动端调试簇（#117 —— 只读三件：设备清单/logcat dump/计划，零审批门槛）
+    out.push_str("- mobile_devices {} — Android device list via adb devices -l (multi-device / unauthorized / offline honestly listed with per-state guidance; usb:1-1 transport + model/product/device fields) plus the iOS face (idevice_id UDID probe, honest degrade when absent). adb absent = honest tool-absent with install hints, never a failure.\n");
+    out.push_str("- mobile_logcat {\"lines\":200,\"tag\":\"chromium\",\"level\":\"E\"?,\"serial\":\"emulator-5554\"?,\"package\":\"com.example.app\"?} — logcat dump snapshot (adb logcat -d -t N, NOT a live tail): five-tuple structured entries (time/pid/level/tag/message), lines clamped 1..2000, tag (-s TAG) / level (*:E floor) / package (pidof→pid filter) lanes. No adb/no device/unauthorized = honest degrade with guidance.\n");
+    out.push_str("- mobile_plan {\"platform\":\"android\"|\"ios\"|\"both\",\"symptom\":\"crash\"} — mobile debug plan (pure function, zero external deps, ALWAYS available): platform × symptom matrix (crash/white-screen/network/performance/build/install/webview, CJK keywords tolerated) → ordered steps, each with a pasteable cmd + expected observation + degrade hint. install/uninstall commands live ONLY here as pasteable text, never in any execution lane.\n");
     // v0.5.18 IaC 深度簇（#44 —— 只读四件，与 iac_scan 扫描面互补的解析/规划/生成面）
     out.push_str("- iac_parse {\"file\":\"infra/main.tf\"} — parse a Terraform/HCL file into an AST (blocks/labels/attrs incl. nested; built-in HCL-subset parser, honest line-numbered errors). Complements iac_scan (pattern scan) with structural understanding.\n");
     out.push_str("- iac_plan {\"file\":\"infra/main.tf\"} — a human-readable plan (\"Plan: to create N resources\" style + per-resource summary + dependency order). Honest notes on differences vs a real terraform plan (no state → always create; no provider schema; count/for_each not expanded).\n");
@@ -341,7 +359,10 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
     // 只读通道 + 词法门）/rbac_check/iac_scan/openapi_parse/plugin_list（纯查询）/
     // browser_snapshot（导航只读）/complete_at（纯索引查询）；v0.5.17 新增
     // collab_threads/collab_feed/collab_summary（协作线程纯查询）+ cloud_probe/
-    // cloud_dockerfile/cloud_clis（云生态探测/模板/注册表 —— 纯读零副作用）。
+    // cloud_dockerfile/cloud_clis（云生态探测/模板/注册表 —— 纯读零副作用）+
+    // v0.5.18 新增 mobile_devices/mobile_logcat/mobile_plan（移动端调试簇 ——
+    // adb 探测/logcat -d dump 快照/计划纯函数，全只读零写副作用；工具缺席在
+    // lib/mobile.ts 内部诚实降级，不触碰任何门）。
     if name != String::from("fs_read") && name != String::from("fs_list") && name != String::from("fs_glob")
         && name != String::from("semantic_search")
         && name != String::from("agent_spawn") && name != String::from("audio_compose")
@@ -359,6 +380,8 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         && name != String::from("debug_breakpoints") && name != String::from("debug_plan")
         && name != String::from("cloud_probe") && name != String::from("cloud_dockerfile")
         && name != String::from("cloud_clis")
+        && name != String::from("mobile_devices") && name != String::from("mobile_logcat")
+        && name != String::from("mobile_plan")
         // v0.5.18：IaC 深度簇四件全只读（解析/图/计划纯内存；generate 只返回
         // 文本不写盘 —— 采纳落盘由用户/上层显式做）
         && name != String::from("iac_parse") && name != String::from("iac_plan")
@@ -428,12 +451,16 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "cloud_docker" => tool_cloud_docker(args.clone()),
         "cloud_ssh" => tool_cloud_ssh(args.clone()),
         "cloud_k8s" => tool_cloud_k8s(args.clone()),
+        // v0.5.18 移动端调试簇（native 块动态 import lib/mobile.ts —— 与 CLI/Web 同源）
+        "mobile_devices" => tool_mobile_devices(args.clone()),
+        "mobile_logcat" => tool_mobile_logcat(args.clone()),
+        "mobile_plan" => tool_mobile_plan(args.clone()),
         // v0.5.18 IaC 深度簇（native 块动态 import lib/iac.ts —— 与 CLI/Web 同源）
         "iac_parse" => tool_iac_parse(args.clone()).await,
         "iac_plan" => tool_iac_plan(args.clone()).await,
         "iac_graph" => tool_iac_graph(args.clone()).await,
         "iac_generate" => tool_iac_generate(args.clone()).await,
-        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/iac_parse/iac_plan/iac_graph/iac_generate/shell_run/agent_spawn/audio_compose/audit_export/review_suggest）", name)),
+        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/iac_parse/iac_plan/iac_graph/iac_generate/mobile_devices/mobile_logcat/mobile_plan/shell_run/agent_spawn/audio_compose/audit_export/review_suggest）", name)),
     };
     emit_tool(String::from("tool_result"), result_summary(result.clone()));
     result
@@ -1733,14 +1760,93 @@ fn tool_cloud_k8s(args: String) -> String {
     }
 }
 
+
+// ---- v0.5.18 移动端调试簇：3 工具（capabilities #117） ----------------------------
+
+fn tool_mobile_devices(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "mobile_devices", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const mobile = await import(root + "/lib/mobile.ts");
+            const r = mobile.mobileDevices();
+            return JSON.stringify({
+                tool: "mobile_devices", ok: r.ok, ...(r.kind ? { kind: r.kind } : {}),
+                ...(r.reason ? { reason: r.reason } : {}),
+                argv: r.argv,
+                devices: r.devices, ready: r.ready,
+                ios: r.ios,
+                took_ms: r.tookMs,
+                hint: "工具缺席/无设备不是失败 —— org mobile plan（纯函数保底）永远可用；unauthorized/offline 是设备清单的诚实状态",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "mobile_devices", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_mobile_logcat(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "mobile_logcat", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const mobile = await import(root + "/lib/mobile.ts");
+            const lines = Math.floor(Number(a.lines));
+            const r = mobile.mobileLogcat({
+                ...(a.serial ? { serial: String(a.serial) } : {}),
+                ...(Number.isFinite(lines) && lines > 0 ? { lines } : {}),
+                ...(a.tag ? { tag: String(a.tag) } : {}),
+                ...(a.level ? { level: String(a.level) } : {}),
+                ...(a.package ? { package: String(a.package) } : {}),
+            });
+            // 载荷保护：消息体截 200 字/条 · 总条数截 200（观测面足够 + 回灌不爆）
+            return JSON.stringify({
+                tool: "mobile_logcat", ok: r.ok, ...(r.kind ? { kind: r.kind } : {}),
+                ...(r.reason ? { reason: r.reason } : {}),
+                argv: r.argv,
+                entries: r.entries.slice(0, 200).map((e) => ({ time: e.time, pid: e.pid, tid: e.tid, level: e.level, tag: e.tag, message: String(e.message).slice(0, 200) })),
+                count: r.entries.length, skipped: r.skipped, truncated: r.truncated,
+                took_ms: r.tookMs,
+                hint: "-d 是一次性 dump（真·流式尾随是路线图）；复现一次目标操作后再抓最完整",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "mobile_logcat", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_mobile_plan(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const platform = String(a.platform || "android");
+            const symptom = String(a.symptom || a.issue || "crash");
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "mobile_plan", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const mobile = await import(root + "/lib/mobile.ts");
+            if (!(mobile.MOBILE_PLAN_PLATFORMS || []).includes(platform)) {
+                return JSON.stringify({ tool: "mobile_plan", ok: false, error: "args.platform 须为 " + mobile.MOBILE_PLAN_PLATFORMS.join("/") + "（症状关键词中英宽容：crash/白屏/network/卡顿/构建/装不上/webview…）" });
+            }
+            const p = mobile.mobileDebugPlan(platform, symptom);
+            return JSON.stringify({
+                tool: "mobile_plan", ok: true,
+                platform: p.platform, symptom: p.symptom,
+                steps: p.steps, note: p.note,
+                hint: "纯函数保底车道（零外部依赖永远可用）；真实执行面走 mobile_devices/mobile_logcat 与 CLI org mobile logcat/forward/apk（全只读）",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "mobile_plan", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
 // ---- v0.5.18 IaC 深度簇：4 工具（capabilities #44） ------------------------------
 // lib/iac.ts 同源（native 块动态 import）。与 iac_scan（#147 危险模式扫描）
 // 互补：解析 → 依赖图 → 计划 → manifest 逆向生成。全部只读（file 形入参过
 // pathjail 与 complete_at/lsp_definition 同规；generate 只返回文本不写盘 ——
 // 内置 HCL 子集解析器是恒在主车道，外部 terraform/tofu 车道缺席时诚实降级）。
 
-/// v0.5.18 .tf → AST 摘要（#44）：lib/iac.ts iacParseFile 同源。
-/// 块清单（类型 + label + 属性名，嵌套缩进）+ 语法错误行号级诚实上报。
 async fn tool_iac_parse(args: String) -> String {
     native typescript {
         try {
@@ -1777,8 +1883,6 @@ async fn tool_iac_parse(args: String) -> String {
     }
 }
 
-/// v0.5.18 人读 Plan（#44）：lib/iac.ts iacPlan 同源 —— "Plan: to create N
-/// resources" 风格 + 每资源摘要 + 依赖序；与真 terraform plan 差异诚实标注。
 async fn tool_iac_plan(args: String) -> String {
     native typescript {
         try {
@@ -1808,8 +1912,6 @@ async fn tool_iac_plan(args: String) -> String {
     }
 }
 
-/// v0.5.18 资源依赖图（#44）：lib/iac.ts iacGraph 同源 —— 节点/边/拓扑序/
-/// 环检测/未声明引用（引用级分析：var./local./data./module./资源地址/depends_on）。
 async fn tool_iac_graph(args: String) -> String {
     native typescript {
         try {
@@ -1842,8 +1944,6 @@ async fn tool_iac_graph(args: String) -> String {
     }
 }
 
-/// v0.5.18 JSON manifest → .tf 文本（#44）：lib/iac.ts iacGenerate 同源。
-/// manifest 可传对象或 JSON 字符串；只返回文本不写盘（落盘由用户/上层显式做）。
 async fn tool_iac_generate(args: String) -> String {
     native typescript {
         try {
@@ -1874,13 +1974,6 @@ async fn tool_iac_generate(args: String) -> String {
         }
     }
 }
-
-/// v0.5.8 语义检索（capabilities #19/#22）：lib/search.ts 的 ABI 内同构
-/// 实现（HSL 无法 import TS —— 分词/BM25 公式与 lib 侧一致，
-/// tests/search.test.ts 行为对拍保证排序等价；「一源多投射 + 行为级
-/// 对拍」与 HSL 代码生成器同一治理手法）。只读工具（ReadOnly 模式可用）。
-/// v0.5.15 注：lib 侧其余新能力（db/symbols/scan/…）已改用动态 import 的
-/// 零重复路线；semantic_search 保留同构实现是历史兼容（对拍用例锁定中）。
 fn tool_semantic_search(args: String) -> String {
     native typescript {
         try {
@@ -2591,6 +2684,17 @@ fn result_summary(result: String) -> String {
                 if (tool === "cloud_clis") return tool + " ok " + String(o.available ?? "?") + "/" + String(o.total ?? "?") + " 家在场 · 模型商" + String((o.providers_overview || {}).model_providers ?? "?") + "家";
                 if (tool === "cloud_docker" || tool === "cloud_ssh" || tool === "cloud_k8s") {
                     return tool + " ok " + String((o.argv || []).slice(0, 4).join(" ")) + " " + String(o.took_ms ?? "?") + "ms";
+                }
+                // v0.5.18 移动端调试簇的观测摘要（journal 人读面；devices 按
+                // 「N 台·就绪 M」口径，logcat 按条数+截断口径 —— 与 lib 同源）
+                if (tool === "mobile_devices") {
+                    return tool + " ok " + String((o.devices || []).length) + "台（就绪" + String(o.ready ?? 0) + "）" + ((o.devices && o.devices[0]) ? " top=" + String(o.devices[0].serial) + "(" + String(o.devices[0].state) + ")" : "") + " iOS=" + String((o.ios || {}).available ? "✓" : "✗") + " " + String(o.took_ms ?? "?") + "ms";
+                }
+                if (tool === "mobile_logcat") {
+                    return tool + " ok " + String(o.count ?? (o.entries || []).length) + "条" + (o.truncated ? "（截断）" : "") + " 未匹配" + String(o.skipped ?? 0) + " top=" + String(((o.entries || [])[0] || {}).tag || "-") + " " + String(o.took_ms ?? "?") + "ms";
+                }
+                if (tool === "mobile_plan") {
+                    return tool + " ok " + String(o.platform) + " " + String(o.symptom) + " " + String((o.steps || []).length) + "步（纯函数保底）";
                 }
                 // v0.5.18 IaC 深度簇的观测摘要（journal 人读面）
                 if (tool === "iac_parse") return tool + " ok blocks=" + String(o.blocks ?? "?") + " " + String(o.file || "?") + " " + String(o.took_ms ?? "?") + "ms";
