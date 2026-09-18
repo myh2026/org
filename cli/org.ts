@@ -57,6 +57,18 @@ import { parseOpenApiFile, suggestToolName, OPENAPI_MAX_BYTES } from "../lib/ope
 import { browserEngines, browserSnapshot, browserScreenshot } from "../lib/browser.ts"; // v0.5.16 浏览器 DOM 快照/截图（#116/#30）
 import { completeAt } from "../lib/completion.ts"; // v0.5.16 代码补全（#32）
 import { applyRename } from "../lib/rename.ts"; // v0.5.16 项目级重命名（#56）
+import { probeDocker, dockerRun, dockerBuild, dockerfileFor, DOCKERFILE_TYPES, composeFor, dockerPlan, DOCKER_PLAN_ACTIONS,
+         probeSsh, sshRun, scpUpload, sshConfigTemplate, sshPlan, sshHostAllowed, SSH_HOSTS_ALLOW,
+         probeK8s, probeTerraform, k8sRun, k8sManifestFor, K8S_MANIFEST_KINDS, terraformPlan,
+         probeCloudClis, cloudProvidersOverview, cloudProbeAll, DOCKER_SUBCOMMANDS, K8S_SUBCOMMANDS,
+         type CloudRunResult } from "../lib/cloud.ts"; // v0.5.17 云生态统一模块（#67/#68/#72/#74）
+import { lspDefinition, lspReferences, lspHover, detectLspServers, protocolSelfTest } from "../lib/lsp.ts"; // v0.5.17 LSP/DAP 协议集成（#26）
+import { suggestBreakpoints, debugPlan, dapSelfTest } from "../lib/debug.ts"; // v0.5.17 断点/调试建议（#108）
+import { latestSession } from "../lib/sessions.ts"; // v0.5.17：collab bridge 缺省会话（只读复用会话账本协议）
+import {
+  currentUser, setUser, postThread, commentOn, listThreads, threadFeed, flattenThread,
+  collaborators, collabSummary, bridgeSession, COLLAB_DIR_REL,
+} from "../lib/collab.ts"; // v0.5.17 团队协作层（#87 团队共享会话/评论）
 import { listApprovals, decideApproval, clearGranted } from "../lib/approvals.ts";
 import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
@@ -2708,6 +2720,490 @@ async function cmdRename(a: Args): Promise<number> {
   return r.failed ? 1 : 0;
 }
 
+// ---- org collab：团队协作（v0.5.17 · capabilities #87 团队共享会话/评论） --------
+// 在单用户会话账本之上叠多用户协作层（lib/collab.ts · runtime/collab/）：
+// append-only JSONL 团队线程 + 回复树 + @mention + 会话账本桥（只镜像不改写）。
+// 子命令：whoami/user（身份）· threads/feed（读）· post/comment（写）·
+// users/summary（视图）· bridge（单用户账本 → 团队可见）。
+
+async function cmdCollab(a: Args): Promise<number> {
+  const verb = a.rest[0] ?? "";
+  const ws = a.workspace;
+  // 位置参数提取：parseArgs 已把已识别旗标（--workspace 等）连同其值从 a.rest
+  // 消化掉；这里再滤掉 collab 自有旗标（--since/--thread —— 值旗标连值跳过）。
+  // 不用 rawPositionals（它扫 process.argv 会把 --workspace 的值当位置参数，
+  // post 的文本会被工作区路径污染 —— smoke 实测踩到）。
+  const VALUE_FLAGS = new Set(["since", "thread"]);
+  const pos: string[] = [];
+  for (let i = 1; i < a.rest.length; i++) {
+    const t = a.rest[i]!;
+    if (t.startsWith("--")) {
+      if (!t.includes("=") && VALUE_FLAGS.has(t.slice(2))) i++; // 跳过该旗标的值
+      continue;
+    }
+    pos.push(t);
+  }
+  const usage = (): number => {
+    console.error("用法：");
+    console.error("  org collab whoami                     当前协作用户（env > 身份文件 > local）");
+    console.error("  org collab user <userId> [显示名]     切换协作用户（写 runtime/collab/collab-user）");
+    console.error("  org collab threads                    团队线程清单（标题 · 参与者 · 帖数）");
+    console.error("  org collab feed <threadId> [--since N] 线程增量读（回复树缩进渲染）");
+    console.error('  org collab post <threadId> "<text>"    发帖（@mention 自动抽取）');
+    console.error('  org collab comment <threadId> <seq> "<text>"  评论指定帖（replyTo 树）');
+    console.error("  org collab users                      协作者视图（去重用户 · 发帖数 · 活跃）");
+    console.error("  org collab summary                    协作摘要（线程/帖/评论/用户/最后活动）");
+    console.error("  org collab bridge <expert> [sessionId] 单用户会话账本镜像成团队线程（只镜像不改写，幂等）");
+    console.error(`  协议：${COLLAB_DIR_REL}/threads/*.jsonl（append-only JSONL）；身份覆盖：ORG_COLLAB_USER=<userId>`);
+    return 2;
+  };
+  if (!verb) return usage();
+  ensureWorkspace(a.workspace); // 与 cmdSessions 同规：协作是写面，不回退 dist/demo 只读快照
+  try {
+    if (verb === "whoami") {
+      const id = currentUser(ws);
+      const src: Record<string, string> = { env: "环境变量 ORG_COLLAB_USER", file: "身份文件（持久）", default: "缺省（首次协作）" };
+      console.log(`👤 当前协作用户：${id.user}（来源：${src[id.source]}）`);
+      if (id.display) console.log(`  显示名：${id.display}`);
+      if (id.setAt) console.log(`  设置于：${id.setAt}`);
+      console.log(`  协作目录：${COLLAB_DIR_REL}/（线程 threads/*.jsonl · append-only JSONL）`);
+      console.log(`  切换：org collab user <userId>（或 ORG_COLLAB_USER 环境变量一次性覆盖）`);
+      return 0;
+    }
+    if (verb === "user") {
+      const userId = pos[0] ?? "";
+      if (!userId) { console.error("用法：org collab user <userId> [显示名]（如 org collab user alice \"Alice L\"）"); return 2; }
+      const display = pos.slice(1).join(" ");
+      const id = setUser(ws, userId, display.length > 0 ? display : undefined);
+      console.log(`✓ 协作用户已切换：${id.user}${id.display ? `（${id.display}）` : ""} → ${COLLAB_DIR_REL}/collab-user`);
+      console.log(`  后续 org collab post/comment 以 ${id.user} 署名；ORG_COLLAB_USER 可按次覆盖`);
+      return 0;
+    }
+    if (verb === "threads" || verb === "list") {
+      const list = listThreads(ws);
+      console.log(`👥 团队线程（${COLLAB_DIR_REL}/threads · ${list.length} 个 · append-only JSONL）`);
+      if (list.length === 0) {
+        console.log('\n（空 —— org collab post <threadId> "<text>" 开启第一条线程）');
+        return 0;
+      }
+      for (const t of list) {
+        console.log(`  ${t.id.padEnd(24)} ${t.title}`);
+        console.log(`  ${"".padEnd(24)} ${t.posts} 帖（${t.comments} 评论）· ${t.participants.join(", ")} · 最后活动 ${t.lastActive.replace("T", " ").slice(0, 19)}`);
+      }
+      console.log(`\n  命令：org collab feed <threadId> [--since N]（增量读）· org collab post <threadId> "…"`);
+      return 0;
+    }
+    if (verb === "feed") {
+      const threadId = pos[0] ?? "";
+      if (!threadId) { console.error("用法：org collab feed <threadId> [--since N]"); return 2; }
+      const sinceRaw = restFlag(a, "since");
+      const sinceSeq = sinceRaw !== undefined ? Math.max(0, Math.floor(Number(sinceRaw) || 0)) : 0;
+      const feed = threadFeed(ws, threadId, { sinceSeq });
+      console.log(`◆ 线程 ${threadId} · since #${feed.sinceSeq} · ${feed.posts.length} 帖${feed.truncated ? "（超 2000 帖截断）" : ""}`);
+      if (feed.posts.length === 0) {
+        console.log(`\n（since #${sinceSeq} 之后无新帖 —— 协作轮询增量车道）`);
+        return 0;
+      }
+      for (const p of flattenThread(feed.posts)) {
+        const indent = "  " + "    ".repeat(p.depth);
+        const kindMark = p.kind === "comment" ? "评论" : p.kind === "system" ? "系统" : "帖";
+        const replyMark = p.replyTo !== undefined ? ` ↳ #${p.replyTo}` : "";
+        const mentionMark = p.mentions && p.mentions.length > 0 ? ` · @${p.mentions.join(" @")}` : "";
+        const ts = p.at.replace("T", " ").slice(0, 19);
+        console.log(`${indent}#${String(p.seq).padStart(3)} ${p.user}${p.role ? `(${p.role})` : ""} · ${ts} · ${kindMark}${replyMark}${mentionMark}`);
+        const firstLine = p.text.split("\n")[0] ?? "";
+        const shown = firstLine.length > 100 ? firstLine.slice(0, 100) + "…" : firstLine;
+        console.log(`${indent}    ${shown}`);
+        if (p.text.split("\n").length > 1) console.log(`${indent}    …（${p.text.split("\n").length - 1} 更多行 · org collab feed 全文见 ${COLLAB_DIR_REL}/threads/${threadId}.jsonl）`);
+      }
+      return 0;
+    }
+    if (verb === "post") {
+      const threadId = pos[0] ?? "";
+      const text = pos.slice(1).join(" ");
+      if (!threadId || !text) { console.error('用法：org collab post <threadId> "<text>"（@mention 自动抽取）'); return 2; }
+      const user = currentUser(ws).user;
+      const r = postThread(ws, threadId, user, text);
+      console.log(`✓ 已发帖 ${threadId} #${r.seq}（${user}${r.mentions.length > 0 ? ` · 已提及 @${r.mentions.join(" @")}` : ""}）`);
+      return 0;
+    }
+    if (verb === "comment") {
+      const threadId = pos[0] ?? "";
+      const seqRaw = pos[1] ?? "";
+      const text = pos.slice(2).join(" ");
+      const targetSeq = Math.floor(Number(seqRaw));
+      if (!threadId || !seqRaw || !Number.isFinite(targetSeq) || !text) {
+        console.error('用法：org collab comment <threadId> <seq> "<text>"（评论挂 replyTo 树）');
+        return 2;
+      }
+      const user = currentUser(ws).user;
+      const r = commentOn(ws, threadId, targetSeq, user, text);
+      console.log(`✓ 已评论 ${threadId} #${r.seq}（↳ #${targetSeq} · ${user}）`);
+      return 0;
+    }
+    if (verb === "users") {
+      const users = collaborators(ws);
+      console.log(`👥 协作者（${users.length} 位 · 扫描全部线程去重 · 发帖数降序）`);
+      if (users.length === 0) { console.log("\n（尚无协作者 —— org collab post 后这里会出现署名用户）"); return 0; }
+      for (const u of users) {
+        console.log(`  ${u.user.padEnd(24)} ${String(u.posts).padStart(3)} 帖 · 最后活跃 ${u.lastActive.replace("T", " ").slice(0, 19)}`);
+      }
+      return 0;
+    }
+    if (verb === "summary") {
+      const s = collabSummary(ws);
+      if (s.threads === 0 && s.posts === 0) {
+        console.log("📊 协作摘要：尚无协作活动（org collab post 开启第一条线程，或 org collab bridge 镜像既有会话）");
+        return 0;
+      }
+      console.log(`📊 协作摘要：${s.threads} 线程 · ${s.posts} 帖（${s.comments} 评论）· ${s.users} 位协作者`);
+      console.log(`  最后活动：${s.lastActive ? s.lastActive.replace("T", " ").slice(0, 19) : "—"} · 协议 ${COLLAB_DIR_REL}/threads/*.jsonl（append-only）`);
+      return 0;
+    }
+    if (verb === "bridge") {
+      const expert = (pos[0] ?? "").toLowerCase();
+      if (!expert) { console.error("用法：org collab bridge <expert> [sessionId]（缺省取该专家最近会话）"); return 2; }
+      const session = pos[1] || latestSession(ws, expert);
+      // 缺省线程 id 由 expert/session 派生：归一到 SAFE_THREAD_ID 词形（大写折叠、
+      // 非法字符折成连字符、截 64）—— 用户显式 --thread 不做变换（不合法即诚实报错）
+      const derived = `session-${expert}-${session}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+/, (m) => m ? "-" : "").slice(0, 64);
+      const threadId = restFlag(a, "thread") ?? (derived.length > 0 ? derived : "session");
+      const user = currentUser(ws).user;
+      const r = bridgeSession(ws, expert, session, threadId, { user });
+      console.log(`🌉 已镜像 ${expert}/${session} → 线程 ${threadId}：${r.mirrored}/${r.turns} 轮（${r.skipped} 轮已镜像跳过 · kind:"system" · 原账本字节不变）`);
+      console.log(`  团队查看：org collab feed ${threadId}`);
+      return 0;
+    }
+    console.error(`未知子命令：${verb}`);
+    return usage();
+  } catch (err) {
+    console.error(`✗ ${(err as Error).message}`);
+    return 1;
+  }
+}
+
+/** org lsp [definition|references|hover|servers|protocol] <name> —— LSP/DAP 协议集成（#26）。 */
+async function cmdLsp(a: Args): Promise<number> {
+  const positional = rawPositionals(a);
+  const verb = positional[0] ?? "help";
+  const ws = defaultWorkspace(a);
+  if (verb === "definition" || verb === "references" || verb === "hover") {
+    const name = positional[1];
+    if (!name) {
+      console.error(`用法：org lsp ${verb} <符号名> [--workspace DIR]`);
+      console.error("  内置符号索引车道（无外部 server 时的主车道）· 输出 LSP 0 基 uri/range + 人读 1 基行列双形");
+      return 2;
+    }
+    if (verb === "definition") {
+      const r = lspDefinition(ws, name);
+      if (!r.ok) { console.error(`✗ ${r.reason}`); return 1; }
+      console.log(`🎯 ${name} —— ${r.definitions.length} 处定义（${r.lane === "builtin" ? "内置符号索引车道" : r.lane}）`);
+      if (r.definitions.length === 0) { console.log(`（${r.reason}）`); return 0; }
+      for (const d of r.definitions) {
+        console.log(`  ${String(d.line).padStart(4)}:${String(d.column).padStart(3)}  ${d.kind.padEnd(6)} ${d.file}  ${d.snippet.slice(0, 60)}`);
+        console.log(`         LSP ${d.lsp.uri} range ${d.lsp.range.start.line}:${d.lsp.range.start.character}`);
+      }
+      return 0;
+    }
+    if (verb === "references") {
+      const r = lspReferences(ws, name);
+      if (!r.ok) { console.error(`✗ ${r.reason}`); return 1; }
+      const calls = r.refs.filter((x) => x.kind === "call").length;
+      console.log(`🔗 ${name} —— ${r.refs.length} 处引用（call ${calls} · mention ${r.refs.length - calls}）+ ${r.definitions} 处定义（定义行已排除${r.truncated ? " · 截断" : ""}）`);
+      if (r.refs.length === 0) { console.log(`（${r.reason ?? "无引用"}）`); return 0; }
+      for (const x of r.refs) console.log(`  ${String(x.line).padStart(4)}:${String(x.column).padStart(3)}  ${x.kind.padEnd(8)} ${x.file}  ${x.snippet.slice(0, 60)}`);
+      return 0;
+    }
+    const r = lspHover(ws, name);
+    if (!r.ok) { console.error(`✗ ${r.reason}`); return 1; }
+    if (!r.hover) { console.log(`💬 ${name} —— hover 为空（${r.reason}）`); return 0; }
+    console.log(`💬 ${r.hover.name}（${r.hover.kind} · ${r.hover.file}:${r.hover.line}）`);
+    for (const c of r.hover.contents) console.log(`  ${c}`);
+    return 0;
+  }
+  if (verb === "servers") {
+    const probes = detectLspServers();
+    const hit = probes.filter((p) => p.available);
+    console.log(`🔎 外部 LSP server 探测（${probes.length} 个已知 server，which 探测）：`);
+    for (const p of probes) console.log(`  ${p.available ? "✓" : "✗"} ${p.name.padEnd(28)} ${p.path ?? "缺席"}`);
+    if (hit.length === 0) {
+      console.log("\n  （全部缺席 —— 诚实降级到内置符号索引车道：org lsp definition/references/hover <名>）");
+      return 1;
+    }
+    console.log(`\n  spawn 车道可用：spawnLspServer(cmd, args) 走真协议（lib/lsp.ts —— initialize → initialized → shutdown → exit）`);
+    return 0;
+  }
+  if (verb === "protocol" || verb === "self-test" || verb === "selftest") {
+    const r = protocolSelfTest();
+    console.log(`🧪 LSP/DAP JSON-RPC 2.0 协议层自检（Content-Length 分帧 · LSP 与 DAP 共用）`);
+    for (const c of r.checks) console.log(`  ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? `（${c.detail}）` : ""}`);
+    console.log(`\n  ${r.passed}/${r.total} 通过`);
+    return r.ok ? 0 : 1;
+  }
+  console.error(`用法：org lsp definition <名> | references <名> | hover <名> | servers | protocol [--self-test]`);
+  console.error("  协议层（JSON-RPC 2.0 分帧）+ 内置符号索引车道（主车道）+ 外部 server spawn 车道（降级第 2 层）");
+  console.error("  诚实边界：真编辑器级 LSP 会话（didOpen/didChange/补全路由）是路线图");
+  return 2;
+}
+
+/** org debug [suggest|plan] <file> | dap —— 断点/调试建议（#108）。 */
+async function cmdDebug(a: Args): Promise<number> {
+  const positional = rawPositionals(a);
+  const verb = positional[0] ?? "help";
+  const ws = defaultWorkspace(a);
+  if (verb === "suggest" || verb === "plan") {
+    const file = positional[1];
+    if (!file) {
+      console.error(`用法：org debug ${verb} <文件> [--workspace DIR]（工作区相对路径）`);
+      console.error("  入口/分支/循环/return 前断点建议（符号级 > 启发式级，每条带 reason）");
+      return 2;
+    }
+    if (verb === "suggest") {
+      const r = suggestBreakpoints(ws, file);
+      if (!r.ok) { console.error(`✗ ${r.reason}`); return 1; }
+      console.log(`🐞 ${r.file}（${r.language} · ${r.lines} 行 · ${r.suggestions.length} 处建议断点${r.truncated ? "（截断）" : ""}）`);
+      if (r.suggestions.length === 0) { console.log(`（${r.reason}）`); return 0; }
+      for (const s of r.suggestions) console.log(`  ${String(s.line).padStart(4)}  [${s.confidence === "symbol" ? "符号" : "启发"}] ${s.reason} · ${s.snippet.slice(0, 60)}`);
+      return 0;
+    }
+    const r = debugPlan(ws, file);
+    if (!r.ok) { console.error(`✗ ${r.reason}`); return 1; }
+    console.log(`📋 调试计划：${r.file}（${r.suggestions} 处断点建议 · ${r.steps.length} 步 · ${r.language}）`);
+    for (const st of r.steps) {
+      console.log(`\n  第 ${st.step} 步 · ${st.title}`);
+      console.log(`    ${st.detail}`);
+    }
+    console.log(`\n  DAP 消息序列（协议就绪 · ${r.dapMessages.length} 条）：`);
+    for (const m of r.dapMessages) console.log(`    seq=${m.seq} ${m.command} ${JSON.stringify(m.arguments).slice(0, 100)}`);
+    console.log("\n  诚实边界：不 spawn 真 debug adapter（沙箱无）—— 真 DAP attach 是路线图");
+    return 0;
+  }
+  if (verb === "dap" || verb === "self-test" || verb === "selftest") {
+    const r = dapSelfTest();
+    console.log("🧪 DAP 构造器自检（initialize/setBreakpoints/stackTrace/threads 字段忠实性 + 分帧共用）");
+    for (const c of r.checks) console.log(`  ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? `（${c.detail}）` : ""}`);
+    console.log(`\n  ${r.passed}/${r.total} 通过`);
+    return r.ok ? 0 : 1;
+  }
+  console.error("用法：org debug suggest <文件> | plan <文件> | dap [--self-test]（breakpoints 是 debug 的别名）");
+  console.error("  断点建议器（符号索引 + 源码行扫描）+ 调试计划（步骤说明 + DAP 协议就绪消息序列）");
+  return 2;
+}
+
+// ---- org cloud：云生态统一入口（v0.5.17 · #67/#68/#72/#74）----------------------
+
+/** CloudRunResult 统一渲染（docker/ssh/k8s 执行车道 —— 成功吐输出、失败吐 kind+reason）。 */
+function renderCloudRun(r: CloudRunResult, label: string): number {
+  const argvPreview = r.argv.join(" ").slice(0, 160);
+  if (!r.ok) {
+    const kindText: Record<string, string> = {
+      denied: "白名单拒绝（未执行）", "tool-absent": "CLI 缺席（降级车道可用）",
+      "host-not-allowed": "host 未获放行", jail: "路径越界（工作区监狱）",
+      timeout: "超时/进程异常", failed: "执行失败（退出码非 0）",
+    };
+    console.error(`✗ ${label}（${kindText[r.kind ?? "?"] ?? r.kind}）：${r.reason ?? ""}`);
+    console.error(`  argv（数组参数 · 零 shell 面）：${argvPreview}`);
+    return 1;
+  }
+  console.log(`✓ ${label}（${r.tookMs}ms · argv 数组参数）：${argvPreview}`);
+  if (r.stdout.trim().length > 0) console.log(r.stdout.trim().split("\n").slice(0, 60).join("\n"));
+  if (r.stderr.trim().length > 0) console.log(`（stderr）${r.stderr.trim().split("\n").slice(0, 10).join("\n")}`);
+  return 0;
+}
+
+/** org cloud —— Docker/SSH/K8s/Terraform/云 CLI 五面统一入口（多重优雅降级）。 */
+async function cmdCloud(a: Args): Promise<number> {
+  // rest 保持原始形态（docker/kubectl 的 --flag 须原样透传；org 自有旗标已被
+  // parseArgs 消费不会落入 rest —— 与 cmdIacscan 的过滤式不同，这里是透传式）
+  const positional = a.rest ?? [];
+  const verb = positional[0] ?? "probe";
+  const ws = defaultWorkspace(a);
+
+  // ---- 探测面（全景 / 单面）----
+  if (verb === "probe") {
+    const what = positional[1];
+    if (what === "docker") {
+      const p = probeDocker();
+      console.log(`🐳 docker：${p.available ? `✓ 在场（${p.version ?? "?"}）` : "✗ 缺席"} · 守护进程 ${p.daemonReachable ? "✓ 可达" : "✗ 不可达"}`);
+      if (p.reason) console.log(`  ${p.reason}`);
+      return p.available && p.daemonReachable ? 0 : 1;
+    }
+    if (what === "ssh") {
+      const p = probeSsh();
+      console.log(`🔐 ssh：${p.available ? `✓ 在场（${p.version ?? "?"}）` : "✗ 缺席"} · ~/.ssh ${p.sshDirExists ? "存在" : "无"} · config ${p.configExists ? "✓" : "✗"} · known_hosts ${p.knownHostsExists ? "✓" : "✗"}（只看存在性，绝不读内容）`);
+      if (p.reason) console.log(`  ${p.reason}`);
+      return p.available ? 0 : 1;
+    }
+    if (what === "k8s") {
+      const p = probeK8s();
+      console.log(`☸ kubectl：${p.available ? `✓ 在场（v${p.version ?? "?"}）` : "✗ 缺席"} · 集群 ${p.clusterReachable ? "✓ 可达" : "✗ 不可达"}`);
+      if (p.reason) console.log(`  ${p.reason}`);
+      return p.available && p.clusterReachable ? 0 : 1;
+    }
+    if (what === "tf" || what === "terraform") {
+      const p = probeTerraform();
+      console.log(`🏗 terraform：${p.available ? `✓ 在场（v${p.version ?? "?"}）` : "✗ 缺席"}`);
+      if (p.reason) console.log(`  ${p.reason}`);
+      return p.available ? 0 : 1;
+    }
+    if (what === "clis") {
+      const clis = probeCloudClis();
+      for (const c of clis) console.log(`  ${c.available ? "✓" : "⬜"} ${c.name.padEnd(9)} ${c.available ? (c.version ?? "").slice(0, 50) : c.installHint}`);
+      return 0;
+    }
+    if (what) { console.error(`未知探测面：${what}（docker|ssh|k8s|tf|clis；缺省全景）`); return 2; }
+    const r = cloudProbeAll();
+    const s = r.summary;
+    console.log(`☁ 云生态全景探测（${r.tookMs}ms）：`);
+    console.log(`  🐳 docker    ${s.dockerAvailable ? "✓ CLI 在场" : "✗ 缺席"}${s.dockerAvailable ? ` · 守护进程 ${s.dockerDaemon ? "✓" : "✗"}` : ""}`);
+    console.log(`  🔐 ssh       ${s.sshAvailable ? "✓ 在场" : "✗ 缺席"}`);
+    console.log(`  ☸ kubectl   ${s.k8sAvailable ? "✓ 在场" : "✗ 缺席"}${s.k8sAvailable ? ` · 集群 ${s.k8sCluster ? "✓" : "✗"}` : ""}`);
+    console.log(`  🏗 terraform ${s.terraformAvailable ? "✓ 在场" : "✗ 缺席"}`);
+    console.log(`  ☁ 云 CLI    ${s.clisAvailable}/${s.clisTotal} 家在场`);
+    const anyUp = s.dockerDaemon || s.sshAvailable || s.k8sCluster || s.terraformAvailable || s.clisAvailable > 0;
+    if (!anyUp) {
+      console.log(`\n  工具缺席环境 —— 降级车道即主车道：`);
+      console.log(`    org cloud dockerfile <node|bun|python|rust>   生产级 Dockerfile 模板`);
+      console.log(`    org cloud compose                             docker-compose 模板`);
+      console.log(`    org cloud plan <build|run|push|debug|cleanup>  可粘贴命令序列`);
+      console.log(`    org cloud manifest <kind>                     K8s 五族 manifest 模板`);
+      console.log(`    org cloud terraform                           main.tf 骨架`);
+      console.log(`    org cloud ssh-template                        ~/.ssh/config 片段模板`);
+    }
+    return 0;
+  }
+
+  // ---- #67 Docker 执行与模板 ----
+  if (verb === "docker") {
+    const rest = positional.slice(1);
+    if (rest.length === 0) { console.error(`用法：org cloud docker <子命令> [args...]（白名单：${DOCKER_SUBCOMMANDS.join("/")}）`); return 2; }
+    return renderCloudRun(dockerRun(rest[0]!, rest.slice(1)), `docker ${rest[0]}`);
+  }
+  if (verb === "build") {
+    const ctx = positional[1] ?? ".";
+    const tagIdx = positional.indexOf("--tag");
+    const tag = tagIdx > 0 ? positional[tagIdx + 1] : undefined;
+    return renderCloudRun(dockerBuild(ws, ctx, tag ? { tag } : {}), `docker build ${ctx}`);
+  }
+  if (verb === "dockerfile") {
+    const t = positional[1] ?? "node";
+    let r;
+    try { r = dockerfileFor(t); } catch (e) { console.error(`✗ ${e instanceof Error ? e.message : String(e)}（四型：${DOCKERFILE_TYPES.join("/")}）`); return 2; }
+    console.log(`🐳 Dockerfile 模板（${r.projectType} 型 · 多阶段 · 非 root · healthcheck）：`);
+    console.log(r.dockerfile.trimEnd());
+    console.log(`\n  采纳建议：`);
+    for (const n of r.notes) console.log(`    - ${n}`);
+    console.log(`\n  落盘：保存为 Dockerfile 后 org cloud build .（context 过工作区监狱）`);
+    return 0;
+  }
+  if (verb === "compose") {
+    const r = composeFor({ appName: positional[1] ?? "app" });
+    console.log("🐳 docker-compose.yml 模板（服务 · 专用网络 · 具名卷 · healthcheck）：");
+    console.log(r.compose.trimEnd());
+    for (const n of r.notes) console.log(`  💡 ${n}`);
+    return 0;
+  }
+  if (verb === "plan") {
+    const action = positional[1] ?? "build";
+    let p;
+    try { p = dockerPlan(action); } catch (e) { console.error(`✗ ${e instanceof Error ? e.message : String(e)}（五意图：${DOCKER_PLAN_ACTIONS.join("/")}）`); return 2; }
+    console.log(`📋 docker 命令计划（意图 ${p.action} · 可直接粘贴）：`);
+    for (const [i, s] of p.steps.entries()) console.log(`  ${i + 1}. ${s.cmd}\n     # ${s.note}`);
+    if (p.warning) console.log(`\n  ⚠ ${p.warning}`);
+    return 0;
+  }
+
+  // ---- #68 SSH ----
+  if (verb === "ssh") {
+    const host = positional[1];
+    const command = positional.slice(2).join(" ");
+    if (!host || !command) { console.error(`用法：org cloud ssh <host> "<command>"（host 须在 <ws>/${SSH_HOSTS_ALLOW} 白名单内）`); return 2; }
+    return renderCloudRun(sshRun(ws, host, command), `ssh ${host}`);
+  }
+  if (verb === "scp") {
+    const [host, local, remote] = positional.slice(1);
+    if (!host || !local || !remote) { console.error("用法：org cloud scp <host> <local（工作区内）> <remote路径>"); return 2; }
+    return renderCloudRun(scpUpload(ws, host, local, remote), `scp ${host}`);
+  }
+  if (verb === "ssh-template") {
+    const t = sshConfigTemplate();
+    console.log("🔐 ~/.ssh/config 片段模板（追加到你自己的 ~/.ssh/config）：");
+    console.log(t.config.trimEnd());
+    console.log("\n  安全建议：");
+    for (const ad of t.advice) console.log(`    - ${ad}`);
+    return 0;
+  }
+  if (verb === "ssh-plan") {
+    const host = positional[1] ?? "<host>";
+    const command = positional.slice(2).join(" ") || "uptime";
+    const p = sshPlan(host, command);
+    console.log(`🔐 ssh 计划（${host} · 从零到执行一条命令）：`);
+    for (const [i, s] of p.steps.entries()) console.log(`  ${i + 1}. ${s.cmd}\n     # ${s.note}`);
+    return 0;
+  }
+  if (verb === "ssh-hosts") {
+    const gate = sshHostAllowed(ws, positional[1] ?? "");
+    let count = 0;
+    try {
+      count = fs.readFileSync(path.join(ws, SSH_HOSTS_ALLOW), "utf-8").split("\n").filter((l) => l.trim().length > 0 && !l.trim().startsWith("#")).length;
+    } catch { /* 缺席 = 0 */ }
+    console.log(`🔐 ${SSH_HOSTS_ALLOW}：${fs.existsSync(gate.file) ? `${count} 个 host 在册` : "未创建（拒绝一切远程执行 —— 安全缺省）"}`);
+    console.log(`  路径：${gate.file}`);
+    console.log(`  判定 ${positional[1] ? `"${positional[1]}" → ${gate.allowed ? "✓ 放行" : "✗ 拒绝"}` : "（org cloud ssh-hosts <host> 查询）"}`);
+    return 0;
+  }
+
+  // ---- #72 K8s / Terraform ----
+  if (verb === "k8s" || verb === "kubectl") {
+    const rest = positional.slice(1);
+    if (rest.length === 0) { console.error(`用法：org cloud k8s <args...>（首词白名单：${K8S_SUBCOMMANDS.join("/")}；apply -f 过工作区监狱）`); return 2; }
+    return renderCloudRun(k8sRun(ws, rest), `kubectl ${rest[0]}`);
+  }
+  if (verb === "manifest") {
+    const k = positional[1] ?? "deployment";
+    let m;
+    try { m = k8sManifestFor(k); } catch (e) { console.error(`✗ ${e instanceof Error ? e.message : String(e)}（五族：${K8S_MANIFEST_KINDS.join("/")}）`); return 2; }
+    console.log(`☸ K8s ${m.kind} 模板（apiVersion ${m.apiVersion}）：`);
+    console.log(m.manifest.trimEnd());
+    console.log(`\n  要点：`);
+    for (const n of m.notes) console.log(`    - ${n}`);
+    console.log(`\n  应用：保存到工作区后 org cloud k8s apply -f <file>（-f 路径过监狱）`);
+    return 0;
+  }
+  if (verb === "terraform" || verb === "tf-template") {
+    const r = terraformPlan(positional[1] ?? "aws");
+    console.log(`🏗 main.tf 骨架（provider ${r.provider} · 变量 + 输出）：`);
+    console.log(r.mainTf.trimEnd());
+    console.log(`\n  要点：`);
+    for (const n of r.notes) console.log(`    - ${n}`);
+    return 0;
+  }
+
+  // ---- #74 云 CLI ----
+  if (verb === "clis") {
+    const clis = probeCloudClis();
+    console.log(`☁ 云 CLI 注册表（${clis.length} 家 · 探测 ${clis.filter((c) => c.available).length} 家在场）：`);
+    for (const c of clis) console.log(`  ${c.available ? "✓" : "⬜"} ${c.name.padEnd(9)} ${c.available ? (c.version ?? "").slice(0, 56) : c.installHint}`);
+    console.log(`\n  文档：${clis[0]!.docsUrl} 等 —— docsUrl 字段见注册表`);
+    return 0;
+  }
+  if (verb === "overview") {
+    const o = cloudProvidersOverview();
+    console.log(`☁ provider 全景：模型服务商 ${o.modelProviders} 家（推理面）+ 云 CLI ${o.cloudClis} 家（基建面）= ${o.total} 面：`);
+    const local = o.providers.filter((p) => p.local).map((p) => p.name);
+    console.log(`  模型：${o.providers.filter((p) => !p.local).map((p) => p.name).join(" · ")}`);
+    console.log(`  本地推理：${local.join(" · ")}（无需 key）`);
+    console.log(`  云 CLI：${o.clis.map((c) => `${c.name}${c.available ? "✓" : ""}`).join(" · ")}`);
+    return 0;
+  }
+
+  console.error(`未知子命令：${verb}`);
+  console.error(`用法：org cloud probe [docker|ssh|k8s|tf|clis] · docker <args...> · build <ctx> · dockerfile <type> · compose · plan <action>`);
+  console.error(`      org cloud ssh <host> "<cmd>" · scp <host> <local> <remote> · ssh-template · ssh-plan <host> "<cmd>" · ssh-hosts [host]`);
+  console.error(`      org cloud k8s <args...> · manifest <kind> · terraform [provider] · clis · overview（#67/#68/#72/#74 四能力统一入口）`);
+  return 2;
+}
+
 // ---- org memory：专家长期记忆（v0.5.3） ----------------------------------------
 
 async function cmdMemory(a: Args): Promise<number> {
@@ -2883,6 +3379,13 @@ export async function orgMain(): Promise<number> {
     case "browser": return cmdBrowser(a);
     case "complete": return cmdComplete(a);
     case "rename": return cmdRename(a);
+    // v0.5.17 LSP/DAP 深度簇（capabilities #26/#108）
+    case "lsp": return cmdLsp(a);
+    case "debug": case "breakpoints": return cmdDebug(a);
+    // v0.5.17 协作簇（capabilities #87 团队共享会话/评论）
+    case "collab": return cmdCollab(a);
+    // v0.5.17 云生态簇（capabilities #67/#68/#72/#74）
+    case "cloud": return cmdCloud(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -3033,9 +3536,30 @@ export async function orgMain(): Promise<number> {
   org rename <旧名> <新名> [--apply]
       项目级重命名（v0.5.16 · #56）：缺省 dryRun 预览（unified diff ≤5
       文件）· --apply 真写（写前读 → 行级词边界替换 → 复读校验，失败即停）
+  org lsp [definition|references|hover] <名> | servers | protocol
+      LSP/DAP 协议集成（v0.5.17 · #26）：JSON-RPC 2.0 分帧（LSP 与 DAP
+      共用 · 粘包/半包/CJK 字节精确）+ 内置符号索引车道（无外部 server
+      时的主车道）+ spawn 车道（initialize→initialized→shutdown→exit）；
+      servers 探测外部语言服务器（缺席诚实降级）· protocol 协议层自检
+  org debug [suggest|plan] <文件> | dap
+      断点/调试建议（v0.5.17 · #108）：入口/分支/循环/return 前断点建议
+      （符号级 > 启发式级，每条带 reason）+ 调试计划（步骤 + DAP 协议
+      就绪消息序列）；真 debug adapter attach 是路线图（诚实边界）
+  org collab [whoami|user|threads|feed|post|comment|users|summary|bridge]
+      团队协作（v0.5.17 · #87）：append-only JSONL 团队线程 + 回复树 +
+      @mention 自动抽取 + 会话账本桥（单用户账本 → 团队可见，只镜像不
+      改写，幂等）· 身份 runtime/collab/collab-user（ORG_COLLAB_USER 覆盖）
+      · 诚实边界：本地文件协议，多进程强并发不在面内
   org providers [ledger]
       服务商健康面板：全部注册预设 + 命名车道 + 环境变量发现状态 +
       调用台账（key 轮换归因 · 失败统计）
+  org cloud probe [docker|ssh|k8s|tf|clis] · docker <args…> · build <ctx>
+      云生态统一入口（v0.5.17 · #67/#68/#72/#74）：全景探测 → 白名单执行
+      →模板/计划降级三车道。docker/kubectl 子命令白名单（破坏性命令一律
+      拒绝）· dockerfile <node|bun|python|rust> / compose / plan 五意图 ·
+      ssh <host> "<cmd>"（host 须在 <ws>/ssh-hosts.allow）· ssh-template ·
+      manifest <deployment|service|ingress|configmap|pvc> · terraform ·
+      clis（10 家云 CLI 探测表）· overview（21 模型商 + 10 云 CLI 全景）
 
 仓库布局：hsl/ = HSL 源码；toolchain/dhv-ts = 内嵌解释器（vendored）；
           demo-run/ = 本地构建目录（git 忽略）；dist/ = 编译产物（入库）

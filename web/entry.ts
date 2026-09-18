@@ -65,6 +65,11 @@ import { AskGate, QueueCancelledError } from "./gate.ts";
 import { transcribeAudio, synthesizeSpeech, voiceStatus, VOICES } from "../lib/voice.ts"; // v0.5.12 语音入口（ASR/TTS）
 import { analyzeImages, visionStatus, VISION_MAX_IMAGES } from "../lib/vision.ts"; // v0.5.13 视觉入口（VLM 图片理解）
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14 漂移治理：此前本文件落后两版）
+import { latestSession } from "../lib/sessions.ts"; // v0.5.17：collab bridge 缺省会话（只读复用会话账本协议）
+import {
+  currentUser, setUser, postThread, commentOn, listThreads, threadFeed, flattenThread,
+  collaborators, collabSummary, bridgeSession, COLLAB_DIR_REL,
+} from "../lib/collab.ts"; // v0.5.17 团队协作层（#87 团队共享会话/评论）
 
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
 const STOCK_FIXTURE = path.join(ROOT, "fixtures/run-notices.json");
@@ -157,6 +162,11 @@ import { parseOpenApiText, parseOpenApiFile, suggestToolName } from "../lib/open
 import { browserEngines, browserSnapshot, browserScreenshot } from "../lib/browser.ts"; // v0.5.16 浏览器（#116/#30）
 import { completeAt } from "../lib/completion.ts"; // v0.5.16 代码补全（#32）
 import { applyRename } from "../lib/rename.ts"; // v0.5.16 项目级重命名（#56）
+import { lspDefinition, lspReferences, lspHover, detectLspServers, protocolSelfTest, resolveJailedFile } from "../lib/lsp.ts"; // v0.5.17 LSP/DAP 协议集成（#26）
+import { cloudProbeAll, probeDocker, probeSsh, probeK8s, probeTerraform, probeCloudClis, cloudProvidersOverview,
+         dockerRun, dockerBuild, dockerfileFor, composeFor, dockerPlan,
+         sshRun, scpUpload, sshConfigTemplate, sshPlan, k8sRun, k8sManifestFor, terraformPlan } from "../lib/cloud.ts"; // v0.5.17 云生态统一模块（#67/#68/#72/#74）
+import { suggestBreakpoints, debugPlan, dapSelfTest } from "../lib/debug.ts"; // v0.5.17 断点/调试建议（#108）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
 
@@ -1415,6 +1425,280 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
           const r = gitRebase(path.resolve(ws), { onto });
           return json({ ok: r.ok, output: r.output.slice(0, 4096), conflicts: r.conflicts, aborted: r.aborted, kind: r.kind ?? null, error: r.error ?? null });
         }
+        // v0.5.17 LSP/DAP 调试（#26/#108）：GET ?action=definition|references|hover&name=…
+        // | servers | protocol-selftest。与 CLI org lsp / 工具环 lsp_* 同源 lib/lsp.ts
+        // （内置符号索引车道；外部 server spawn 车道在 CLI/tests 侧）。只读面。
+        if (route === "GET /api/govex/lsp") {
+          const action = String(url.searchParams.get("action") ?? "").trim();
+          const rws = readWorkspaceOf(ws);
+          try {
+            if (action === "definition" || action === "references" || action === "hover") {
+              const name = String(url.searchParams.get("name") ?? "").trim();
+              if (!name) return json({ ok: false, error: "name 必填（符号名）" }, 400);
+              if (action === "definition") {
+                const r = lspDefinition(rws, name, { dirs: [""] });
+                return json({ ok: r.ok, lane: r.lane, name: r.name, ...(r.reason ? { reason: r.reason } : {}), definitions: r.definitions });
+              }
+              if (action === "references") {
+                const maxHitsParam = url.searchParams.get("max_hits");
+                const maxHits = maxHitsParam !== null ? Math.max(0, Math.floor(Number(maxHitsParam) || 0)) : 200;
+                const r = lspReferences(rws, name, { dirs: [""], maxHits });
+                return json({ ok: r.ok, lane: r.lane, name: r.name, definitions: r.definitions, ...(r.truncated ? { truncated: true } : {}), ...(r.reason ? { reason: r.reason } : {}), refs: r.refs });
+              }
+              const r = lspHover(rws, name, { dirs: [""] });
+              return json({ ok: r.ok, lane: r.lane, name: r.name, hover: r.hover, ...(r.reason ? { reason: r.reason } : {}) });
+            }
+            if (action === "servers") {
+              const servers = detectLspServers();
+              return json({
+                ok: true, servers,
+                available: servers.filter((s) => s.available).length,
+                ...(servers.every((s) => !s.available) ? { note: "全部缺席 —— 内置符号索引车道常在（definition/references/hover）" } : {}),
+              });
+            }
+            if (action === "protocol-selftest" || action === "selftest" || action === "protocol") {
+              const r = protocolSelfTest();
+              return json({ ok: r.ok, passed: r.passed, total: r.total, checks: r.checks });
+            }
+            return json({ ok: false, error: "action 须为 definition / references / hover / servers / protocol-selftest" }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
+        // v0.5.17 断点/调试建议（#108）：GET ?action=suggest|plan&file=… | dap-selftest。
+        // 与 CLI org debug / 工具环 debug_* 同源 lib/debug.ts。file 过 pathjail（越界即拒）。
+        if (route === "GET /api/govex/debug") {
+          const action = String(url.searchParams.get("action") ?? "").trim();
+          const rws = readWorkspaceOf(ws);
+          try {
+            if (action === "suggest" || action === "plan") {
+              const file = String(url.searchParams.get("file") ?? "").trim();
+              if (!file) return json({ ok: false, error: "file 必填（工作区相对路径）" }, 400);
+              const jailed = resolveJailedFile(rws, file);
+              if (!jailed.ok) return json({ ok: false, error: jailed.reason }, 400);
+              if (action === "suggest") {
+                const r = suggestBreakpoints(rws, file);
+                return json({
+                  ok: r.ok, ...(r.reason ? { reason: r.reason } : {}),
+                  file: r.file, language: r.language, lines: r.lines, ...(r.truncated ? { truncated: true } : {}),
+                  suggestions: r.suggestions,
+                });
+              }
+              const r = debugPlan(rws, file);
+              return json({
+                ok: r.ok, ...(r.reason ? { reason: r.reason } : {}),
+                file: r.file, language: r.language, suggestions: r.suggestions,
+                steps: r.steps, dap_messages: r.dapMessages,
+                roadmap: "真 debug adapter attach（node --inspect / debugpy / lldb-dap）是路线图 —— 本计划交付协议就绪的消息序列与步骤说明",
+              });
+            }
+            if (action === "dap-selftest" || action === "selftest" || action === "dap") {
+              const r = dapSelfTest();
+              return json({ ok: r.ok, passed: r.passed, total: r.total, checks: r.checks });
+            }
+            return json({ ok: false, error: "action 须为 suggest / plan / dap-selftest" }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
+        // v0.5.17 👥 团队协作（#87）：线程/增量读/协作者/摘要/身份 + 发帖/评论/切身份/桥。
+        // GET  ?action=threads|feed&thread=…&since=N|users|summary|whoami（缺省 summary）
+        // POST {action:"post"|"comment"|"user"|"bridge", thread, seq, text, user, display, expert, session}
+        // 与 CLI org collab / 工具环 collab_* 同源 lib/collab.ts。协作是写面：
+        // 不走 readWorkspaceOf 的 dist/demo 快照回退（与 sessions 哲学同 —— 不设注册表门槛），
+        // 写动作带 dist/demo 只读守卫（与 plugin-install 同规）。
+        if (route === "GET /api/govex/collab") {
+          const action = String(url.searchParams.get("action") ?? "summary").trim();
+          const rws = path.resolve(ws);
+          try {
+            if (action === "threads") {
+              return json({ ok: true, threads: listThreads(rws), summary: collabSummary(rws) });
+            }
+            if (action === "feed") {
+              const thread = String(url.searchParams.get("thread") ?? "").trim();
+              if (!thread) return json({ ok: false, error: "thread 必填（线程 id）" }, 400);
+              const sinceParam = url.searchParams.get("since");
+              const sinceSeq = sinceParam !== null ? Math.max(0, Math.floor(Number(sinceParam) || 0)) : 0;
+              const feed = threadFeed(rws, thread, { sinceSeq });
+              return json({
+                ok: true, thread, since_seq: sinceSeq, truncated: feed.truncated,
+                posts: flattenThread(feed.posts).map((p) => ({
+                  seq: p.seq, user: p.user, kind: p.kind, depth: p.depth, at: p.at,
+                  ...(p.replyTo !== undefined ? { reply_to: p.replyTo } : {}),
+                  ...(p.mentions && p.mentions.length ? { mentions: p.mentions } : {}),
+                  text: p.text.slice(0, 2000),
+                })),
+              });
+            }
+            if (action === "users") {
+              return json({ ok: true, collaborators: collaborators(rws) });
+            }
+            if (action === "whoami") {
+              return json({ ok: true, ...currentUser(rws), dir: COLLAB_DIR_REL });
+            }
+            // 缺省：summary（总览 + 协作者 + 我是谁）
+            const s = collabSummary(rws);
+            return json({
+              ok: true, ...s,
+              collaborators: collaborators(rws).slice(0, 50),
+              me: currentUser(rws),
+            });
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
+        if (route === "POST /api/govex/collab") {
+          if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+            return json({ ok: false, error: "dist/demo 是入库快照（只读）。" }, 400);
+          }
+          const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+          const action = String(body.action ?? "").trim();
+          const rws = path.resolve(ws);
+          try {
+            if (action === "post") {
+              const thread = String(body.thread ?? "").trim();
+              const text = String(body.text ?? "").trim();
+              if (!thread || !text) return json({ ok: false, error: "thread / text 必填" }, 400);
+              const user = String(body.user ?? "").trim() || currentUser(rws).user;
+              const r = postThread(rws, thread, user, text);
+              return json({ ok: true, thread, seq: r.seq, user, mentions: r.mentions });
+            }
+            if (action === "comment") {
+              const thread = String(body.thread ?? "").trim();
+              const seq = Math.floor(Number(body.seq));
+              const text = String(body.text ?? "").trim();
+              if (!thread || !text || !Number.isInteger(seq)) return json({ ok: false, error: "thread / seq / text 必填" }, 400);
+              const user = String(body.user ?? "").trim() || currentUser(rws).user;
+              const r = commentOn(rws, thread, seq, user, text);
+              return json({ ok: true, thread, seq: r.seq, reply_to: seq, user, mentions: r.mentions });
+            }
+            if (action === "user") {
+              const userId = String(body.user ?? "").trim();
+              if (!userId) return json({ ok: false, error: "user 必填（如 alice —— 小写字母/数字/连字符）" }, 400);
+              const display = typeof body.display === "string" ? body.display.trim() : undefined;
+              const id = setUser(rws, userId, display && display.length > 0 ? display : undefined);
+              return json({ ok: true, ...id });
+            }
+            if (action === "bridge") {
+              const expert = String(body.expert ?? "").trim().toLowerCase();
+              if (!expert) return json({ ok: false, error: "expert 必填（如 notice-parser）" }, 400);
+              const session = String(body.session ?? "").trim() || latestSession(rws, expert);
+              const derived = `session-${expert}-${session}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+/, (m) => (m ? "-" : "")).slice(0, 64);
+              const thread = String(body.thread ?? "").trim() || (derived.length > 0 ? derived : "session");
+              const r = bridgeSession(rws, expert, session, thread, { user: currentUser(rws).user });
+              return json({ ok: true, expert, session, ...r });
+            }
+            return json({ ok: false, error: `未知 action：${action || "（空）"}（post/comment/user/bridge）` }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
+        // v0.5.17 ☁ 云生态面板（#67/#68/#72/#74）：GET 探测/模板车道（只读），
+        // POST 执行车道（docker/ssh/k8s —— body 过 lib 白名单门）。
+        // 与 CLI org cloud / 工具环 cloud_* 同源 lib/cloud.ts（单一实现防口径漂移）。
+        if (route === "GET /api/govex/cloud") {
+          const action = String(url.searchParams.get("action") ?? "probe").trim();
+          if (action === "probe") {
+            const r = cloudProbeAll();
+            return json({
+              ok: true, took_ms: r.tookMs, summary: r.summary,
+              docker: r.docker, ssh: r.ssh, k8s: r.k8s, terraform: r.terraform,
+              clis: r.clis,
+              hint: "工具缺席环境：模板车道（dockerfile/compose/manifest/terraform/ssh-template）始终可用",
+            });
+          }
+          if (action === "probe-docker") return json({ ok: true, ...probeDocker() });
+          if (action === "probe-ssh") return json({ ok: true, ...probeSsh() });
+          if (action === "probe-k8s") return json({ ok: true, ...probeK8s() });
+          if (action === "probe-tf") return json({ ok: true, ...probeTerraform() });
+          if (action === "clis") {
+            const clis = probeCloudClis();
+            return json({ ok: true, available: clis.filter((c) => c.available).length, total: clis.length, clis });
+          }
+          if (action === "overview") return json({ ok: true, ...cloudProvidersOverview() });
+          if (action === "dockerfile") {
+            const project = String(url.searchParams.get("project") ?? "node");
+            try {
+              const r = dockerfileFor(project);
+              return json({ ok: true, project_type: r.projectType, dockerfile: r.dockerfile, notes: r.notes });
+            } catch (e) {
+              return json({ ok: false, error: (e as Error).message }, 400);
+            }
+          }
+          if (action === "compose") {
+            const r = composeFor({ appName: String(url.searchParams.get("app") ?? "app") || "app" });
+            return json({ ok: true, compose: r.compose, notes: r.notes });
+          }
+          if (action === "manifest") {
+            const kind = String(url.searchParams.get("kind") ?? "deployment");
+            try {
+              const m = k8sManifestFor(kind);
+              return json({ ok: true, kind: m.kind, api_version: m.apiVersion, manifest: m.manifest, notes: m.notes });
+            } catch (e) {
+              return json({ ok: false, error: (e as Error).message }, 400);
+            }
+          }
+          if (action === "terraform") return json({ ok: true, ...terraformPlan(String(url.searchParams.get("provider") ?? "aws")) });
+          if (action === "ssh-template") {
+            const t = sshConfigTemplate();
+            return json({ ok: true, config: t.config, advice: t.advice });
+          }
+          if (action === "plan") {
+            const act = String(url.searchParams.get("intent") ?? "build");
+            try {
+              return json({ ok: true, ...dockerPlan(act) });
+            } catch (e) {
+              return json({ ok: false, error: (e as Error).message }, 400);
+            }
+          }
+          return json({ ok: false, error: `未知 action：${action}（probe/probe-docker/probe-ssh/probe-k8s/probe-tf/clis/overview/dockerfile/compose/manifest/terraform/ssh-template/plan）` }, 400);
+        }
+        if (route === "POST /api/govex/cloud") {
+          // 执行车道：docker/ssh/k8s 三动作。写面用真实工作区（非 dist/demo
+          // 快照回退）+ 只读守卫（与 /api/memory、govex 写端点同规）；
+          // 白名单/host 门控/监狱在 lib/cloud.ts 内部（拒绝先于 spawn）。
+          if (path.resolve(ws) === path.join(ROOT, "dist", "demo")) {
+            return json({ ok: false, error: "dist/demo 是入库快照（只读）。" }, 400);
+          }
+          const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+          const action = String(body.action ?? "").trim();
+          const rws = path.resolve(ws);
+          const renderRun = (r: import("../lib/cloud.ts").CloudRunResult) => json({
+            ok: r.ok, ...(r.kind ? { kind: r.kind } : {}), ...(r.reason ? { reason: r.reason } : {}),
+            argv: r.argv, exit_code: r.exitCode,
+            stdout: r.stdout.slice(0, 16384), stderr: r.stderr.slice(0, 4096), took_ms: r.tookMs,
+          });
+          if (action === "docker") {
+            const args = Array.isArray(body.args) ? (body.args as unknown[]).map(String) : [];
+            if (args.length === 0) return json({ ok: false, error: "args 必填（数组，首元素为 docker 子命令；白名单 16 子命令）" }, 400);
+            if (args[0] === "build") {
+              return renderRun(dockerBuild(rws, String(body.context ?? "."), {
+                ...(body.dockerfile ? { dockerfile: String(body.dockerfile) } : {}),
+                ...(body.tag ? { tag: String(body.tag) } : {}),
+              }));
+            }
+            return renderRun(dockerRun(args[0]!, args.slice(1)));
+          }
+          if (action === "ssh") {
+            const host = String(body.host ?? "").trim();
+            if (!host) return json({ ok: false, error: "host 必填（且须在 <工作区>/ssh-hosts.allow 白名单内）" }, 400);
+            if (body.upload_local != null || body.upload_remote != null) {
+              const local = String(body.upload_local ?? "");
+              const remote = String(body.upload_remote ?? "");
+              if (!local || !remote) return json({ ok: false, error: "upload_local / upload_remote 必填（scp 车道，local 须在工作区内）" }, 400);
+              return renderRun(scpUpload(rws, host, local, remote));
+            }
+            const command = String(body.command ?? "");
+            if (!command) return json({ ok: false, error: "command 必填（或 upload_local/upload_remote 走 scp 车道）" }, 400);
+            return renderRun(sshRun(rws, host, command));
+          }
+          if (action === "k8s") {
+            const args = Array.isArray(body.args) ? (body.args as unknown[]).map(String) : [];
+            if (args.length === 0) return json({ ok: false, error: "args 必填（数组，首元素为 kubectl 子命令；delete 等变更面永不在白名单）" }, 400);
+            return renderRun(k8sRun(rws, args));
+          }
+          return json({ ok: false, error: `未知 action：${action || "（空）"}（docker/ssh/k8s）` }, 400);
+        }
         if (route === "GET /api/spawns") {
         // v0.5.11：派生池（agent_spawn 池化重档的观测面）。
           // 数据源三层：① <ws>/spawn/pool.json 登记（v0.5.11 起每次派生回写）；
@@ -1930,6 +2214,8 @@ export async function webMain(argv: string[]): Promise<number> {
   console.log(`  会话管理   DELETE /api/session/<E>/<S>（删除）· PATCH（重命名 body {to}）`);
   console.log(`  交互面     POST /api/ask-stream（SSE 流式）· POST /api/ask（JSON 整轮）`);
   console.log(`  停止       POST /api/abort（运行轮 SIGKILL / body{id} 取消排队轮）`);
+  console.log(`  协作面     GET/POST /api/govex/collab（v0.5.17 #87：threads/feed/users/summary/whoami + post/comment/user/bridge）`);
+  console.log(`  云生态     GET/POST /api/govex/cloud（v0.5.17 #67/#68/#72/#74：probe 全景/dockerfile/compose/manifest/terraform 模板 + docker/ssh/k8s 白名单执行）`);
   console.log(`  模型       ${p.model}（GUI 可切 scripted/deepseek，请求体可逐次覆盖）`);
   // v0.4.13：网关三件套可见性 —— 直连服务商（DeepSeek 等）的鉴权/模型/超时
   // 经环境变量注入（spawn 车道继承 process.env），横幅回显防「配了没生效」。
@@ -2971,7 +3257,7 @@ function renderIndexHtml(): string {
   <button id="toolboxBtn" class="rchip" type="button" title="工具箱（v0.5.15）— 🗄 SQLite 查询 · 🔎 符号跳转 · 🛡 密钥扫描 · 📦 审计导出 · 📋 SBOM · 👥 评审推荐">
     <span class="rc-label">🧰 工具箱</span>
   </button>
-  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🌿 merge/rebase">
+  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16+）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🐞 LSP/DAP 调试 · 🌿 merge/rebase · 👥 团队协作 · ☁ 云生态">
     <span class="rc-label">🛡 治理与扩展</span>
   </button>
   <span class="tstats" id="topStats"></span>
@@ -3111,7 +3397,7 @@ function renderIndexHtml(): string {
 <div id="govexScrim" aria-hidden="true"></div>
 <div id="govexPane" role="dialog" aria-modal="true" aria-labelledby="gxTitle">
   <div class="schhead">
-    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git（v0.5.16）</div>
+    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git · 👥 协作 · ☁ 云生态（v0.5.16+）</div>
     <button class="schclose" type="button" onclick="closeGovex()" title="关闭（Esc）" aria-label="关闭治理与扩展面板">✕</button>
     <div class="tbtabs" role="tablist">
       <button class="tbtab on" id="gxTabIac" type="button" role="tab" onclick="gxTab('iac')">🛡 IaC</button>
@@ -3121,7 +3407,10 @@ function renderIndexHtml(): string {
       <button class="tbtab" id="gxTabWeb" type="button" role="tab" onclick="gxTab('web')">🌐 浏览器</button>
       <button class="tbtab" id="gxTabDbd" type="button" role="tab" onclick="gxTab('dbd')">🩺 诊断</button>
       <button class="tbtab" id="gxTabCode" type="button" role="tab" onclick="gxTab('code')">⌨ 补全/重命名</button>
+      <button class="tbtab" id="gxTabLsp" type="button" role="tab" onclick="gxTab('lsp')">🐞 LSP/DAP</button>
       <button class="tbtab" id="gxTabGit" type="button" role="tab" onclick="gxTab('git')">🌿 git</button>
+      <button class="tbtab" id="gxTabCollab" type="button" role="tab" onclick="gxTab('collab')">👥 协作</button>
+      <button class="tbtab" id="gxTabCloud" type="button" role="tab" onclick="gxTab('cloud')">☁ 云生态</button>
     </div>
   </div>
 
@@ -3198,6 +3487,29 @@ function renderIndexHtml(): string {
       <div class="tbout" id="gxRnOut"><div class="schempty">项目级重命名（#56）：缺省 dryRun 预览（unified diff ≤5 文件）；勾选「真写」后落盘（行级词边界替换，失败即停）。CLI 同款 org rename [--apply]。</div></div>
     </section>
 
+    <section class="tbsec" id="gxSecLsp" hidden>
+      <div class="tbbar">
+        <input id="gxLspName" type="text" placeholder="符号名（如 startRun / compute）" autocomplete="off" aria-label="符号名">
+        <button type="button" onclick="gxLspDef()">🎯 定义</button>
+        <button type="button" onclick="gxLspRefs()">🔗 引用</button>
+        <button type="button" onclick="gxLspHover()">💬 hover</button>
+      </div>
+      <div class="tbout" id="gxLspOut" style="margin-bottom:10px"><div class="schempty">LSP/DAP 协议集成（#26）：JSON-RPC 2.0 分帧（LSP 与 DAP 共用）+ 内置符号索引车道（definition/references/hover —— 无外部 server 时的主车道，输出 LSP 0 基 uri/range + 人读 1 基双形）。CLI 同款 org lsp definition/references/hover。</div></div>
+      <div class="tbbar">
+        <button type="button" onclick="gxLspServers()">🔎 探测外部 server</button>
+        <button type="button" onclick="gxLspProto()">🧪 协议层自检</button>
+        <button type="button" onclick="gxDebugDap()">🧪 DAP 自检</button>
+        <span class="tbmeta">servers 缺席 = 诚实降级到内置车道</span>
+      </div>
+      <div class="tbout" id="gxLspSrvOut" style="margin-bottom:10px"><div class="schempty">外部车道：typescript-language-server / pylsp / gopls / rust-analyzer / clangd … which 探测；spawn 车道（initialize → initialized → shutdown → exit）在 lib/lsp.ts。</div></div>
+      <div class="tbbar">
+        <input id="gxDbgFile" type="text" placeholder="文件（工作区相对，.hsl/.ts/.py）" autocomplete="off" aria-label="断点建议文件">
+        <button type="button" onclick="gxDebugSuggest()">🐞 断点建议</button>
+        <button type="button" onclick="gxDebugPlan()">📋 调试计划</button>
+      </div>
+      <div class="tbout" id="gxDbgOut"><div class="schempty">断点/调试建议（#108）：入口/分支/循环/return 前断点建议（符号级 &gt; 启发式级，每条带 reason）+ 调试计划（步骤 + DAP 协议就绪消息序列）。真 debug adapter attach 是路线图（诚实边界）。CLI 同款 org debug suggest/plan。</div></div>
+    </section>
+
     <section class="tbsec" id="gxSecGit" hidden>
       <div class="tbbar">
         <button type="button" onclick="gxGitState()">🌿 状态探测</button>
@@ -3207,9 +3519,74 @@ function renderIndexHtml(): string {
       </div>
       <div class="tbout" id="gxGitOut"><div class="schempty">merge / rebase 安全操作（#80）：冲突绝不自动解决 —— 冲突即自动 abort 回滚 + 冲突清单。CLI 同款 org merge / org rebase / org mergestate。</div></div>
     </section>
+
+    <section class="tbsec" id="gxSecCollab" hidden>
+      <div class="tbbar">
+        <span class="tbmeta" id="gxCollabWho">身份：…</span>
+        <input id="gxCollabUser" type="text" placeholder="切换用户 id（如 alice）" autocomplete="off" aria-label="协作用户 id" style="max-width:170px">
+        <button type="button" onclick="gxCollabSetUser()">👤 切换</button>
+        <button type="button" onclick="gxCollabLoad()">👥 刷新</button>
+      </div>
+      <div class="tbbar">
+        <input id="gxCollabThread" type="text" placeholder="线程 id（如 t1 —— 小写/数字/连字符）" autocomplete="off" aria-label="线程 id" style="max-width:200px">
+        <input id="gxCollabText" type="text" placeholder="发帖文本（@user 自动提及）" autocomplete="off" aria-label="发帖文本">
+        <button type="button" onclick="gxCollabPost()">💬 发帖</button>
+      </div>
+      <div class="tbbar">
+        <input id="gxCollabSeq" type="text" placeholder="楼层 #" autocomplete="off" aria-label="评论目标楼层" style="max-width:80px">
+        <input id="gxCollabCommentText" type="text" placeholder="评论文本（挂 replyTo 树）" autocomplete="off" aria-label="评论文本">
+        <button type="button" onclick="gxCollabComment()">↳ 评论</button>
+      </div>
+      <div class="tbbar">
+        <input id="gxCollabBridgeExpert" type="text" placeholder="桥：专家名（如 notice-parser）" autocomplete="off" aria-label="桥专家" style="max-width:190px">
+        <button type="button" onclick="gxCollabBridge()">🌉 会话账本镜像成线程</button>
+        <span class="tbmeta">单用户账本 → 团队可见（只镜像不改写，幂等）</span>
+      </div>
+      <div class="tbout" id="gxCollabOut"><div class="schempty">👥 团队协作（#87）：append-only JSONL 团队线程（runtime/collab/threads）· 回复树（replyTo 缩进）· @mention 自动抽取 · 会话账本桥。CLI 同款 org collab。诚实边界：本地文件协议，多进程强并发不在面内。</div></div>
+    </section>
+    <section class="tbsec" id="gxSecCloud" hidden>
+      <div class="tbbar">
+        <button type="button" onclick="gxCloudProbe()">☁ 全景探测</button>
+        <button type="button" onclick="gxCloudOverview()">21 模型商 + 10 云 CLI 全景</button>
+        <span class="tbmeta" id="gxCloudMeta"></span>
+      </div>
+      <div class="tbout" id="gxCloudOut" style="margin-bottom:10px"><div class="schempty">云生态探测（#67/#68/#72/#74）：docker（CLI + 守护进程）· ssh · kubectl（CLI + 集群）· terraform · 10 家云 CLI —— 缺席即诚实降级（绿 ✓ 在场 / 灰 ⬜ 缺席，悬停看安装指引），模板车道始终可用。CLI 同款 org cloud probe。</div></div>
+      <div class="tbbar">
+        <select id="gxCldDfType" aria-label="Dockerfile 型" style="max-width:120px">
+          <option value="node">node</option><option value="bun">bun</option><option value="python">python</option><option value="rust">rust</option>
+        </select>
+        <button type="button" onclick="gxCloudTemplate('dockerfile')">🐳 Dockerfile</button>
+        <button type="button" onclick="gxCloudTemplate('compose')">compose</button>
+        <select id="gxCldManifestKind" aria-label="K8s manifest 族" style="max-width:130px">
+          <option value="deployment">deployment</option><option value="service">service</option><option value="ingress">ingress</option><option value="configmap">configmap</option><option value="pvc">pvc</option>
+        </select>
+        <button type="button" onclick="gxCloudTemplate('manifest')">☸ manifest</button>
+        <button type="button" onclick="gxCloudTemplate('terraform')">🏗 terraform</button>
+        <button type="button" onclick="gxCloudTemplate('ssh-template')">🔐 ssh-config</button>
+        <select id="gxCldPlanIntent" aria-label="docker 计划意图" style="max-width:120px">
+          <option value="build">plan: build</option><option value="run">plan: run</option><option value="push">plan: push</option><option value="debug">plan: debug</option><option value="cleanup">plan: cleanup</option>
+        </select>
+        <button type="button" onclick="gxCloudTemplate('plan')">📋 命令计划</button>
+      </div>
+      <div class="tbbar">
+        <button type="button" onclick="gxCloudCopy()">📋 复制模板</button>
+        <span class="tbmeta" id="gxCloudTplMeta">模板车道（无 docker/kubectl/ssh 环境的主交付）：多阶段 · 非 root · healthcheck · 资源限额/探针/亲和性</span>
+      </div>
+      <div class="tbout" id="gxCloudTplOut" style="max-height:300px"><div class="schempty">生成 Dockerfile / compose / K8s manifest / terraform / ssh-config 模板 —— 可直接粘贴（复制按钮）或落盘后经执行车道应用。</div></div>
+      <div class="tbbar">
+        <input id="gxCldDockerArgs" type="text" placeholder="docker args（空格分隔，如：ps -a）" autocomplete="off" aria-label="docker 参数" style="max-width:260px">
+        <button type="button" onclick="gxCloudRun('docker')">🐳 执行</button>
+        <input id="gxCldSshHost" type="text" placeholder="ssh host（须在 ssh-hosts.allow）" autocomplete="off" aria-label="ssh host" style="max-width:180px">
+        <input id="gxCldSshCmd" type="text" placeholder="远程命令" autocomplete="off" aria-label="ssh 命令" style="max-width:200px">
+        <button type="button" onclick="gxCloudRun('ssh')">🔐 执行</button>
+        <input id="gxCldK8sArgs" type="text" placeholder="kubectl args（如：get pods -n prod）" autocomplete="off" aria-label="kubectl 参数" style="max-width:260px">
+        <button type="button" onclick="gxCloudRun('k8s')">☸ 执行</button>
+      </div>
+      <div class="tbout" id="gxCloudRunOut"><div class="schempty">执行车道：docker/kubectl 子命令白名单（破坏性命令一律拒绝，拒绝先于 spawn）· ssh host 门控（ssh-hosts.allow）· 数组参数零 shell 面 · 路径过工作区监狱。CLI 同款 org cloud docker/ssh/k8s。</div></div>
+    </section>
   </div>
 
-  <div class="spwfoot">治理与扩展面板与 CLI / 工具环同源（lib/dbdiag · gitmerge · rbac · iacscan · plugins · openapi · browser · completion · rename 单一实现三端消费）—— v0.5.16 「每个功能都有对应操作页面」的延续。</div>
+  <div class="spwfoot">治理与扩展面板与 CLI / 工具环同源（lib/dbdiag · gitmerge · rbac · iacscan · plugins · openapi · browser · completion · rename · lsp · debug · collab · cloud 单一实现三端消费）—— v0.5.16 「每个功能都有对应操作页面」的延续。</div>
 </div>
 <div id="voiceScrim" aria-hidden="true"></div>
 <div id="voicePane" role="dialog" aria-modal="true" aria-labelledby="voTitle">
@@ -4856,7 +5233,7 @@ function closeGovex() {
   document.getElementById("govexPane").classList.remove("on");
   document.getElementById("govexScrim").classList.remove("on");
 }
-var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Git", "git"]];
+var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Lsp", "lsp"], ["Git", "git"], ["Collab", "collab"], ["Cloud", "cloud"]];
 function gxTab(sec) {
   for (const [k, id] of GX_TABS) {
     document.getElementById("gxTab" + k).classList.toggle("on", id === sec);
@@ -5031,6 +5408,107 @@ function gxGitState() {
     out.innerHTML = '<div class="tbsym">🌿 ' + esc(s.branch || "（detached HEAD）") + (s.upstream ? " → " + esc(s.upstream) + "（ahead " + s.ahead + " · behind " + s.behind + (s.diverged ? " · ⚠ 分叉" : "") + "）" : "（无上游）") + '</div><div class="tbrow">工作区 ' + (s.dirty ? "⚠ 有未提交改动" : "干净") + " · stash " + s.stashed + " 条</div>";
   }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
 }
+// ---- 🐞 LSP/DAP 调试区块（v0.5.17 · #26/#108 —— 与 CLI org lsp/debug 同源） ----
+function gxLspDef() {
+  const name = document.getElementById("gxLspName").value.trim();
+  const out = document.getElementById("gxLspOut");
+  if (!name) { out.innerHTML = '<div class="schempty">先输入符号名</div>'; return; }
+  out.innerHTML = '<div class="schempty">查找定义中…（内置符号索引车道）</div>';
+  fetch("/api/govex/lsp?action=definition&name=" + encodeURIComponent(name)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error || j.reason || "?") + "</div>"; return; }
+    if (!(j.definitions || []).length) { out.innerHTML = '<div class="schempty">（空 —— ' + esc(j.reason || "符号未在索引中") + "）</div>"; return; }
+    let h = '<div class="tbsym">🎯 ' + esc(j.name) + " —— " + j.definitions.length + " 处定义（" + esc(j.lane) + " 车道）</div>";
+    for (const d of j.definitions) h += '<div class="tbrow"><code>' + esc(d.file) + ":" + d.line + ":" + d.column + "</code> · " + esc(d.kind) + ' · <span class="tbmeta">LSP ' + esc(d.lsp.uri) + " range " + d.lsp.range.start.line + ":" + d.lsp.range.start.character + '</span><br><span class="tbmeta">' + esc(d.snippet) + "</span></div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxLspRefs() {
+  const name = document.getElementById("gxLspName").value.trim();
+  const out = document.getElementById("gxLspOut");
+  if (!name) { out.innerHTML = '<div class="schempty">先输入符号名</div>'; return; }
+  out.innerHTML = '<div class="schempty">扫描引用中…</div>';
+  fetch("/api/govex/lsp?action=references&name=" + encodeURIComponent(name)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error || j.reason || "?") + "</div>"; return; }
+    const calls = (j.refs || []).filter(function (x) { return x.kind === "call"; }).length;
+    let h = '<div class="tbsym">🔗 ' + esc(j.name) + " —— " + (j.refs || []).length + " 处引用（call " + calls + " · mention " + ((j.refs || []).length - calls) + "）+ " + j.definitions + " 处定义（定义行已排除）" + (j.truncated ? "（截断）" : "") + "</div>";
+    if (!(j.refs || []).length) h += '<div class="schempty">（空 —— ' + esc(j.reason || "无引用") + "）</div>";
+    for (const x of (j.refs || []).slice(0, 60)) h += '<div class="tbrow"><code>' + esc(x.file) + ":" + x.line + ":" + x.column + "</code> · " + esc(x.kind) + " · " + esc(x.snippet.slice(0, 80)) + "</div>";
+    if ((j.refs || []).length > 60) h += '<div class="tbmeta">…（' + (j.refs.length - 60) + " 更多）</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxLspHover() {
+  const name = document.getElementById("gxLspName").value.trim();
+  const out = document.getElementById("gxLspOut");
+  if (!name) { out.innerHTML = '<div class="schempty">先输入符号名</div>'; return; }
+  out.innerHTML = '<div class="schempty">hover 中…</div>';
+  fetch("/api/govex/lsp?action=hover&name=" + encodeURIComponent(name)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error || "?") + "</div>"; return; }
+    if (!j.hover) { out.innerHTML = '<div class="schempty">💬 hover 为空 —— ' + esc(j.reason || "?") + "</div>"; return; }
+    let h = '<div class="tbsym">💬 ' + esc(j.hover.kind) + " <b>" + esc(j.hover.name) + "</b> · <code>" + esc(j.hover.file) + ":" + j.hover.line + "</code></div>";
+    for (const c of j.hover.contents || []) h += '<div class="tbrow">' + esc(c) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxLspServers() {
+  const out = document.getElementById("gxLspSrvOut");
+  out.innerHTML = '<div class="schempty">探测中…（which 探测 7 个已知 server）</div>';
+  fetch("/api/govex/lsp?action=servers").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error || "?") + "</div>"; return; }
+    let h = '<div class="tbsym">🔎 可用 ' + j.available + "/" + (j.servers || []).length + "</div>";
+    for (const s of j.servers || []) h += '<div class="tbrow">' + (s.available ? "✓" : "✗") + " <b>" + esc(s.name) + "</b>" + (s.path ? ' · <span class="tbmeta">' + esc(s.path) + "</span>" : "") + "</div>";
+    if (j.note) h += '<div class="tbmeta">' + esc(j.note) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxLspProto() {
+  const out = document.getElementById("gxLspSrvOut");
+  out.innerHTML = '<div class="schempty">自检中…（纯内存分帧 roundtrip）</div>';
+  fetch("/api/govex/lsp?action=protocol-selftest").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error || "?") + "</div>"; return; }
+    let h = '<div class="tbsym">🧪 ' + (j.ok ? "✓" : "✗") + " " + j.passed + "/" + j.total + " 通过</div>";
+    for (const c of j.checks || []) h += '<div class="tbrow">' + (c.ok ? "✓" : "✗") + " " + esc(c.name) + (c.detail ? ' <span class="tbmeta">' + esc(c.detail) + "</span>" : "") + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxDebugDap() {
+  const out = document.getElementById("gxLspSrvOut");
+  out.innerHTML = '<div class="schempty">自检中…（DAP 构造器字段忠实性）</div>';
+  fetch("/api/govex/debug?action=dap-selftest").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error || "?") + "</div>"; return; }
+    let h = '<div class="tbsym">🧪 ' + (j.ok ? "✓" : "✗") + " " + j.passed + "/" + j.total + " 通过</div>";
+    for (const c of j.checks || []) h += '<div class="tbrow">' + (c.ok ? "✓" : "✗") + " " + esc(c.name) + (c.detail ? ' <span class="tbmeta">' + esc(c.detail) + "</span>" : "") + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxDebugSuggest() {
+  const file = document.getElementById("gxDbgFile").value.trim();
+  const out = document.getElementById("gxDbgOut");
+  if (!file) { out.innerHTML = '<div class="schempty">先输入文件（工作区相对路径）</div>'; return; }
+  out.innerHTML = '<div class="schempty">扫描断点建议中…</div>';
+  fetch("/api/govex/debug?action=suggest&file=" + encodeURIComponent(file)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error || j.reason || "?") + "</div>"; return; }
+    let h = '<div class="tbsym">🐞 ' + esc(j.file) + "（" + esc(j.language) + " · " + j.lines + " 行 · " + (j.suggestions || []).length + " 处建议断点" + (j.truncated ? "（截断）" : "") + "）</div>";
+    if (!(j.suggestions || []).length) h += '<div class="schempty">（空 —— ' + esc(j.reason || "?") + "）</div>";
+    for (const s of j.suggestions || []) h += '<div class="tbrow"><code>' + String(s.line).padStart(4) + "</code> [" + (s.confidence === "symbol" ? "符号" : "启发") + "] " + esc(s.reason) + ' · <span class="tbmeta">' + esc(s.snippet.slice(0, 70)) + "</span></div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxDebugPlan() {
+  const file = document.getElementById("gxDbgFile").value.trim();
+  const out = document.getElementById("gxDbgOut");
+  if (!file) { out.innerHTML = '<div class="schempty">先输入文件（工作区相对路径）</div>'; return; }
+  out.innerHTML = '<div class="schempty">组织调试计划中…</div>';
+  fetch("/api/govex/debug?action=plan&file=" + encodeURIComponent(file)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error || j.reason || "?") + "</div>"; return; }
+    let h = '<div class="tbsym">📋 ' + esc(j.file) + "（" + j.suggestions + " 断点建议 · " + (j.steps || []).length + " 步 · " + (j.dap_messages || []).length + " 条 DAP 消息）</div>";
+    for (const st of j.steps || []) h += '<div class="tbrow"><b>第 ' + st.step + " 步 · " + esc(st.title) + "</b><br><span class=\\"tbmeta\\">" + esc(st.detail) + "</span></div>";
+    h += '<div class="tbmeta" style="margin-top:6px">DAP 消息序列（协议就绪）：</div>';
+    for (const m of j.dap_messages || []) h += '<div class="tbrow"><code>seq=' + m.seq + " " + esc(m.command) + "</code></div>";
+    if (j.roadmap) h += '<div class="tbmeta">⚠ ' + esc(j.roadmap) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
 function gxGitMerge() {
   const source = document.getElementById("gxGitSrc").value.trim();
   const out = document.getElementById("gxGitOut");
@@ -5053,6 +5531,221 @@ function gxGitRebase() {
     let h = j.ok ? '<div class="tbsym">✓ rebase 完成</div>' : '<div class="tbsym">✗ rebase 未完成（' + esc(j.kind || "?") + "）：" + esc(j.error || "") + "</div>";
     h += '<div class="tbrow">' + esc(String(j.output || "").trim().split("\\n")[0] || "") + "</div>";
     for (const c of j.conflicts || []) h += '<div class="tbrow">冲突：' + esc(c) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+// ---- 👥 团队协作（v0.5.17 · #87：线程 + 回复树 + @mention + 会话账本桥） ----
+// XSS 纪律：全部用户文本经 esc() 转义后再进 innerHTML（与既有面板同最严口径）。
+var gxCollabCurrent = ""; // 当前查看的线程 id（发帖/评论缺省目标）
+function gxCollabWhoRender(j) {
+  const who = document.getElementById("gxCollabWho");
+  if (who) who.textContent = "身份：" + j.user + (j.display ? "（" + j.display + "）" : "") + " ← " + (j.source === "env" ? "环境变量" : j.source === "file" ? "身份文件" : "缺省 local");
+}
+function gxCollabLoad() {
+  const out = document.getElementById("gxCollabOut");
+  out.innerHTML = '<div class="schempty">加载中…</div>';
+  fetch("/api/govex/collab?action=threads").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    gxCollabWhoRender(j.me || {});
+    const s = j.summary || {};
+    let h = '<div class="tbsym">👥 ' + s.threads + " 线程 · " + s.posts + " 帖（" + s.comments + " 评论）· " + s.users + " 位协作者" + (s.last_active ? " · 最后活动 " + String(s.last_active).replace("T", " ").slice(0, 19) : "") + "</div>";
+    if (!(j.threads || []).length) { h += '<div class="schempty">（空 —— 上方输入线程 id 与文本发第一帖）</div>'; }
+    for (const t of j.threads || []) {
+      h += '<div class="tbsym"><b>' + esc(t.id) + "</b> · " + esc(t.title) + ' <span class="tbmeta">' + t.posts + " 帖（" + t.comments + " 评论）· " + esc((t.participants || []).join(", ")) + "</span>" +
+        ' <button type="button" onclick="gxCollabFeed(\\'' + esc(t.id) + '\\')">查看</button></div>';
+    }
+    const users = j.collaborators || [];
+    if (users.length) {
+      h += '<div class="tbmeta" style="margin-top:6px">协作者（' + users.length + "）：</div>";
+      for (const u of users.slice(0, 20)) h += '<div class="tbrow">· ' + esc(u.user) + " — " + u.posts + " 帖 · 活跃 " + String(u.last_active || "").replace("T", " ").slice(0, 19) + "</div>";
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxCollabFeed(threadId) {
+  gxCollabCurrent = threadId;
+  const threadInput = document.getElementById("gxCollabThread");
+  if (threadInput) threadInput.value = threadId;
+  const out = document.getElementById("gxCollabOut");
+  out.innerHTML = '<div class="schempty">读取中…</div>';
+  fetch("/api/govex/collab?action=feed&thread=" + encodeURIComponent(threadId)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    let h = '<div class="tbsym">◆ 线程 ' + esc(j.thread) + " · " + (j.posts || []).length + " 帖" + (j.truncated ? "（超 2000 帖截断）" : "") + ' <button type="button" onclick="gxCollabLoad()">← 返回列表</button></div>';
+    if (!(j.posts || []).length) { h += '<div class="schempty">（空线程）</div>'; }
+    for (const p of j.posts || []) {
+      const pad = "padding-left:" + (8 + (p.depth || 0) * 22) + "px";
+      const kindMark = p.kind === "comment" ? "评论" : p.kind === "system" ? "系统" : "帖";
+      const mentionMark = (p.mentions || []).length ? ' · <span class="tbmeta">@' + esc(p.mentions.join(" @")) + "</span>" : "";
+      const replyMark = p.reply_to !== undefined ? " ↳ #" + p.reply_to : "";
+      h += '<div class="tbrow" style="' + pad + '"><b>#' + p.seq + "</b> " + esc(p.user) + ' <span class="tbmeta">' + kindMark + replyMark + " · " + String(p.at || "").replace("T", " ").slice(0, 19) + "</span>" + mentionMark +
+        '<br><span style="white-space:pre-wrap">' + esc(String(p.text || "").slice(0, 400)) + "</span>" +
+        ' <button type="button" onclick="gxCollabQuote(' + p.seq + ')" title="评论这层">↳</button></div>';
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxCollabQuote(seq) {
+  const seqInput = document.getElementById("gxCollabSeq");
+  if (seqInput) seqInput.value = String(seq);
+  const textInput = document.getElementById("gxCollabCommentText");
+  if (textInput) textInput.focus();
+}
+function gxCollabPost() {
+  const thread = document.getElementById("gxCollabThread").value.trim();
+  const text = document.getElementById("gxCollabText").value.trim();
+  const out = document.getElementById("gxCollabOut");
+  if (!thread || !text) { out.innerHTML = '<div class="schempty">先填线程 id 与发帖文本</div>'; return; }
+  gxPost("/api/govex/collab", { action: "post", thread: thread, text: text }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    document.getElementById("gxCollabText").value = "";
+    out.innerHTML = '<div class="tbsym">✓ 已发帖 ' + esc(j.thread) + " #" + j.seq + "（" + esc(j.user) + ((j.mentions || []).length ? " · 已提及 @" + esc(j.mentions.join(" @")) : "") + "）</div>";
+    gxCollabFeed(j.thread);
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxCollabComment() {
+  const thread = (document.getElementById("gxCollabThread").value.trim() || gxCollabCurrent);
+  const seqRaw = document.getElementById("gxCollabSeq").value.trim();
+  const text = document.getElementById("gxCollabCommentText").value.trim();
+  const out = document.getElementById("gxCollabOut");
+  const seq = Math.floor(Number(seqRaw));
+  if (!thread || !seqRaw || !Number.isFinite(seq) || !text) { out.innerHTML = '<div class="schempty">先填楼层 # 与评论文本</div>'; return; }
+  gxPost("/api/govex/collab", { action: "comment", thread: thread, seq: seq, text: text }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    document.getElementById("gxCollabCommentText").value = "";
+    out.innerHTML = '<div class="tbsym">✓ 已评论 ' + esc(j.thread) + " #" + j.seq + "（↳ #" + j.reply_to + " · " + esc(j.user) + "）</div>";
+    gxCollabFeed(j.thread);
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxCollabSetUser() {
+  const userId = document.getElementById("gxCollabUser").value.trim();
+  const out = document.getElementById("gxCollabOut");
+  if (!userId) { out.innerHTML = '<div class="schempty">先输入用户 id（如 alice —— 小写字母/数字/连字符）</div>'; return; }
+  gxPost("/api/govex/collab", { action: "user", user: userId }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    out.innerHTML = '<div class="tbsym">✓ 协作用户已切换：' + esc(j.user) + (j.display ? "（" + esc(j.display) + "）" : "") + "</div>";
+    gxCollabLoad();
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxCollabBridge() {
+  const expert = document.getElementById("gxCollabBridgeExpert").value.trim();
+  const out = document.getElementById("gxCollabOut");
+  if (!expert) { out.innerHTML = '<div class="schempty">先输入专家名（如 notice-parser）</div>'; return; }
+  out.innerHTML = '<div class="schempty">镜像中…（读单用户会话账本 → 团队线程，原账本字节不变）</div>';
+  gxPost("/api/govex/collab", { action: "bridge", expert: expert }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    out.innerHTML = '<div class="tbsym">🌉 已镜像 ' + esc(j.expert) + "/" + esc(j.session) + " → 线程 " + esc(j.threadId) + "：" + j.mirrored + "/" + j.turns + " 轮（" + j.skipped + " 轮已镜像跳过 · 原账本字节不变）</div>";
+    gxCollabFeed(j.threadId);
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+
+// ---- ☁ 云生态面板（v0.5.17：#67/#68/#72/#74 —— 探测全景 · 模板生成器 · 白名单执行） ----
+var gxCldTplText = ""; // 当前模板文本（复制按钮用）
+function gxCloudProbe() {
+  const out = document.getElementById("gxCloudOut"), meta = document.getElementById("gxCloudMeta");
+  out.innerHTML = '<div class="schempty">探测中…（各 CLI which + 版本探活 + 守护进程/集群可达，5s 硬超时）</div>';
+  fetch("/api/govex/cloud?action=probe").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    meta.textContent = j.took_ms + "ms · docker/ssh/k8s/tf/clis 五面";
+    let h = "";
+    const row = function (icon, name, p) {
+      return '<div class="tbrow">' + icon + " <b>" + name + "</b> " + (p.available ? '<span class="spwc">✓ 在场' + (p.version ? "（" + esc(String(p.version).slice(0, 40)) + "）" : "") + "</span>" : "⬜ 缺席") + (p.daemonReachable !== undefined ? " · 守护进程 " + (p.daemonReachable ? "✓ 可达" : "✗ 不可达") : "") + (p.clusterReachable !== undefined ? " · 集群 " + (p.clusterReachable ? "✓ 可达" : "✗ 不可达") : "") + (p.reason ? ' · <span class="tbmeta">' + esc(String(p.reason).slice(0, 110)) + "</span>" : "") + "</div>";
+    };
+    h += row("🐳", "docker", j.docker);
+    h += row("🔐", "ssh", j.ssh);
+    h += row("☸", "kubectl", j.k8s);
+    h += row("🏗", "terraform", j.terraform);
+    h += '<div class="tbmeta" style="margin-top:6px">☁ 云 CLI（' + j.summary.clisAvailable + "/" + j.summary.clisTotal + " 家在场，悬停看安装指引）：</div>";
+    for (const c of j.clis || []) {
+      h += '<div class="tbrow"' + (c.available ? "" : ' title="' + esc(c.installHint) + '"') + ">" + (c.available ? '<span class="spwc">✓</span>' : "⬜") + " <b>" + esc(c.name) + "</b> " + (c.available ? esc(String(c.version || "").slice(0, 44)) : '<span class="tbmeta">' + esc(c.installHint.slice(0, 60)) + "</span>") + "</div>";
+    }
+    if (!(j.summary.dockerDaemon || j.summary.sshAvailable || j.summary.k8sCluster || j.summary.terraformAvailable || j.summary.clisAvailable > 0)) {
+      h += '<div class="tbrow" style="margin-top:4px">⚠ 工具缺席环境 —— 模板车道即主车道（下方生成器：Dockerfile/compose/manifest/terraform/ssh-config + 命令计划）</div>';
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxCloudOverview() {
+  const out = document.getElementById("gxCloudOut");
+  out.innerHTML = '<div class="schempty">加载中…</div>';
+  fetch("/api/govex/cloud?action=overview").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    let h = '<div class="tbsym">☁ provider 全景：模型服务商 <b>' + j.modelProviders + "</b> 家（推理面）+ 云 CLI <b>" + j.cloudClis + "</b> 家（基建面）= <b>" + j.total + "</b> 面</div>";
+    h += '<div class="tbmeta">模型：' + esc(j.providers.filter(function (p) { return !p.local; }).map(function (p) { return p.name; }).join(" · ")) + "</div>";
+    h += '<div class="tbmeta">本地推理：' + esc(j.providers.filter(function (p) { return p.local; }).map(function (p) { return p.name; }).join(" · ")) + "（无需 key）</div>";
+    h += '<div class="tbmeta">云 CLI：' + esc(j.clis.map(function (c) { return c.name + (c.available ? "✓" : ""); }).join(" · ")) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxCloudTemplate(kind) {
+  const out = document.getElementById("gxCloudTplOut"), meta = document.getElementById("gxCloudTplMeta");
+  let url = "/api/govex/cloud?action=" + kind;
+  if (kind === "dockerfile") url += "&project=" + encodeURIComponent(document.getElementById("gxCldDfType").value);
+  if (kind === "manifest") url += "&kind=" + encodeURIComponent(document.getElementById("gxCldManifestKind").value);
+  if (kind === "plan") url += "&intent=" + encodeURIComponent(document.getElementById("gxCldPlanIntent").value);
+  out.innerHTML = '<div class="schempty">生成中…</div>';
+  fetch(url).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    let text = "", title = "";
+    if (kind === "dockerfile") { text = j.dockerfile; title = "Dockerfile（" + j.project_type + " 型 · 多阶段 · 非 root · healthcheck）"; }
+    else if (kind === "compose") { text = j.compose; title = "docker-compose.yml（服务 · 专用网络 · 具名卷 · healthcheck）"; }
+    else if (kind === "manifest") { text = j.manifest; title = j.kind + "（apiVersion " + j.api_version + "）"; }
+    else if (kind === "terraform") { text = j.mainTf; title = "main.tf（provider " + j.provider + "）"; }
+    else if (kind === "ssh-template") { text = j.config + "\\n# 安全建议：\\n" + j.advice.map(function (a) { return "# - " + a; }).join("\\n"); title = "~/.ssh/config 片段模板"; }
+    else if (kind === "plan") { text = j.steps.map(function (s, i) { return (i + 1) + ". " + s.cmd + "\\n   # " + s.note; }).join("\\n\\n") + (j.warning ? "\\n\\n⚠ " + j.warning : ""); title = "docker 命令计划（意图 " + j.action + "）"; }
+    gxCldTplText = text;
+    meta.textContent = title + " · " + (j.notes || []).length + " 条要点（模板尾注）";
+    let h = "<div class=\\"tbsym\\">" + esc(title) + "</div>";
+    h += '<pre style="margin:6px 0 0;white-space:pre-wrap;word-break:break-all;font:11px/1.5 var(--mono);color:var(--fg)">' + esc(text) + "</pre>";
+    for (const n of j.notes || []) h += '<div class="tbmeta">💡 ' + esc(n) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxCloudCopy() {
+  const meta = document.getElementById("gxCloudTplMeta");
+  if (!gxCldTplText) { meta.textContent = "先在上方生成一个模板"; return; }
+  const done = function () { meta.textContent = "✓ 已复制到剪贴板（" + gxCldTplText.length + " 字符）"; };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(gxCldTplText).then(done, function () { gxCloudCopyFallback(done); });
+  } else gxCloudCopyFallback(done);
+}
+function gxCloudCopyFallback(done) {
+  // 降级车道：临时 textarea + execCommand（非安全上下文无 clipboard API）
+  const ta = document.createElement("textarea");
+  ta.value = gxCldTplText; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand("copy"); done(); } catch (e) { document.getElementById("gxCloudTplMeta").textContent = "✗ 复制失败 —— 手动选择模板文本复制"; }
+  document.body.removeChild(ta);
+}
+function gxCloudRun(lane) {
+  const out = document.getElementById("gxCloudRunOut");
+  let body;
+  if (lane === "docker") {
+    const args = document.getElementById("gxCldDockerArgs").value.trim().split(/\s+/).filter(Boolean);
+    if (args.length === 0) { out.innerHTML = '<div class="schempty">先输入 docker 参数（如：ps -a）</div>'; return; }
+    body = { action: "docker", args: args };
+  } else if (lane === "ssh") {
+    const host = document.getElementById("gxCldSshHost").value.trim();
+    const command = document.getElementById("gxCldSshCmd").value.trim();
+    if (!host || !command) { out.innerHTML = '<div class="schempty">host 与命令都要填（host 须在 <工作区>/ssh-hosts.allow）</div>'; return; }
+    body = { action: "ssh", host: host, command: command };
+  } else {
+    const args = document.getElementById("gxCldK8sArgs").value.trim().split(/\s+/).filter(Boolean);
+    if (args.length === 0) { out.innerHTML = '<div class="schempty">先输入 kubectl 参数（如：get pods -n prod）</div>'; return; }
+    body = { action: "k8s", args: args };
+  }
+  out.innerHTML = '<div class="schempty">执行中…（数组参数 · 白名单门控 · 30s 硬超时）</div>';
+  gxPost("/api/govex/cloud", body).then(function (j) {
+    if (!j.ok) {
+      const kindText = { denied: "白名单拒绝（未执行）", "tool-absent": "CLI 缺席（用模板车道）", "host-not-allowed": "host 未获放行（ssh-hosts.allow）", jail: "路径越界（工作区监狱）", timeout: "超时", failed: "退出码非 0" };
+      out.innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(kindText[j.kind] || "") + " —— " + esc(j.reason || "") + "</div>";
+      return;
+    }
+    let h = '<div class="tbsym">✓ ' + esc(lane) + " 执行成功（" + j.took_ms + "ms · argv 数组参数）</div>";
+    h += '<div class="tbmeta">argv：' + esc(j.argv.join(" ").slice(0, 160)) + "</div>";
+    const so = String(j.stdout || "").trim();
+    if (so) h += '<pre style="margin:6px 0 0;white-space:pre-wrap;font:11px/1.5 var(--mono)">' + esc(so.slice(0, 6000)) + "</pre>";
+    const se = String(j.stderr || "").trim();
+    if (se) h += '<div class="tbmeta">（stderr）' + esc(se.slice(0, 1500)) + "</div>";
     out.innerHTML = h;
   }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
 }

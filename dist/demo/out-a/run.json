@@ -1,7 +1,13 @@
 {
+<<<<<<< HEAD
   "ts": "2026-09-18T17:42:02.718Z",
   "ok": true,
   "elapsed_ms": 343,
+=======
+  "ts": "2026-09-18T17:41:45.769Z",
+  "ok": true,
+  "elapsed_ms": 280,
+>>>>>>> lab-main
   "model": "scripted",
   "task": "抓取某站点近一周公告，输出结构化表格",
   "events": 55

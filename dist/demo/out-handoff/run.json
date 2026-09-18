@@ -1,7 +1,13 @@
 {
+<<<<<<< HEAD
   "ts": "2026-09-18T17:42:03.777Z",
   "ok": true,
   "elapsed_ms": 24,
+=======
+  "ts": "2026-09-18T17:41:46.576Z",
+  "ok": true,
+  "elapsed_ms": 18,
+>>>>>>> lab-main
   "model": "scripted",
   "task": "(handoff) small request",
   "events": 5

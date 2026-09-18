@@ -1,4 +1,5 @@
 {
+<<<<<<< HEAD
   "captured_at": "2026-09-18T17:42:03.790Z",
   "commits": [
     {
@@ -20,6 +21,29 @@
       "sha": "7d5045f",
       "subject": "registry template (notice-parser@1.0.0)",
       "date": "2026-09-18 17:42:02 +0000"
+=======
+  "captured_at": "2026-09-18T17:41:46.583Z",
+  "commits": [
+    {
+      "sha": "b10c6f9",
+      "subject": "patch record-validator -> 1.0.1 (remedy: count date_status=unparsed as valid (flagged, not excluded))",
+      "date": "2026-09-18 17:41:46 +0000"
+    },
+    {
+      "sha": "1e16a66",
+      "subject": "keep record-validator@1.0.0 (user curation)",
+      "date": "2026-09-18 17:41:45 +0000"
+    },
+    {
+      "sha": "7690dd1",
+      "subject": "mint record-validator@1.0.0 (factory)",
+      "date": "2026-09-18 17:41:45 +0000"
+    },
+    {
+      "sha": "4cbf91e",
+      "subject": "registry template (notice-parser@1.0.0)",
+      "date": "2026-09-18 17:41:45 +0000"
+>>>>>>> lab-main
     }
   ]
 }

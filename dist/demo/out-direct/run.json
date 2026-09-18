@@ -1,7 +1,11 @@
 {
+<<<<<<< HEAD
   "ts": "2026-09-18T17:42:03.693Z",
+=======
+  "ts": "2026-09-18T17:41:46.513Z",
+>>>>>>> lab-main
   "ok": true,
-  "elapsed_ms": 35,
+  "elapsed_ms": 32,
   "model": "scripted",
   "task": "(direct) multi-turn",
   "events": 10

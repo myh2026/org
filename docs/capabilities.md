@@ -63,7 +63,7 @@
 | 23 | 长期记忆 | ✅ | v0.5.3：runtime/memories/<expert>.md（跨会话注入尾部 40 行）· org memory CLI/Web/`/memory` 三端 |
 | 24 | 文档/PDF 读取 | ✅ | **v0.5.15** lib/pdfread.ts 三层降级链：pdftotext（系统）→ uv+pypdf（零全局污染）→ 诚实失败附安装指引；魔数嗅探 · 页帽/字符帽截断标注。三端：CLI `org read` · 工具环 `read_pdf`（ReadOnly 可用）· 引擎探测 `pdfEngines()`；tests/pdfread 10 例（引擎缺席 skip） |
 | 25 | 图片/截图理解 | ✅ | v0.5.13 视觉入口：lib/vision.ts（z-ai SDK createVision · 多图 ≤4 · 魔数唤探防伪造 mime · prompt 超长诚实截断）→ Web 📷 按钮（分析→引用闭环：描述追加进输入框可编辑后派单）+ CLI org vision；401/凭据缺席降级 remedy（部署环境配好即全功能） |
-| 26 | LSP/DAP 协议集成 | ⬜ | 未做 |
+| 26 | LSP/DAP 协议集成 | ✅ | **v0.5.17** lib/lsp.ts 三层：①**协议层** JSON-RPC 2.0 分帧（Content-Length 头 + JSON body，LSP 与 DAP 共用；流式解码器处理粘包/半包/多字节字符字节边界 —— CJK 体按字节数计不按字符数；坏帧跳过计数不炸流）+ 构造器全家桶（request/response/notification/error + initialize→initialized→shutdown→exit 生命周期消息）—— 任何外部 LSP server 都能用这层对话；②**内置符号索引车道**（无外部 server 的主车道）：lspDefinition/lspReferences/lspHover 复用 lib/symbols.ts 索引，输出 LSP 规范形（file:// uri + 0 基 range）与人读形（1 基 file:line:column）双形，call/mention 分类 + 列号精确化；③**外部 server 车道**：detectLspServers（typescript-language-server/pylsp/pyright/gopls/rust-analyzer/clangd/bash-language-server 七家 which 探测，缺席诚实降级）+ spawnLspServer 真协议对话（LspClient：响应按 id 关联 · 超时诚实拒绝 · server 早夭不连坐 · shutdown→exit→kill 兜底全生命周期）。三端：CLI `org lsp definition/references/hover/servers/protocol` · 工具环 6 工具（lsp_definition/lsp_references/lsp_hover/lsp_servers 只读）· Web GET /api/govex/lsp（5 动作）+ 🐞 面板 Tab。诚实边界：真编辑器级会话（didOpen/didChange 增量同步/补全路由）是路线图；tests/lsp 41 例（含 echo 型假 server 全生命周期 + 工具环 e2e） |
 | 27 | AST、语法树与类型信息 | ✅ | **这是 HSL 的本体**：S1-S8 静态铁律 + 38 后端 AST 投射 + 语义对拍 |
 | 28 | 增量索引/跨仓搜索 | 🟡 | 静默更新检测 + N 版本冗余 + registry git 资产层；代码索引未做 |
 | 29 | 代码图谱/知识图谱 | 🟡 | graph 拓扑（G1-G6 校验 + node/edge 事件可观测）即程序结构图谱；知识图谱未做 |
@@ -119,14 +119,14 @@
 | 64 | 启动服务 | ✅ | org web/taskd（守护执行器）；长程任务后台起停 |
 | 65 | 安装依赖 | 🟡 | shell_run 可执行 install（白名单内）；无专用依赖管理面 |
 | 66 | 环境变量管理 | ✅ | 用户环境不可覆盖层 + org config 注入 + DHV_LLM_\*/ORG_\* 全链传递（双车道合并的历史 bug 档案） |
-| 67 | Docker/容器操作 | ⬜ | 未做（shell_run 可达，无专用安全封装） |
-| 68 | 远程 SSH | ⬜ | 未做 |
+| 67 | Docker/容器操作 | ✅ | **v0.5.17** lib/cloud.ts 四层：probeDocker（which + --version 探活 + docker info 守护进程可达 5s 硬超时）→ dockerRun **白名单子命令封装**（16 子命令：version/info/ps/images/build/run/create/start/stop/rm/rmi/logs/inspect/pull/tag/push；system prune/kill/exec 等破坏性命令绝不在内，拒绝先于 spawn）+ 数组参数零 shell 面 + 30s 硬超时 + dockerBuild（context/Dockerfile 过 pathjail）→ 降级车道：dockerfileFor 四型生产级模板（node/bun/python/rust，多阶段 + 非 root + healthcheck，过自家 iacscan 自检）+ composeFor + dockerPlan 五意图可粘贴命令序列。三端：CLI org cloud · 工具环 cloud_docker/cloud_dockerfile（process_spawn 门+审批）· Web ☁ 面板 |
+| 68 | 远程 SSH | ✅ | **v0.5.17** lib/cloud.ts：probeSsh（ssh -V 探活 + ~/.ssh config/known_hosts **只看存在性** —— 私钥/密钥内容绝不读取绝不回显）→ sshRun/scpUpload **host 白名单门控**（<ws>/ssh-hosts.allow 缺席 = 拒绝一切远程执行 + 创建指引）+ BatchMode=yes + ConnectTimeout=10 + StrictHostKeyChecking=accept-new + 数组参数 + scp local 过 pathjail/remote 拒 shell 元字符 → 降级车道：sshConfigTemplate（Host 片段 + 密钥/跳板机/IdentitiesOnly 安全建议）+ sshPlan 五步计划。三端：CLI org cloud ssh/scp/ssh-template · 工具环 cloud_ssh（双形态：执行/上传）· Web ☁ 面板。诚实注：沙箱无真实远程主机，交付门控+模板车道，真实车道代码路径完整 |
 | 69 | 沙箱执行 | ✅ | **多层**：路径监狱（symlink 实解析）+ 首词白名单 + 产物目录隔离 + 工具环能力门 + 审批队列 |
 | 70 | 超时/取消/重试 | ✅ | shell 超时 killed 标注 · LLM 180s AbortController + 3 次退避 + 路由器 key 轮换 · 任务 cancel/pause/resume/retry · web abort 票据化 |
 | 71 | CI/CD 流水线执行 | ✅ | 本仓库 CI（verify 三平台矩阵 + 单二进制冒烟 + ruff 门禁 + dist 回写）+ release 五目标交叉编译 |
-| 72 | K8s/Terraform | ⬜ | 未做 |
+| 72 | K8s/Terraform | ✅ | **v0.5.17** lib/cloud.ts：probeK8s（kubectl version --client + cluster-info 集群可达 5s）/probeTerraform 同型 → k8sRun **白名单子命令**（get/describe/apply/logs/rollout/top/config…；delete/edit/scale/exec/drain 永不在内，拒绝先于 spawn）+ apply -f 路径过 pathjail（-f - stdin 拒绝）→ 降级车道：k8sManifestFor 五族生产级模板（Deployment 带资源限额/双探针/securityContext/亲和性 · Service/Ingress/ConfigMap/PVC）+ terraformPlan main.tf 骨架（provider+变量校验+输出，密钥铁律注释）。三端：CLI org cloud k8s/manifest/terraform · 工具环 cloud_k8s · Web ☁ 面板。诚实注：沙箱无集群可实测，真实集群车道已实现、模板车道为主交付 |
 | 73 | 数据库迁移/操作 | ✅ | **v0.5.15** lib/db.ts 查询半环 `dbQuery`：**双层只读门**（词法白名单：单语句 + SELECT/WITH/EXPLAIN/PRAGMA table_info 前导 + 内核 readonly 连接兜底 —— WITH…INSERT 漏网句实测被内核拦截零写入）+ 行帽 200（上限 1000）+ 256MB 文件帽 + 工作区监狱。三端同 #43；tests/db 24 例 |
-| 74 | 云服务/云 CLI | ⬜ | 未做 |
+| 74 | 云服务/云 CLI | ✅ | **v0.5.17** lib/cloud.ts cloudCliRegistry：10 家注册表（aws/gcloud/az/gh/vercel/flyctl/railway/heroku/doctl/oci，每家 {cmd, probeFlag, installHint, docsUrl}）+ probeCloudClis 批量探测（which + 版本旗标各带 5s 超时，缺席即不 spawn）+ **cloudProvidersOverview 与 21 家模型服务商注册表口径打通**（推理面 21 + 基建面 10 = 31 面 provider 全景）+ cloudProbeAll 统一探测总入口（docker/ssh/k8s/tf/clis 五键，Web/CLI/工具环三端共用防口径漂移）。三端：CLI org cloud clis/overview · 工具环 cloud_probe/cloud_clis · Web ☁ 面板（绿/灰 + installHint tooltip） |
 | 75 | 发布/部署/回滚 | ✅ | auto-release 打 tag + release 发布 + sha256 + 版本单一来源守卫（org 资产层的发布回滚：revert + 金丝雀 + 蓝绿） |
 
 ## 六、Git 与协作（76–90）
@@ -144,7 +144,7 @@
 | 84 | 变更影响分析 | ✅ | 补丁 flow 级闸门（评测分不回退）+ 评分卡漂移 + 影子对比 |
 | 85 | 评审人推荐 | ✅ | **v0.5.15** lib/owners.ts `recommendReviewers`：CODEOWNERS 规则聚合（覆盖数排序 + 模式归因 reason）；无 CODEOWNERS → 目录启发式降级（fromCodeowners:false + 诚实说明）。三端：CLI `org owners --review a,b` · 工具环 `review_suggest`（ReadOnly）· Web 工具箱；tests/owners 14 例 |
 | 86 | Issue/工单集成 | 🟡 | 开发流程层（issue 驱动交付，本系列 #28-#31）；org 运行时无 tracker API |
-| 87 | 团队共享会话/评论 | ⬜ | 未做（会话账本是单用户文件协议） |
+| 87 | 团队共享会话/评论 | ✅ | **v0.5.17** lib/collab.ts：单用户会话账本之上叠多用户协作层（向后兼容铁律 —— lib/sessions.ts 只读复用零改写）。append-only JSONL 团队线程（runtime/collab/threads/<id>.jsonl，与审计账本同哲学：只追加不改写；seq 单调 + 坏行容忍）· 回复树（replyTo 任意挂评论，flattenThread 平铺带 depth）· @mention 自动抽取（@name 用户 id 形，与 @路径 同形实现）· 身份层（collab-user 文件 + ORG_COLLAB_USER 覆盖 + 缺省 local）· 协作者视图/摘要 · **会话账本桥** bridgeSession（LedgerTurn 镜像成 kind:"system" 帖，只镜像不改写，meta 回溯键幂等）。三端：CLI `org collab`（whoami/user/threads/feed --since/post/comment/users/summary/bridge 九子命令）· 工具环 `collab_threads/collab_feed/collab_summary/collab_post/collab_comment`（前三只读，后二 file_write 门 + 审批在环）· Web 👥 治理与扩展面板协作 Tab（GET/POST /api/govex/collab，XSS esc 全转义）；tests/collab 26 例（含工具环 e2e + 原账本字节不变 sha256 对拍）。诚实注：本地文件协议，多进程强并发不在面内（append 直写 + seq 冲突检测重读，单机协作场景） |
 | 88 | 多人协作与角色权限 | 🟡 | 审批决定者署名（by: web/cli）+ 能力三态；RBAC 未做 |
 | 89 | CODEOWNERS | ✅ | **v0.5.15** lib/owners.ts `loadCodeowners`：GitHub 兼容子集（glob 模式 + @owner + 注释 + 后规则覆盖语义）；查找顺序 .org/CODEOWNERS → CODEOWNERS → .github/CODEOWNERS；`matchOwners` 最长匹配。CLI `org owners` + 匹配清单；tests/owners 14 例 |
 | 90 | 发布说明/变更日志 | ✅ | CHANGELOG 叙事纪律（本仓库即实例）+ release notes 自动截取 |
@@ -175,7 +175,7 @@
 |:--|:--|:--|:--|
 | 106 | 错误日志解析 | ✅ | run panic 收尾 + 错误尾行捕获（captureDone await 修复） |
 | 107 | 堆栈跟踪分析 | 🟡 | HSL_DEBUG stack 透传；自动分析未做 |
-| 108 | 断点/调试建议 | ⬜ | 未做（DAP 路线图） |
+| 108 | 断点/调试建议 | ✅ | **v0.5.17** lib/debug.ts：①**断点建议器** suggestBreakpoints（符号索引入口行 fn/graph = confidence:"symbol" + 源码行扫描 if/else 分支行/循环头行/return 前一行 = confidence:"heuristic"，每条带 reason 与双级置信；同行去重符号级优先；词法归因最近上方符号；HSL/TS/TSX/PY 面，其余扩展名诚实空建议）②**DAP 构造器** makeDapInitialize/makeDapSetBreakpoints/makeDapStackTrace/makeDapThreads（seq 单调 + command/arguments 规范忠实 —— setBreakpoints 双字段 lines+breakpoints 兼容新旧 adapter；与 lib/lsp.ts 分帧层共用往返）③**调试计划** debugPlan（attach→入口断点→分支/循环→return 前→命中看栈→disconnect 步骤化说明 + 协议就绪 DAP 消息序列直接可观测）。三端：CLI `org debug suggest/plan/dap`（breakpoints 别名）· 工具环 debug_breakpoints/debug_plan（只读，file 过 pathjail）· Web GET /api/govex/debug（3 动作）。诚实边界：不 spawn 真 debug adapter（沙箱无 node --inspect/debugpy/lldb-dap 桥）—— 真 DAP attach 是路线图，交付协议封装 + 建议器 + 计划；tests/lsp 41 例 |
 | 109 | 日志查询与关联 | ✅ | 三路事件流（events/journal/llm-stream）归一化合并去重 + replay 时间线 |
 | 110 | 性能剖析 | 🟡 | 计量全链（tokens/ms/model_calls）；profiler 未做 |
 | 111 | 内存/CPU 分析 | 🟡 | 池并发/预算水位；OS 级分析未做 |
@@ -264,7 +264,13 @@
 | E24 成本限额/多模型 | ✅ | 预算水位 + 21 车道 + key 池轮换 |
 | E25 评测/配置管理 | ✅ | 评分卡归因 + org config v3 |
 
-**统计（v0.5.16 交付后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 108 · 🟡 32 · ⬜ 10；专家 25 项 → ✅ 24 · 🟡 1 · ⬜ 0。
+**统计（v0.5.17 LSP/DAP+协作+云生态三簇交付后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 115 · 🟡 32 · ⬜ 3；专家 25 项 → ✅ 24 · 🟡 1 · ⬜ 0。
+
+> v0.5.17 LSP/DAP 深度簇（#26/#108 两项 ⬜→✅）：lib/lsp.ts + lib/debug.ts 单一实现三端消费 —— JSON-RPC 2.0 分帧层（LSP 与 DAP 共用：粘包/半包/多字节字符字节边界精确）+ 构造器全家桶（initialize→initialized→shutdown→exit 生命周期）+ 内置符号索引车道（definition/references/hover，0 基 uri/range + 1 基人读双形）+ 外部 server 车道（detectLspServers 七家 which 探测 + spawnLspServer/LspClient 真协议对话，echo 型假 server 测试锁定全生命周期）+ 断点建议器（符号级入口/启发式级分支/循环/return 前，confidence 双级 + reason）+ DAP 构造器四件套 + 调试计划（步骤化 + 协议就绪消息序列）。CLI +2 命令（org lsp 五子命令 · org debug 三子命令 + breakpoints 别名）、工具环 +6 工具（全只读，native 块动态 import 与 lib 同源，file 过 pathjail）、Web +2 端点（GET /api/govex/lsp 五动作 · GET /api/govex/debug 三动作）+ 🐞 面板 Tab。诚实边界：真编辑器级 LSP 会话（didOpen/didChange 增量同步）与真 debug adapter attach（node --inspect/debugpy/lldb-dap）是路线图；tests/lsp 41 例（分帧/内置车道/假 server 全生命周期/建议器/DAP/jail/CLI+Web+工具环三端冒烟）。
+
+> v0.5.17 云生态簇（#67/#68/#72/#74 四项 ⬜→✅）：lib/cloud.ts 单一实现三端消费 —— 探测（docker/ssh/kubectl/terraform/10 家云 CLI，各带硬超时）→ 白名单真实车道（docker 16 子命令/kubectl 15 子命令 + 数组参数零 shell 面 + 拒绝先于 spawn）→ 模板/计划降级车道（Dockerfile 四型/compose/K8s manifest 五族/terraform 骨架/ssh-config + dockerPlan 五意图）→ 诚实拒绝（host 白名单/路径监狱）。CLI +1 命令（org cloud 十六子命令）、工具环 +6 工具（cloud_probe/cloud_dockerfile/cloud_clis 只读；cloud_docker/cloud_ssh/cloud_k8s 执行车道 process_spawn 门+审批）、Web +2 端点（GET/POST /api/govex/cloud）+ ☁ 面板 Tab（探测全景卡片 + 模板生成器 + 白名单执行）。诚实边界：沙箱无 docker/kubectl/ssh/云 CLI，降级车道是主车道；真实车道代码路径完整但无真实守护进程/集群/远程主机可实测（#68/#72 附诚实注）。
+
+> v0.5.17 协作簇首项（#87 团队共享会话/评论 ⬜→✅）：lib/collab.ts 单一实现三端消费 —— append-only JSONL 团队线程 + 回复树 + @mention + 身份层 + 会话账本桥（只镜像不改写）；CLI +1 命令（org collab 九子命令）、工具环 +5 工具、Web +2 端点（GET/POST /api/govex/collab）+ 👥 面板 Tab。诚实边界：本地文件协议，多进程强并发不在面内（单机协作场景）。
 
 > v0.5.16 交付治理与扩展批（9 模块 × CLI/工具环/Web 三端接线）：8 项 ⬜→✅（#30 浏览器 DOM/#32 补全/#80 merge·rebase/#113 查询诊断/#132 插件市场/#134 OpenAPI/#147 IaC 扫描/#149 RBAC）+ 2 项 ⬜→🟡 诚实口径（#116 DevTools：DOM 快照/截图交付，console/网络面板是路线图；#56 重命名交付、代码动作路线图）—— 主表 ✅ 108/150。工具环 +13 工具（native 块动态 import 与 lib 同源）+ RBAC 可选门控（ORG_RBAC_ROLE）；CLI +11 命令；Web 🛡 治理与扩展面板（11 端点）。
 >
@@ -282,6 +288,8 @@
 2. **专家即流程**：25 项专家能力中 21 项落地的方式是**结构化**（graph SOP + 闸门 +
    资产沉淀），对照主流「系统提示词 + 工具白名单」的人设式专家——这是 ORG 的
    核心创新点（论文第 4 章主材料）。
-3. **诚实边界**：20 项未做集中三类——IDE/LSP/调试器深度（工具派：补全/断点/LSP 重命名）、
-   云生态（K8s/Terraform/多云/远程执行）、多人协作（RBAC/共享会话/SSO）。每项都有明确的
-   路线图挂点（上游 IDE、native 逃生舱、网关扩展），这是「知道边界在哪」的工程证据而非缺点。
+3. **诚实边界**：未做项经 v0.5.15–0.5.17 四批收敛至 3 项（#44 IaC 代码生成、#117 移动端
+   调试、#133 远程 Agent 云执行）——补全/重命名/RBAC/LSP 协议层/断点建议/云生态门控/共享
+   会话已逐一落地；🟡32 是「诚实半面」口径（如 #116 DevTools 交付 DOM 快照面、console/
+   网络面板是路线图）。每项剩余边界都有明确的路线图挂点（上游 IDE、native 逃生舱、网关
+   扩展），这是「知道边界在哪」的工程证据而非缺点。
