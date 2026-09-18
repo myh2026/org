@@ -52,6 +52,9 @@ import { dbDiagnose, DBDIAG_LIMITS } from "../lib/dbdiag.ts"; // v0.5.16 数据�
 import { gitMergeState, gitMerge, gitRebase, GIT_LIMITS } from "../lib/gitmerge.ts"; // v0.5.16 merge/rebase 安全操作（#80）
 import { loadRbac, rbacCheck, rbacRoles, rbacActions, DEFAULT_RBAC_POLICY, RBAC_POLICY_FILE } from "../lib/rbac.ts"; // v0.5.16 RBAC（#149）
 import { scanIac, IAC_RULES } from "../lib/iacscan.ts"; // v0.5.16 容器/IaC 扫描（#147）
+import { iacParseFile, iacGraph, iacPlan, iacGenerate, probeIac, iacValidate, iacSelfTest,
+         type IacBlock } from "../lib/iac.ts"; // v0.5.18 IaC 深度实现层（#44：解析/图/计划/生成 —— 与 iacscan 扫描面互补）
+import { resolveInWorkspace, inWorkspace } from "../lib/pathjail.ts"; // 工作区监狱（v0.5.16.1 跨平台比较形单点）
 import { pluginList, pluginInstall, pluginRemove, pluginValidate, gitAvailable, PLUGINS_DIR_REL } from "../lib/plugins.ts"; // v0.5.16 插件市场（#132）
 import { parseOpenApiFile, suggestToolName, OPENAPI_MAX_BYTES } from "../lib/openapi.ts"; // v0.5.16 OpenAPI 解析（#134）
 import { browserEngines, browserSnapshot, browserScreenshot } from "../lib/browser.ts"; // v0.5.16 浏览器 DOM 快照/截图（#116/#30）
@@ -3205,6 +3208,158 @@ async function cmdCloud(a: Args): Promise<number> {
   return 2;
 }
 
+// ---- org iac：IaC 深度实现入口（v0.5.18 · #44）------------------------------
+// 与 org iacscan（#147 静态安全扫描）互补：这里是「解析/规划/生成」面。
+// 内置 HCL 子集解析器是主车道（恒在）；terraform/tofu 在场时 validate 外部
+// 车道可用（只读）；缺席 → 诚实降级，绝不假装跑过 terraform。
+
+/** 解析结果渲染：块清单（类型 + label + 属性名，嵌套块缩进）。 */
+function renderIacBlocks(blocks: IacBlock[], depth = 0): string[] {
+  const out: string[] = [];
+  for (const b of blocks) {
+    const label = b.labels.length > 0 ? ` ${b.labels.map((l) => (/["\s]/.test(l) ? `"${l}"` : l)).join(" ")}` : "";
+    const attrs = b.attrs.length > 0 ? ` [${b.attrs.map((a) => a.name).join(", ")}]` : "";
+    out.push(`${"  ".repeat(depth + 1)}${b.type}${label}${attrs}`);
+    if (b.blocks.length > 0) out.push(...renderIacBlocks(b.blocks, depth + 1));
+  }
+  return out;
+}
+
+/** org iac [parse|plan|graph|generate|probe|validate|self-test]。 */
+async function cmdIac(a: Args): Promise<number> {
+  const positional = rawPositionals(a);
+  const verb = positional[0] ?? "help";
+  const ws = defaultWorkspace(a);
+
+  if (verb === "parse" || verb === "plan" || verb === "graph") {
+    const file = positional[1];
+    if (!file) {
+      console.error(`用法：org iac ${verb} <main.tf> [--workspace DIR]（工作区相对路径）`);
+      console.error("  内置 HCL 子集解析器（零依赖主车道）：block/label/属性/插值/heredoc/注释");
+      return 2;
+    }
+    const r = iacParseFile(ws, file);
+    if (!r.ok) {
+      console.error(`✗ [${r.kind}] ${r.reason}`);
+      if (r.errors.length > 1) for (const e of r.errors.slice(0, 5)) console.error(`  第 ${e.line} 行：${e.message.replace(/^第 \d+ 行：/, "")}`);
+      return 1;
+    }
+    if (verb === "parse") {
+      console.log(`🧱 ${r.file} 解析成功（${r.ast.length} 顶层块 · ${r.ast.reduce((s, b) => s + b.attrs.length, 0)} 直接属性 · ${r.tookMs}ms · 内置 HCL 解析器）：`);
+      for (const line of renderIacBlocks(r.ast)) console.log(line);
+      return 0;
+    }
+    if (verb === "graph") {
+      const g = iacGraph(r.ast);
+      console.log(`🕸 依赖图：${g.nodes.length} 节点 · ${g.edges.length} 边（${r.file}）`);
+      for (const e of g.edges) console.log(`  ${e.from}  →  ${e.to}    （${e.via} · 第 ${e.line} 行）`);
+      if (g.undeclaredRefs.length > 0) {
+        console.log(`  ⚠ ${g.undeclaredRefs.length} 处未声明引用（apply 前须补声明）：`);
+        for (const u of g.undeclaredRefs.slice(0, 10)) console.log(`      ${u.from} → ${u.via}（第 ${u.line} 行）`);
+      }
+      if (!g.ok) {
+        console.error(`\n✗ ${g.reason}`);
+        for (const c of g.cycles.slice(0, 3)) console.error(`  环：${c.join(" → ")}`);
+        return 1;
+      }
+      console.log(`\n  拓扑序（被依赖在前）：${g.order.join(" → ")}`);
+      return 0;
+    }
+    // plan
+    const p = iacPlan(r.ast);
+    if (!p.ok) {
+      console.error(`✗ ${p.reason}`);
+      for (const c of p.cycles?.slice(0, 3) ?? []) console.error(`  环：${c.join(" → ")}`);
+      return 1;
+    }
+    console.log(p.text);
+    return 0;
+  }
+
+  if (verb === "generate") {
+    const manifest = positional[1];
+    if (!manifest) {
+      console.error("用法：org iac generate <manifest.json> [--workspace DIR]（工作区相对路径）");
+      console.error('  manifest：{provider, region?, variables?, resources:[{type,name,attrs}], outputs?}');
+      console.error('  $ref 引用形：{"$ref":"var.instance_type"} → instance_type = var.instance_type');
+      console.error("  生成结果可直接被 iacParse 解析（往返自洽 —— 逆操作验证）");
+      return 2;
+    }
+    const abs = resolveInWorkspace(ws, manifest);
+    if (!inWorkspace(ws, abs)) { console.error(`✗ manifest 路径越界（须在工作区内）：${manifest}`); return 1; }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(fs.readFileSync(abs, "utf-8"));
+    } catch (e) {
+      console.error(`✗ manifest 读取/JSON 解析失败：${(e as Error).message}`);
+      return 1;
+    }
+    const r = iacGenerate(parsed as Parameters<typeof iacGenerate>[0]);
+    if (!r.ok) {
+      for (const err of r.errors) console.error(`✗ ${err}`);
+      return 1;
+    }
+    console.log(r.tf.trimEnd());
+    console.log(`\n  ⚙ 生成摘要：provider ${r.provider} · 资源 ${r.resources} · 变量 ${r.variables.length}（${r.variables.join(", ")}）· 往返自解析 ✓（${r.roundTrip.blocks} 块）`);
+    for (const w of r.warnings) console.log(`  ⚠ ${w}`);
+    for (const n of r.notes) console.log(`  💡 ${n}`);
+    return 0;
+  }
+
+  if (verb === "probe") {
+    const p = probeIac();
+    console.log(`🧱 IaC 工具链五面探测（${p.tookMs}ms）：`);
+    console.log(`  terraform ${p.terraform.available ? `✓ 在场（v${p.terraform.version ?? "?"}）` : "✗ 缺席"}`);
+    if (p.terraform.reason) console.log(`      ${p.terraform.reason}`);
+    console.log(`  tofu       ${p.tofu.available ? `✓ 在场（v${p.tofu.version ?? "?"}）` : "✗ 缺席"}`);
+    if (p.tofu.reason) console.log(`      ${p.tofu.reason}`);
+    console.log(`  tflint    ${p.tflint.available ? `✓ 在场（v${p.tflint.version ?? "?"}）` : "✗ 缺席"}`);
+    if (p.tflint.reason) console.log(`      ${p.tflint.reason}`);
+    console.log(`  车道      ${p.lane === "cli" ? "cli（外部 validate 可用）+ builtin（恒在）" : "builtin（内置静态解析主车道 —— 恒在，零外部依赖）"}`);
+    console.log(`  建议      ${p.suggestion}`);
+    return 0;
+  }
+
+  if (verb === "validate") {
+    const dir = positional[1] ?? ".";
+    const r = iacValidate(ws, dir);
+    if (!r.ok && r.kind === "tool-absent") {
+      console.log(`ℹ 外部车道缺席（lane ${r.lane}）—— ${r.reason}`);
+      console.log("  内置静态车道替代：org iac parse/plan/graph <file>（语法级校验恒在）");
+      return 1; // 缺席是诚实降级，非命令失败面 —— 退出码 1 提示车道缺席
+    }
+    if (!r.ok && r.kind !== "invalid") {
+      console.error(`✗ [${r.kind}] ${r.reason}`);
+      console.error(`  argv（数组参数 · 零 shell 面）：${r.argv.join(" ")}`);
+      return 1;
+    }
+    if (!r.ok) {
+      console.error(`✗ 配置校验未通过（${r.diagnostics.length} 条诊断 · ${r.bin} validate · 车道 ${r.lane}）：`);
+      for (const d of r.diagnostics.slice(0, 20)) {
+        console.error(`  [${(d.severity ?? "error").toUpperCase()}] ${d.file ?? ""}${d.line ? ":" + d.line : ""} ${d.summary ?? ""}`);
+        if (d.detail) console.error(`      ${d.detail.split("\n")[0]}`);
+      }
+      return 1;
+    }
+    console.log(`✓ ${r.bin} validate 通过（车道 ${r.lane} · ${r.tookMs}ms · 目录 ${dir}）`);
+    return 0;
+  }
+
+  if (verb === "self-test" || verb === "selftest" || verb === "self") {
+    const r = iacSelfTest();
+    console.log("🧪 IaC 深度层自检（解析器/依赖图/计划/生成器往返 + probe 结构）：");
+    for (const c of r.checks) console.log(`  ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? `（${c.detail}）` : ""}`);
+    console.log(`\n  ${r.passed}/${r.total} 通过`);
+    return r.ok ? 0 : 1;
+  }
+
+  console.error(`未知子命令：${verb}`);
+  console.error("用法：org iac parse <main.tf> · plan <main.tf> · graph <main.tf> · generate <manifest.json> · probe · validate [dir] · self-test");
+  console.error("  IaC 深度实现（#44）：HCL 子集解析 → 依赖图/拓扑序 → 人读 Plan → manifest 逆向生成 .tf（与 org iacscan 静态扫描互补）");
+  console.error("  内置静态车道恒在；terraform/tofu 在场时 validate 外部车道可用（只读 —— init/plan/apply 不在任何车道）");
+  return 2;
+}
+
 // ---- org memory：专家长期记忆（v0.5.3） ----------------------------------------
 
 async function cmdMemory(a: Args): Promise<number> {
@@ -3374,7 +3529,9 @@ export async function orgMain(): Promise<number> {
     case "rebase": return cmdRebase(a);
     case "mergestate": return cmdMergestate(a);
     case "rbac": return cmdRbac(a);
-    case "iacscan": case "iac": return cmdIacscan(a);
+    case "iacscan": return cmdIacscan(a);
+    // v0.5.18 IaC 深度簇（capabilities #44 —— 与 #147 iacscan 扫描面互补的解析/规划/生成面）
+    case "iac": return cmdIac(a);
     case "plugin": case "plugins": return cmdPlugin(a);
     case "openapi": return cmdOpenapi(a);
     case "browser": return cmdBrowser(a);
@@ -3561,6 +3718,13 @@ export async function orgMain(): Promise<number> {
       ssh <host> "<cmd>"（host 须在 <ws>/ssh-hosts.allow）· ssh-template ·
       manifest <deployment|service|ingress|configmap|pvc> · terraform ·
       clis（10 家云 CLI 探测表）· overview（21 模型商 + 10 云 CLI 全景）
+  org iac [parse|plan|graph] <main.tf> · generate <manifest.json> · probe · validate [dir]
+      IaC 深度实现（v0.5.18 · #44，与 iacscan 扫描面互补）：内置 HCL 子集
+      解析器（block/label/属性/插值/heredoc/注释 —— 行号级诚实报错）→ 资源
+      依赖图（拓扑序 + 环检测）→ 人读 Plan（to create N resources 风格，
+      与真 terraform plan 差异诚实标注）→ JSON manifest 逆向生成 .tf
+      （iacParse 往返自洽）；probe 探测 terraform/tofu/tflint 三工具（缺席
+      → 内置车道为主车道）；validate 在场时跑 terraform validate -json（只读）
 
 仓库布局：hsl/ = HSL 源码；toolchain/dhv-ts = 内嵌解释器（vendored）；
           demo-run/ = 本地构建目录（git 忽略）；dist/ = 编译产物（入库）

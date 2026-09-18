@@ -104,6 +104,17 @@
 //   collab_post    {thread, text, user?}  发帖（@user mentions 自动抽取；
 //                                    user 缺省取当前协作者身份）
 //   collab_comment {thread, seq, text, user?} 评论指定楼层（replyTo 树）
+//
+// v0.5.18 新增（IaC 深度簇 · 4 工具，native 块 await import(root+"/lib/iac.ts")
+// 与 lib 同源 —— 行为等价由构造保证；#44，与 #147 iac_scan 扫描面互补的
+// 解析/规划/生成面。全部只读（不写盘 —— generate 只返回文本）：
+//   iac_parse    {file}         .tf → AST 摘要（HCL 子集解析器；file 过监狱）
+//   iac_plan     {file}         人读 Plan（to create N resources + 依赖序 +
+//                                与真 terraform plan 差异诚实标注）
+//   iac_graph    {file}         资源依赖图（节点/边/拓扑序/环检测/未声明引用）
+//   iac_generate {manifest}     JSON manifest（对象或字符串）→ .tf 文本
+//                                （provider/variable 提取/resource/output；
+//                                iacParse 往返自洽）
 // ============================================================================
 
 import { CapabilityPolicy, AccessMode } from "../policy/capability.hsl";
@@ -178,6 +189,11 @@ export fn tools_prompt(mode: ToolMode) -> String {
     out.push_str("- cloud_probe {} — one-shot cloud ecosystem probe (docker CLI+daemon / ssh / kubectl+cluster / terraform / 10 cloud CLIs). Absence is an honest degrade with install hints + template-lane pointers, never a silent failure.\n");
     out.push_str("- cloud_dockerfile {\"project_type\":\"node\"|\"bun\"|\"python\"|\"rust\"} — production-grade multi-stage Dockerfile template (non-root USER + HEALTHCHECK + pinned tags). The degrade-lane deliverable when docker itself is absent.\n");
     out.push_str("- cloud_clis {} — probe the 10-CLI cloud registry (aws/gcloud/az/gh/vercel/flyctl/railway/heroku/doctl/oci): availability + version + install hint each.\n");
+    // v0.5.18 IaC 深度簇（#44 —— 只读四件，与 iac_scan 扫描面互补的解析/规划/生成面）
+    out.push_str("- iac_parse {\"file\":\"infra/main.tf\"} — parse a Terraform/HCL file into an AST (blocks/labels/attrs incl. nested; built-in HCL-subset parser, honest line-numbered errors). Complements iac_scan (pattern scan) with structural understanding.\n");
+    out.push_str("- iac_plan {\"file\":\"infra/main.tf\"} — a human-readable plan (\"Plan: to create N resources\" style + per-resource summary + dependency order). Honest notes on differences vs a real terraform plan (no state → always create; no provider schema; count/for_each not expanded).\n");
+    out.push_str("- iac_graph {\"file\":\"infra/main.tf\"} — resource dependency graph from references (var./local./data./module./resource addresses/depends_on): nodes, edges, topological order, cycle detection, undeclared refs.\n");
+    out.push_str("- iac_generate {\"manifest\":{provider, resources:[{type,name,attrs}]} } — generate valid .tf text from a JSON manifest (provider block + variable extraction incl. $ref auto-vars + resource blocks + outputs). Round-trips through iac_parse; returns text only, never writes to disk.\n");
     if mode == ToolMode::Full {
         out.push_str("- fs_write {\"path\":\"...\",\"content\":\"...\",\"preview\":true?} — write a file (may require approval). preview:true returns a unified diff WITHOUT writing (dry-run). Content is scanned for secrets: high-severity key patterns (sk-/ghp_/AKIA… ) are refused — never persist real credentials.\n");
         out.push_str("- fs_edit {\"path\":\"...\",\"old\":\"exact unique text\",\"new\":\"replacement\",\"preview\":true?} — precise edit (may require approval); preview:true returns the diff without writing.\n");
@@ -342,7 +358,11 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         && name != String::from("lsp_hover") && name != String::from("lsp_servers")
         && name != String::from("debug_breakpoints") && name != String::from("debug_plan")
         && name != String::from("cloud_probe") && name != String::from("cloud_dockerfile")
-        && name != String::from("cloud_clis") {
+        && name != String::from("cloud_clis")
+        // v0.5.18：IaC 深度簇四件全只读（解析/图/计划纯内存；generate 只返回
+        // 文本不写盘 —— 采纳落盘由用户/上层显式做）
+        && name != String::from("iac_parse") && name != String::from("iac_plan")
+        && name != String::from("iac_graph") && name != String::from("iac_generate") {
         let approved = gate_write(policy, gate_cap, name.clone(), args.clone()).await;
         if approved == String::from("denied") {
             emit_tool(String::from("tool_denied"), format!("{} {}", name, "capability denied"));
@@ -408,7 +428,12 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "cloud_docker" => tool_cloud_docker(args.clone()),
         "cloud_ssh" => tool_cloud_ssh(args.clone()),
         "cloud_k8s" => tool_cloud_k8s(args.clone()),
-        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/shell_run/agent_spawn/audio_compose/audit_export/review_suggest）", name)),
+        // v0.5.18 IaC 深度簇（native 块动态 import lib/iac.ts —— 与 CLI/Web 同源）
+        "iac_parse" => tool_iac_parse(args.clone()).await,
+        "iac_plan" => tool_iac_plan(args.clone()).await,
+        "iac_graph" => tool_iac_graph(args.clone()).await,
+        "iac_generate" => tool_iac_generate(args.clone()).await,
+        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/iac_parse/iac_plan/iac_graph/iac_generate/shell_run/agent_spawn/audio_compose/audit_export/review_suggest）", name)),
     };
     emit_tool(String::from("tool_result"), result_summary(result.clone()));
     result
@@ -1708,6 +1733,148 @@ fn tool_cloud_k8s(args: String) -> String {
     }
 }
 
+// ---- v0.5.18 IaC 深度簇：4 工具（capabilities #44） ------------------------------
+// lib/iac.ts 同源（native 块动态 import）。与 iac_scan（#147 危险模式扫描）
+// 互补：解析 → 依赖图 → 计划 → manifest 逆向生成。全部只读（file 形入参过
+// pathjail 与 complete_at/lsp_definition 同规；generate 只返回文本不写盘 ——
+// 内置 HCL 子集解析器是恒在主车道，外部 terraform/tofu 车道缺席时诚实降级）。
+
+/// v0.5.18 .tf → AST 摘要（#44）：lib/iac.ts iacParseFile 同源。
+/// 块清单（类型 + label + 属性名，嵌套缩进）+ 语法错误行号级诚实上报。
+async fn tool_iac_parse(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const file = String(a.file || a.path || "");
+            if (!file) return JSON.stringify({ tool: "iac_parse", ok: false, error: "args.file 必填（工作区相对的 .tf 路径）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "iac_parse", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const iac = await import(root + "/lib/iac.ts");
+            const r = iac.iacParseFile(ws, file);
+            if (!r.ok) {
+                return JSON.stringify({
+                    tool: "iac_parse", ok: false, kind: r.kind, reason: r.reason, file: r.file,
+                    hint: "语法错误有行号与原因；越界/超限/二进制各有 kind —— 绝不静默吞。内置解析器与 org iac parse 同源",
+                });
+            }
+            const render = (blocks) => blocks.map((b) => ({
+                type: b.type, labels: b.labels, line: b.line,
+                attrs: b.attrs.map((x) => x.name),
+                blocks: render(b.blocks),
+            }));
+            return JSON.stringify({
+                tool: "iac_parse", ok: true, file: r.file, took_ms: r.tookMs, lane: "builtin",
+                blocks: r.ast.length,
+                ast: render(r.ast),
+                hint: "与 iac_scan 互补：扫描找危险模式，本工具给结构理解（plan/graph/generate 的地基）",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "iac_parse", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.18 人读 Plan（#44）：lib/iac.ts iacPlan 同源 —— "Plan: to create N
+/// resources" 风格 + 每资源摘要 + 依赖序；与真 terraform plan 差异诚实标注。
+async fn tool_iac_plan(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const file = String(a.file || a.path || "");
+            if (!file) return JSON.stringify({ tool: "iac_plan", ok: false, error: "args.file 必填（工作区相对的 .tf 路径）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "iac_plan", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const iac = await import(root + "/lib/iac.ts");
+            const pf = iac.iacParseFile(ws, file);
+            if (!pf.ok) return JSON.stringify({ tool: "iac_plan", ok: false, kind: pf.kind, reason: pf.reason, file: pf.file });
+            const r = iac.iacPlan(pf.ast);
+            return JSON.stringify({
+                tool: "iac_plan", ok: r.ok, ...(r.reason ? { reason: r.reason } : {}),
+                file: pf.file, lane: r.lane,
+                summary: r.summary, order: r.order, notes: r.notes,
+                ...(r.cycles ? { cycles: r.cycles } : {}),
+                text: String(r.text).slice(0, 16384),
+                hint: "内置静态车道（非 terraform plan 子进程）—— 差异逐条见 notes（无 state/无 provider schema/count 不展开）",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "iac_plan", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.18 资源依赖图（#44）：lib/iac.ts iacGraph 同源 —— 节点/边/拓扑序/
+/// 环检测/未声明引用（引用级分析：var./local./data./module./资源地址/depends_on）。
+async fn tool_iac_graph(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const file = String(a.file || a.path || "");
+            if (!file) return JSON.stringify({ tool: "iac_graph", ok: false, error: "args.file 必填（工作区相对的 .tf 路径）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "iac_graph", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const iac = await import(root + "/lib/iac.ts");
+            const pf = iac.iacParseFile(ws, file);
+            if (!pf.ok) return JSON.stringify({ tool: "iac_graph", ok: false, kind: pf.kind, reason: pf.reason, file: pf.file });
+            const g = iac.iacGraph(pf.ast);
+            return JSON.stringify({
+                tool: "iac_graph", ok: g.ok, ...(g.reason ? { reason: g.reason } : {}),
+                file: pf.file,
+                nodes: g.nodes.map((n) => ({ kind: n.kind, address: n.address, line: n.line, attrs: n.attrs })),
+                edges: g.edges.slice(0, 200).map((e) => ({ from: e.from, to: e.to, via: e.via, line: e.line })),
+                order: g.order,
+                ...(g.cycles.length > 0 ? { cycles: g.cycles } : {}),
+                undeclared_refs: g.undeclaredRefs.slice(0, 50),
+                summary: g.summary,
+                hint: "环 = Terraform 同样会拒绝的环形依赖；未声明引用 = apply 前须补 variable/resource 声明",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "iac_graph", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.18 JSON manifest → .tf 文本（#44）：lib/iac.ts iacGenerate 同源。
+/// manifest 可传对象或 JSON 字符串；只返回文本不写盘（落盘由用户/上层显式做）。
+async fn tool_iac_generate(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            let manifest = a.manifest != null ? a.manifest : (a.manifest_json != null ? a.manifest_json : null);
+            if (typeof manifest === "string") {
+                try { manifest = JSON.parse(manifest); } catch (e2) {
+                    return JSON.stringify({ tool: "iac_generate", ok: false, error: "args.manifest 字符串形态不是合法 JSON：" + String(e2 && e2.message || e2) });
+                }
+            }
+            if (manifest == null || typeof manifest !== "object" || Array.isArray(manifest)) {
+                return JSON.stringify({ tool: "iac_generate", ok: false, error: "args.manifest 必填（对象 {provider, resources:[{type,name,attrs}]} 或其 JSON 字符串）" });
+            }
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "iac_generate", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const iac = await import(root + "/lib/iac.ts");
+            const r = iac.iacGenerate(manifest);
+            return JSON.stringify({
+                tool: "iac_generate", ok: r.ok,
+                ...(r.ok ? {} : { errors: r.errors, reason: String(r.errors[0] || "manifest 校验失败") }),
+                provider: r.provider, resources: r.resources, variables: r.variables,
+                warnings: r.warnings, round_trip: r.roundTrip,
+                ...(r.ok ? { tf: r.tf } : {}),
+                hint: "只读工具：.tf 文本随结果返回，不写盘；采纳时经 fs_write 落盘（能力门在环）。$ref 形 → var 引用 + 自动补 variable 块",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "iac_generate", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
 /// v0.5.8 语义检索（capabilities #19/#22）：lib/search.ts 的 ABI 内同构
 /// 实现（HSL 无法 import TS —— 分词/BM25 公式与 lib 侧一致，
 /// tests/search.test.ts 行为对拍保证排序等价；「一源多投射 + 行为级
@@ -2425,6 +2592,17 @@ fn result_summary(result: String) -> String {
                 if (tool === "cloud_docker" || tool === "cloud_ssh" || tool === "cloud_k8s") {
                     return tool + " ok " + String((o.argv || []).slice(0, 4).join(" ")) + " " + String(o.took_ms ?? "?") + "ms";
                 }
+                // v0.5.18 IaC 深度簇的观测摘要（journal 人读面）
+                if (tool === "iac_parse") return tool + " ok blocks=" + String(o.blocks ?? "?") + " " + String(o.file || "?") + " " + String(o.took_ms ?? "?") + "ms";
+                if (tool === "iac_plan") {
+                    const s = o.summary || {};
+                    return tool + (o.ok ? " ok" : " 拒绝") + " create=" + String(s.resources ?? "?") + " data=" + String(s.dataSources ?? "?") + " vars=" + String(s.variables ?? "?") + " lane=" + String(o.lane || "builtin") + (o.reason ? "（" + String(o.reason).slice(0, 60) + "）" : "");
+                }
+                if (tool === "iac_graph") {
+                    if (!o.ok) return tool + " error 有环：" + String(((o.cycles || [])[0]) || []).join(" → ").slice(0, 80);
+                    return tool + " ok nodes=" + String((o.nodes || []).length) + " edges=" + String((o.edges || []).length) + " top=" + String((o.order || [])[0] || "-") + ((o.undeclared_refs || []).length > 0 ? " ⚠未声明" + String(o.undeclared_refs.length) : "");
+                }
+                if (tool === "iac_generate") return tool + (o.ok ? " ok " : " ") + String(o.provider || "?") + " 资源" + String(o.resources ?? "?") + " 变量" + String((o.variables || []).length) + " tf=" + String((o.tf || "").length) + "字符" + (o.round_trip && o.round_trip.ok ? " 往返✓" : "");
                 // v0.5.17 协作簇的观测摘要（journal 人读面；feed 按「N 帖·M 评论·K 用户」口径）
                 if (tool === "collab_threads") { const s = o.summary || {}; return tool + " ok " + String(s.threads ?? (o.threads || []).length) + " 线程 · " + String(s.posts ?? "?") + " 帖 · " + String(s.users ?? "?") + " 用户" + ((o.threads && o.threads[0]) ? " top=" + String(o.threads[0].id) : ""); }
                 if (tool === "collab_feed") { const c = o.counts || {}; return tool + " ok " + String(o.thread) + " " + String(c.posts ?? (o.posts || []).length) + "帖·" + String(c.comments ?? "?") + "评论·" + String(c.users ?? "?") + "用户 since=" + String(o.since_seq ?? 0); }

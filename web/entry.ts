@@ -167,6 +167,7 @@ import { cloudProbeAll, probeDocker, probeSsh, probeK8s, probeTerraform, probeCl
          dockerRun, dockerBuild, dockerfileFor, composeFor, dockerPlan,
          sshRun, scpUpload, sshConfigTemplate, sshPlan, k8sRun, k8sManifestFor, terraformPlan } from "../lib/cloud.ts"; // v0.5.17 云生态统一模块（#67/#68/#72/#74）
 import { suggestBreakpoints, debugPlan, dapSelfTest } from "../lib/debug.ts"; // v0.5.17 断点/调试建议（#108）
+import { iacParseFile, iacGraph, iacPlan, iacGenerate, probeIac, iacValidate } from "../lib/iac.ts"; // v0.5.18 IaC 深度实现层（#44）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
 
@@ -1699,6 +1700,83 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
           }
           return json({ ok: false, error: `未知 action：${action || "（空）"}（docker/ssh/k8s）` }, 400);
         }
+        // v0.5.18 ⚒ IaC 深度（#44）：GET ?action=parse|plan|graph&file=… | generate&manifest=<JSON 串>
+        // | probe | validate&dir=…。与 CLI org iac / 工具环 iac_* 同源 lib/iac.ts
+        // （内置 HCL 子集解析器主车道；probe 探测 terraform/tofu/tflint，缺席诚实降级）。
+        // 只读面（generate 只返回文本不写盘）—— file/dir 过 lib/iac.ts 内置监狱。
+        if (route === "GET /api/govex/iac") {
+          const action = String(url.searchParams.get("action") ?? "").trim();
+          const rws = readWorkspaceOf(ws);
+          try {
+            if (action === "parse" || action === "plan" || action === "graph") {
+              const file = String(url.searchParams.get("file") ?? "").trim();
+              if (!file) return json({ ok: false, error: "file 必填（工作区相对的 .tf 路径）" }, 400);
+              const r = iacParseFile(rws, file);
+              if (!r.ok) return json({ ok: false, kind: r.kind, reason: r.reason, file: r.file }, 400);
+              if (action === "parse") {
+                const render = (blocks: import("../lib/iac.ts").IacBlock[]): unknown => blocks.map((b) => ({
+                  type: b.type, labels: b.labels, line: b.line, attrs: b.attrs.map((x) => x.name), blocks: render(b.blocks),
+                }));
+                return json({ ok: true, file: r.file, took_ms: r.tookMs, lane: "builtin", blocks: r.ast.length, ast: render(r.ast) });
+              }
+              if (action === "graph") {
+                const g = iacGraph(r.ast);
+                return json({
+                  ok: g.ok, ...(g.reason ? { reason: g.reason } : {}), file: r.file,
+                  nodes: g.nodes, edges: g.edges, order: g.order,
+                  ...(g.cycles.length > 0 ? { cycles: g.cycles } : {}),
+                  undeclared_refs: g.undeclaredRefs, summary: g.summary,
+                });
+              }
+              const p = iacPlan(r.ast);
+              return json({
+                ok: p.ok, ...(p.reason ? { reason: p.reason } : {}), file: r.file, lane: p.lane,
+                summary: p.summary, order: p.order, notes: p.notes,
+                ...(p.cycles ? { cycles: p.cycles } : {}), text: p.text,
+              });
+            }
+            if (action === "generate") {
+              // manifest 走查询参数（URL 编码的 JSON 串 —— 与 lsp 的 name= 同模式）；
+              // 长清单建议走 CLI/工具环（面板输入是短清单场景）
+              const raw = String(url.searchParams.get("manifest") ?? "").trim();
+              if (!raw) return json({ ok: false, error: "manifest 必填（JSON 串：{provider, resources:[{type,name,attrs}]}）" }, 400);
+              let manifest: unknown;
+              try {
+                manifest = JSON.parse(raw);
+              } catch (e) {
+                return json({ ok: false, error: `manifest 不是合法 JSON：${(e as Error).message}` }, 400);
+              }
+              const r = iacGenerate(manifest as Parameters<typeof iacGenerate>[0]);
+              if (!r.ok) return json({ ok: false, errors: r.errors, reason: r.errors[0] ?? "manifest 校验失败" }, 400);
+              return json({
+                ok: true, tf: r.tf, provider: r.provider, resources: r.resources,
+                variables: r.variables, warnings: r.warnings, notes: r.notes, round_trip: r.roundTrip,
+              });
+            }
+            if (action === "probe") {
+              const p = probeIac();
+              return json({
+                ok: true, took_ms: p.tookMs,
+                terraform: p.terraform, tofu: p.tofu, tflint: p.tflint,
+                lane: p.lane, suggestion: p.suggestion,
+              });
+            }
+            if (action === "validate") {
+              const dir = String(url.searchParams.get("dir") ?? ".").trim();
+              const r = iacValidate(rws, dir);
+              return json({
+                ok: r.ok, ...(r.kind ? { kind: r.kind } : {}), lane: r.lane,
+                ...(r.reason ? { reason: r.reason } : {}),
+                bin: r.bin, argv: r.argv, exit_code: r.exitCode, valid: r.valid,
+                diagnostics: r.diagnostics, stdout: r.stdout.slice(0, 4096), stderr: r.stderr.slice(0, 4096),
+                took_ms: r.tookMs,
+              });
+            }
+            return json({ ok: false, error: "action 须为 parse / plan / graph / generate / probe / validate" }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
         if (route === "GET /api/spawns") {
         // v0.5.11：派生池（agent_spawn 池化重档的观测面）。
           // 数据源三层：① <ws>/spawn/pool.json 登记（v0.5.11 起每次派生回写）；
@@ -2216,6 +2294,7 @@ export async function webMain(argv: string[]): Promise<number> {
   console.log(`  停止       POST /api/abort（运行轮 SIGKILL / body{id} 取消排队轮）`);
   console.log(`  协作面     GET/POST /api/govex/collab（v0.5.17 #87：threads/feed/users/summary/whoami + post/comment/user/bridge）`);
   console.log(`  云生态     GET/POST /api/govex/cloud（v0.5.17 #67/#68/#72/#74：probe 全景/dockerfile/compose/manifest/terraform 模板 + docker/ssh/k8s 白名单执行）`);
+  console.log(`  IaC 深度   GET /api/govex/iac（v0.5.18 #44：HCL 解析/依赖图/人读 Plan/manifest 逆向生成 + probe 五面探测；与 iacscan 扫描互补）`);
   console.log(`  模型       ${p.model}（GUI 可切 scripted/deepseek，请求体可逐次覆盖）`);
   // v0.4.13：网关三件套可见性 —— 直连服务商（DeepSeek 等）的鉴权/模型/超时
   // 经环境变量注入（spawn 车道继承 process.env），横幅回显防「配了没生效」。
@@ -3257,7 +3336,7 @@ function renderIndexHtml(): string {
   <button id="toolboxBtn" class="rchip" type="button" title="工具箱（v0.5.15）— 🗄 SQLite 查询 · 🔎 符号跳转 · 🛡 密钥扫描 · 📦 审计导出 · 📋 SBOM · 👥 评审推荐">
     <span class="rc-label">🧰 工具箱</span>
   </button>
-  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16+）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🐞 LSP/DAP 调试 · 🌿 merge/rebase · 👥 团队协作 · ☁ 云生态">
+  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16+）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🐞 LSP/DAP 调试 · 🌿 merge/rebase · 👥 团队协作 · ☁ 云生态 · ⚒ IaC深度">
     <span class="rc-label">🛡 治理与扩展</span>
   </button>
   <span class="tstats" id="topStats"></span>
@@ -3397,7 +3476,7 @@ function renderIndexHtml(): string {
 <div id="govexScrim" aria-hidden="true"></div>
 <div id="govexPane" role="dialog" aria-modal="true" aria-labelledby="gxTitle">
   <div class="schhead">
-    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git · 👥 协作 · ☁ 云生态（v0.5.16+）</div>
+    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git · 👥 协作 · ☁ 云生态 · ⚒ IaC深度（v0.5.16+）</div>
     <button class="schclose" type="button" onclick="closeGovex()" title="关闭（Esc）" aria-label="关闭治理与扩展面板">✕</button>
     <div class="tbtabs" role="tablist">
       <button class="tbtab on" id="gxTabIac" type="button" role="tab" onclick="gxTab('iac')">🛡 IaC</button>
@@ -3411,6 +3490,7 @@ function renderIndexHtml(): string {
       <button class="tbtab" id="gxTabGit" type="button" role="tab" onclick="gxTab('git')">🌿 git</button>
       <button class="tbtab" id="gxTabCollab" type="button" role="tab" onclick="gxTab('collab')">👥 协作</button>
       <button class="tbtab" id="gxTabCloud" type="button" role="tab" onclick="gxTab('cloud')">☁ 云生态</button>
+      <button class="tbtab" id="gxTabIacx" type="button" role="tab" onclick="gxTab('iacx')">⚒ IaC深度</button>
     </div>
   </div>
 
@@ -3584,9 +3664,30 @@ function renderIndexHtml(): string {
       </div>
       <div class="tbout" id="gxCloudRunOut"><div class="schempty">执行车道：docker/kubectl 子命令白名单（破坏性命令一律拒绝，拒绝先于 spawn）· ssh host 门控（ssh-hosts.allow）· 数组参数零 shell 面 · 路径过工作区监狱。CLI 同款 org cloud docker/ssh/k8s。</div></div>
     </section>
+
+    <section class="tbsec" id="gxSecIacx" hidden>
+      <div class="tbbar">
+        <input id="gxIacFile" type="text" placeholder=".tf 文件（工作区相对，如 infra/main.tf）" autocomplete="off" aria-label="IaC 文件">
+        <button type="button" onclick="gxIacParse()">🧱 解析</button>
+        <button type="button" onclick="gxIacPlan()">📋 计划</button>
+        <button type="button" onclick="gxIacGraph()">🕸 依赖图</button>
+        <span class="tbmeta" id="gxIacMeta"></span>
+      </div>
+      <div class="tbout" id="gxIacOut" style="margin-bottom:10px"><div class="schempty">IaC 深度（#44，与 🛡 IaC 扫描互补）：内置 HCL 子集解析器（block/label/属性/插值/heredoc/注释 —— 行号级诚实报错）→ 资源依赖图（拓扑序 + 环检测）→ 人读 Plan（to create N resources 风格，与真 terraform plan 差异诚实标注）。CLI 同款 org iac parse/plan/graph。</div></div>
+      <div class="tbbar">
+        <button type="button" onclick="gxIacProbe()">🔎 工具链探测</button>
+        <span class="tbmeta">terraform / tofu / tflint 三面 which 探测 —— 缺席 = 内置车道为主车道（诚实降级）</span>
+      </div>
+      <div class="tbout" id="gxIacProbeOut" style="margin-bottom:10px"><div class="schempty">五面探测：terraform · tofu · tflint · 车道判定（builtin 恒在 / cli 在场时 validate 可用）· 建议。在场时可跑 <code>terraform validate -json</code>（只读）；缺席 → 内置静态车道，绝不假装跑过 terraform。</div></div>
+      <div class="tbbar">
+        <input id="gxIacManifest" type="text" placeholder='manifest JSON：{"provider":"aws","resources":[{"type":"aws_instance","name":"web","attrs":{"ami":"ami-1"}}]}' autocomplete="off" aria-label="manifest JSON" style="max-width:520px">
+        <button type="button" onclick="gxIacGenerate()">⚙ 生成 .tf</button>
+      </div>
+      <div class="tbout" id="gxIacGenOut" style="max-height:320px"><div class="schempty">JSON manifest → 合法 .tf（terraform/provider 块 + variable 提取（$ref 自动补声明）+ resource 块 + output）；生成结果可被本面板解析器再解析（往返自洽）。只返回文本不写盘 —— 采纳时复制保存。</div></div>
+    </section>
   </div>
 
-  <div class="spwfoot">治理与扩展面板与 CLI / 工具环同源（lib/dbdiag · gitmerge · rbac · iacscan · plugins · openapi · browser · completion · rename · lsp · debug · collab · cloud 单一实现三端消费）—— v0.5.16 「每个功能都有对应操作页面」的延续。</div>
+  <div class="spwfoot">治理与扩展面板与 CLI / 工具环同源（lib/dbdiag · gitmerge · rbac · iacscan · plugins · openapi · browser · completion · rename · lsp · debug · collab · cloud · iac 单一实现三端消费）—— v0.5.16 「每个功能都有对应操作页面」的延续。</div>
 </div>
 <div id="voiceScrim" aria-hidden="true"></div>
 <div id="voicePane" role="dialog" aria-modal="true" aria-labelledby="voTitle">
@@ -5233,7 +5334,7 @@ function closeGovex() {
   document.getElementById("govexPane").classList.remove("on");
   document.getElementById("govexScrim").classList.remove("on");
 }
-var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Lsp", "lsp"], ["Git", "git"], ["Collab", "collab"], ["Cloud", "cloud"]];
+var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Lsp", "lsp"], ["Git", "git"], ["Collab", "collab"], ["Cloud", "cloud"], ["Iacx", "iacx"]];
 function gxTab(sec) {
   for (const [k, id] of GX_TABS) {
     document.getElementById("gxTab" + k).classList.toggle("on", id === sec);
@@ -5746,6 +5847,97 @@ function gxCloudRun(lane) {
     if (so) h += '<pre style="margin:6px 0 0;white-space:pre-wrap;font:11px/1.5 var(--mono)">' + esc(so.slice(0, 6000)) + "</pre>";
     const se = String(j.stderr || "").trim();
     if (se) h += '<div class="tbmeta">（stderr）' + esc(se.slice(0, 1500)) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+// ---- ⚒ IaC 深度区块（v0.5.18 · #44 —— 与 CLI org iac / 工具环 iac_* 同源） ----
+// XSS 纪律：全部动态内容经 esc() 后进 innerHTML（与既有面板同口径）。
+function gxIacFileOf() {
+  return document.getElementById("gxIacFile").value.trim();
+}
+function gxIacRenderBlocks(blocks, depth) {
+  let h = "";
+  for (const b of blocks || []) {
+    h += '<div class="tbrow" style="padding-left:' + (8 + (depth || 0) * 20) + 'px"><b>' + esc(b.type) + "</b>" +
+      (b.labels || []).map(function (l) { return ' <span class="tbmeta">"' + esc(l) + '"</span>'; }).join("") +
+      ' · <span class="tbmeta">第 ' + b.line + ' 行 · ' + (b.attrs || []).length + ' 属性（' + esc((b.attrs || []).join(", ").slice(0, 80)) + '）</span></div>';
+    if ((b.blocks || []).length) h += gxIacRenderBlocks(b.blocks, (depth || 0) + 1);
+  }
+  return h;
+}
+function gxIacParse() {
+  const file = gxIacFileOf();
+  const out = document.getElementById("gxIacOut"), meta = document.getElementById("gxIacMeta");
+  if (!file) { out.innerHTML = '<div class="schempty">先输入 .tf 文件路径（工作区相对）</div>'; return; }
+  out.innerHTML = '<div class="schempty">解析中…（内置 HCL 子集解析器）</div>';
+  fetch("/api/govex/iac?action=parse&file=" + encodeURIComponent(file)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ [' + esc(j.kind || "?") + "] " + esc(j.reason || "") + "</div>"; return; }
+    meta.textContent = j.blocks + " 顶层块 · " + j.took_ms + "ms · 车道 " + j.lane;
+    let h = '<div class="tbsym">🧱 ' + esc(j.file) + " —— " + j.blocks + " 顶层块（AST 摘要，嵌套块缩进展示）</div>";
+    h += gxIacRenderBlocks(j.ast, 0);
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxIacPlan() {
+  const file = gxIacFileOf();
+  const out = document.getElementById("gxIacOut"), meta = document.getElementById("gxIacMeta");
+  if (!file) { out.innerHTML = '<div class="schempty">先输入 .tf 文件路径</div>'; return; }
+  out.innerHTML = '<div class="schempty">组织计划中…（依赖图 → 拓扑序 → 人读 Plan）</div>';
+  fetch("/api/govex/iac?action=plan&file=" + encodeURIComponent(file)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.reason || "") + (j.cycles ? "（环：" + esc((j.cycles[0] || []).join(" → ")) + "）" : "") + "</div>"; return; }
+    const s = j.summary || {};
+    meta.textContent = "create " + s.resources + " · data " + s.dataSources + " · vars " + s.variables + " · 车道 " + j.lane;
+    let h = '<pre style="margin:0;white-space:pre-wrap;font:11px/1.5 var(--mono)">' + esc(String(j.text || "").slice(0, 12000)) + "</pre>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxIacGraph() {
+  const file = gxIacFileOf();
+  const out = document.getElementById("gxIacOut"), meta = document.getElementById("gxIacMeta");
+  if (!file) { out.innerHTML = '<div class="schempty">先输入 .tf 文件路径</div>'; return; }
+  out.innerHTML = '<div class="schempty">建图中…（引用级分析：var/local/data/module/资源地址/depends_on）</div>';
+  fetch("/api/govex/iac?action=graph&file=" + encodeURIComponent(file)).then(function (r) { return r.json(); }).then(function (j) {
+    meta.textContent = (j.nodes || []).length + " 节点 · " + (j.edges || []).length + " 边";
+    let h = "";
+    if (!j.ok) {
+      h = '<div class="tbsym">✗ 依赖图有环 —— ' + esc(j.reason || "") + "</div>";
+      for (const c of (j.cycles || []).slice(0, 3)) h += '<div class="tbrow">环：' + esc(c.join(" → ")) + "</div>";
+    } else {
+      h = '<div class="tbsym">🕸 拓扑序（被依赖在前）：' + esc((j.order || []).join(" → ")) + "</div>";
+    }
+    for (const e of (j.edges || []).slice(0, 100)) h += '<div class="tbrow">' + esc(e.from) + " → " + esc(e.to) + ' <span class="tbmeta">（' + esc(e.via) + " · 第 " + e.line + " 行）</span></div>";
+    for (const u of (j.undeclared_refs || []).slice(0, 20)) h += '<div class="tbrow">⚠ ' + esc(u.from) + " → " + esc(u.via) + "（未声明引用 · 第 " + u.line + " 行）</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxIacProbe() {
+  const out = document.getElementById("gxIacProbeOut");
+  out.innerHTML = '<div class="schempty">探测中…（which + version 探活，各 5s 硬超时）</div>';
+  fetch("/api/govex/iac?action=probe").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error || "") + "</div>"; return; }
+    let h = '<div class="tbsym">🔎 ' + (j.lane === "cli" ? "外部 CLI 车道可用 + 内置车道恒在" : "CLI 全缺席 —— 内置静态车道为主车道（诚实降级）") + " · " + j.took_ms + "ms</div>";
+    for (const [name, face] of [["terraform", j.terraform], ["tofu", j.tofu], ["tflint", j.tflint]]) {
+      h += '<div class="tbrow">' + (face.available ? "✓" : "⬜") + " <b>" + name + "</b>" + (face.available ? " v" + esc(face.version || "?") : ' <span class="tbmeta">' + esc(String(face.reason || "").slice(0, 110)) + "</span>") + "</div>";
+    }
+    h += '<div class="tbmeta" style="margin-top:6px">💡 ' + esc(j.suggestion) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxIacGenerate() {
+  const raw = document.getElementById("gxIacManifest").value.trim();
+  const out = document.getElementById("gxIacGenOut");
+  if (!raw) { out.innerHTML = '<div class="schempty">先输入 manifest JSON（{"provider":"aws","resources":[…]}）</div>'; return; }
+  out.innerHTML = '<div class="schempty">生成中…（provider 块 + variable 提取 + resource 块 + output）</div>';
+  fetch("/api/govex/iac?action=generate&manifest=" + encodeURIComponent(raw)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) {
+      let h = '<div class="tbsym">✗ manifest 校验未通过：</div>';
+      for (const e of j.errors || []) h += '<div class="tbrow">· ' + esc(e) + "</div>";
+      out.innerHTML = h;
+      return;
+    }
+    let h = '<div class="tbsym">⚙ ' + esc(j.provider) + " · 资源 " + j.resources + " · 变量 " + (j.variables || []).length + "（" + esc((j.variables || []).join(", ")) + "）· 往返自解析 " + (j.round_trip && j.round_trip.ok ? "✓" : "✗") + "</div>";
+    for (const w of j.warnings || []) h += '<div class="tbrow">⚠ ' + esc(w) + "</div>";
+    h += '<pre style="margin:6px 0 0;white-space:pre-wrap;font:11px/1.5 var(--mono)">' + esc(j.tf) + "</pre>";
     out.innerHTML = h;
   }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
 }
