@@ -511,7 +511,7 @@ let wsSeq = 0;
 let WS = "";
 
 describe("云生态：工具环 e2e（cloud_* 六工具）", () => {
-  test("cloud_probe（只读模式可用）：全景五面 + clis=0/10 可观测", () => {
+  test("cloud_probe（只读模式可用）：全景五面 + clis=N/10 可观测（环境自适应）", () => {
     WS = path.join(WS_ROOT, `t${String(++wsSeq).padStart(3, "0")}`);
     fs.cpSync(path.join(process.cwd(), "demo-ws"), WS, { recursive: true });
     const fixture = path.join(TEST_RUN, `cloud-fixture-${wsSeq}.json`);
@@ -535,8 +535,11 @@ describe("云生态：工具环 e2e（cloud_* 六工具）", () => {
       .map((e) => String((e.data as { detail?: string }).detail ?? ""));
     expect(tr.length).toBe(1);
     expect(tr[0]).toContain("cloud_probe ok");
-    expect(tr[0]).toContain("clis=0/10"); // 沙箱 10 家全缺席 —— 诚实可观测
-    expect(tr[0]).toContain("docker=✗");
+    // v0.5.17.1 环境自适应：沙箱 10 家全缺席，但 GitHub Actions runner 预装
+    // docker/ssh/kubectl + 4 家云 CLI（CI 实弹：clis=4/10）—— 断言锁形态
+    // 不锁环境（「可观测」的测试意图不变）。
+    expect(tr[0]).toMatch(/clis=\d+\/10/);
+    expect(tr[0]).toMatch(/docker=(daemon✓|CLI|✗)/);
   }, 120_000);
 
   test("cloud_dockerfile（只读模式可用）：node 模板四要素可观测", () => {
@@ -611,8 +614,10 @@ describe("云生态：CLI 冒烟（org cloud）", () => {
     expect(p.stdout).toContain("云生态全景探测");
     expect(p.stdout).toContain("docker");
     expect(p.stdout).toContain("terraform");
-    expect(p.stdout).toContain("0/10 家在场");
-    expect(p.stdout).toContain("降级车道即主车道");
+    // v0.5.17.1 环境自适应：云 CLI 在场数随 runner 而变（沙箱 0/10 · GitHub CI 4/10）
+    expect(p.stdout).toMatch(/\d+\/10 家在场/);
+    // 降级车道指引：terraform 缺席时展示（在场时展示探测成功 —— 两形态都诚实）
+    if (p.stdout.includes("terraform ✗")) expect(p.stdout).toContain("降级车道即主车道");
     const c = runOrg(["cloud", "clis"]);
     expect(c.ok).toBe(true);
     expect(c.stdout).toContain("aws");
