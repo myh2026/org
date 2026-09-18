@@ -87,8 +87,9 @@ describe("pathjail：jailRelative 相对形", () => {
     expect(jailRelative("/a/ws", "/b/x.ts")).toBe("/b/x.ts"); // 越界原样（调用方决定报错口径）
   });
   test("resolveInWorkspace：相对解析进 ws；绝对透传", () => {
-    expect(resolveInWorkspace("/a/ws", "src/app.hsl")).toBe("/a/ws/src/app.hsl");
-    expect(resolveInWorkspace("/a/ws", "/abs/x.ts")).toBe("/abs/x.ts");
+    // win32 的 path.resolve 产 "\" 形（fs 两形皆收）—— 断言按比较形归一，跨平台同规
+    expect(canonFor(process.platform, resolveInWorkspace("/a/ws", "src/app.hsl"))).toBe("/a/ws/src/app.hsl");
+    expect(resolveInWorkspace("/a/ws", "/abs/x.ts")).toBe("/abs/x.ts"); // 绝对形透传不 resolve
   });
 });
 
