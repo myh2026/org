@@ -28,11 +28,14 @@ function emitTo(hsl: string, tag: string): string {
 }
 
 function findRuff(): string | null {
+  // v0.5.15：win32 后缀兼容（fs.existsSync 不自动解析 .exe）
+  const exe = process.platform === "win32" ? ".exe" : "";
   for (const c of process.env.PATH?.split(path.delimiter) ?? []) {
-    const p = path.join(c, "ruff");
+    const p = path.join(c, "ruff" + exe);
     if (fs.existsSync(p)) return p;
+    if (!exe && fs.existsSync(path.join(c, "ruff"))) return path.join(c, "ruff");
   }
-  const fallback = path.join(os.homedir(), ".local", "bin", "ruff");
+  const fallback = path.join(os.homedir(), ".local", "bin", "ruff" + exe);
   return fs.existsSync(fallback) ? fallback : null;
 }
 

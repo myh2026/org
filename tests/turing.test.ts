@@ -19,6 +19,15 @@
 //   rust as 转换保真 · rust char_at 映射。
 //
 // 端到端用例逐例 120s 超时（B-15 纪律）。
+//
+// v0.5.15 三重平台防御（CI 实测驱动，跨平台假红清零）：
+//   1. 工具缺席优雅降级：ruff/rustc/g++ 缺失时 test.skip（可见理由）
+//      而非 ENOENT 假红 —— 与全仓「多重优雅降级」哲学一致（裸检出
+//      bun test 不炸；CI 已装工具，覆盖不缩水）；
+//   2. win32 可执行后缀：rustc/g++ 产物在 Windows 是 <name>.exe，
+//      execFileSync 不自动补后缀 → exeOf() 统一追加；
+//   3. CRLF 归一：MSVC CRT 文本模式把 \n 翻译成 \r\n（管道也不例外），
+//      对拍前 normLines() 归一 —— 与解释器逐行一致。
 // ============================================================================
 
 import { describe, test, expect, beforeAll } from "bun:test";
@@ -30,16 +39,49 @@ import { execFileSync } from "node:child_process";
 
 const TURING = path.join(process.cwd(), "fixtures/turing");
 const SCRATCH = fs.mkdtempSync(path.join(os.tmpdir(), "org-turing-"));
+const WIN32 = process.platform === "win32";
+/** python 解释器命令（Windows runner 只有 python.exe，无 python3 别名）。 */
+const PY = WIN32 ? "python" : "python3";
 
 /** 编译工具的 PATH（rustup 落在 ~/.cargo/bin）。 */
 function toolPath(tool: string): string {
+  const exe = WIN32 ? ".exe" : "";
   for (const c of [...(process.env.PATH?.split(path.delimiter) ?? []),
     path.join(os.homedir(), ".cargo", "bin"),
     path.join(os.homedir(), ".local", "bin")]) {
-    const p = path.join(c, tool);
+    const p = path.join(c, tool + exe);
     if (fs.existsSync(p)) return p;
+    if (!WIN32 && fs.existsSync(path.join(c, tool))) return path.join(c, tool);
   }
-  return tool;
+  return tool + exe;
+}
+
+/** 工具是否可用（缺席 → 用例优雅降级 skip，不假红）。 */
+function hasTool(tool: string): boolean {
+  const exe = WIN32 ? ".exe" : "";
+  for (const c of [...(process.env.PATH?.split(path.delimiter) ?? []),
+    path.join(os.homedir(), ".cargo", "bin"),
+    path.join(os.homedir(), ".local", "bin")]) {
+    if (fs.existsSync(path.join(c, tool + exe))) return true;
+    if (!WIN32 && fs.existsSync(path.join(c, tool))) return true;
+  }
+  return false;
+}
+
+/** 工具在场才注册用例；缺席降级为 skip（理由写进用例名，输出可见）。 */
+function toolTest(tool: string, name: string, fn: () => void, ms = 120_000) {
+  const reg = hasTool(tool) ? test : test.skip;
+  reg(`${name}${hasTool(tool) ? "" : `（${tool} 缺席，降级跳过）`}`, fn, ms);
+}
+
+/** Windows 可执行路径（rustc/g++ 产物 .exe 后缀）。 */
+function exeOf(bin: string): string {
+  return WIN32 ? bin + ".exe" : bin;
+}
+
+/** 行尾归一（MSVC CRT 文本模式 \r\n → \n），跨平台逐行对拍。 */
+function normOut(s: string): string {
+  return s.replace(/\r\n/g, "\n");
 }
 
 function emit(hsl: string, out: string): boolean {
@@ -89,37 +131,37 @@ describe("图灵完备 I：Rule 110 元胞自动机（Cook 2004 TC 证明）", (
     expect(lines[5]).toBe("..................................##...#.......................................");
   }, 120_000);
 
-  test("python 投射：真实运行输出一致 + ruff 全绿", () => {
+  toolTest(WIN32 ? "python" : "python3", "python 投射：真实运行输出一致 + ruff 全绿", () => {
     const dir = path.join(SCRATCH, "r110-py");
     expect(emit("fixtures/turing/rule110.hsl", dir)).toBe(true);
-    const py = execFileSync("python3", [path.join(dir, "main.py")], { encoding: "utf-8" });
+    const py = execFileSync(PY, [path.join(dir, "main.py")], { encoding: "utf-8" });
     const interp = runHslLines("fixtures/turing/rule110.hsl", "r110b").filter((l) => /^[.#]+$/.test(l));
-    const pyLines = py.split("\n").filter((l) => l.trim().length > 0);
+    const pyLines = normOut(py).split("\n").filter((l) => l.trim().length > 0);
     expect(pyLines).toEqual(interp);
-    execFileSync(toolPath("ruff"), ["check", dir], { stdio: "pipe" });
-  }, 120_000);
+    if (hasTool("ruff")) execFileSync(toolPath("ruff"), ["check", dir], { stdio: "pipe" });
+  });
 
-  test("rust 投射：rustc 真实编译运行输出一致", () => {
+  toolTest("rustc", "rust 投射：rustc 真实编译运行输出一致", () => {
     const dir = path.join(SCRATCH, "r110-rs");
     expect(emit("fixtures/turing/rule110.hsl", dir)).toBe(true);
     const bin = path.join(dir, "rule110-bin");
     execFileSync(toolPath("rustc"), [path.join(dir, "rule110.rs"), "-o", bin], { stdio: "pipe" });
-    const rsOut = execFileSync(bin, { encoding: "utf-8" });
+    const rsOut = execFileSync(exeOf(bin), { encoding: "utf-8" });
     const interp = runHslLines("fixtures/turing/rule110.hsl", "r110c").filter((l) => /^[.#]+$/.test(l));
-    const rsLines = rsOut.split("\n").filter((l) => l.trim().length > 0);
+    const rsLines = normOut(rsOut).split("\n").filter((l) => l.trim().length > 0);
     expect(rsLines).toEqual(interp);
-  }, 120_000);
+  });
 
-  test("cpp 投射：g++ -std=c++20 真实编译运行输出一致", () => {
+  toolTest("g++", "cpp 投射：g++ -std=c++20 真实编译运行输出一致", () => {
     const dir = path.join(SCRATCH, "r110-cpp");
     expect(emit("fixtures/turing/rule110.hsl", dir)).toBe(true);
     const bin = path.join(dir, "rule110-cpp-bin");
-    execFileSync("g++", ["-std=c++20", path.join(dir, "rule110.cpp"), "-o", bin], { stdio: "pipe" });
-    const cppOut = execFileSync(bin, { encoding: "utf-8" });
+    execFileSync(toolPath("g++"), ["-std=c++20", path.join(dir, "rule110.cpp"), "-o", bin], { stdio: "pipe" });
+    const cppOut = execFileSync(exeOf(bin), { encoding: "utf-8" });
     const interp = runHslLines("fixtures/turing/rule110.hsl", "r110d").filter((l) => /^[.#]+$/.test(l));
-    const cppLines = cppOut.split("\n").filter((l) => l.trim().length > 0);
+    const cppLines = normOut(cppOut).split("\n").filter((l) => l.trim().length > 0);
     expect(cppLines).toEqual(interp);
-  }, 120_000);
+  });
 });
 
 describe("图灵完备 II：图灵机（3 态忙海狸 BB(3)）", () => {
@@ -133,24 +175,24 @@ describe("图灵完备 II：图灵机（3 态忙海狸 BB(3)）", () => {
     expect(joined).toContain("BB(3) VERIFIED");
   }, 120_000);
 
-  test("python 投射：真实运行输出一致 + ruff 全绿", () => {
+  toolTest(WIN32 ? "python" : "python3", "python 投射：真实运行输出一致 + ruff 全绿", () => {
     const dir = path.join(SCRATCH, "bb-py");
     expect(emit("fixtures/turing/busy-beaver.hsl", dir)).toBe(true);
-    const py = execFileSync("python3", [path.join(dir, "busy_beaver.py")], { encoding: "utf-8" });
-    expect(py).toContain("steps=13 configs=14 ones=6");
-    expect(py).toContain("BB(3) VERIFIED");
-    execFileSync(toolPath("ruff"), ["check", dir], { stdio: "pipe" });
-  }, 120_000);
+    const py = execFileSync(PY, [path.join(dir, "busy_beaver.py")], { encoding: "utf-8" });
+    expect(normOut(py)).toContain("steps=13 configs=14 ones=6");
+    expect(normOut(py)).toContain("BB(3) VERIFIED");
+    if (hasTool("ruff")) execFileSync(toolPath("ruff"), ["check", dir], { stdio: "pipe" });
+  });
 
-  test("rust 投射：rustc 真实编译运行输出一致（as 转换保真回归）", () => {
+  toolTest("rustc", "rust 投射：rustc 真实编译运行输出一致（as 转换保真回归）", () => {
     const dir = path.join(SCRATCH, "bb-rs");
     expect(emit("fixtures/turing/busy-beaver.hsl", dir)).toBe(true);
     const bin = path.join(dir, "bb-bin");
     execFileSync(toolPath("rustc"), [path.join(dir, "busy_beaver.rs"), "-o", bin], { stdio: "pipe" });
-    const rsOut = execFileSync(bin, { encoding: "utf-8" });
-    expect(rsOut).toContain("steps=13 configs=14 ones=6");
-    expect(rsOut).toContain("BB(3) VERIFIED");
-  }, 120_000);
+    const rsOut = execFileSync(exeOf(bin), { encoding: "utf-8" });
+    expect(normOut(rsOut)).toContain("steps=13 configs=14 ones=6");
+    expect(normOut(rsOut)).toContain("BB(3) VERIFIED");
+  });
 });
 
 describe("图灵完备 III：Brainfuck 解释器（用 HSL 解释 TC 语言）", () => {
@@ -164,35 +206,36 @@ describe("图灵完备 III：Brainfuck 解释器（用 HSL 解释 TC 语言）",
     expect(joined).toContain("BF VERIFIED");
   }, 120_000);
 
-  test("python 投射：真实运行输出一致 + ruff 全绿", () => {
+  toolTest(WIN32 ? "python" : "python3", "python 投射：真实运行输出一致 + ruff 全绿", () => {
     const dir = path.join(SCRATCH, "bf-py");
     expect(emit("fixtures/turing/bf.hsl", dir)).toBe(true);
-    const py = execFileSync("python3", [path.join(dir, "bf.py")], { encoding: "utf-8" });
-    expect(py).toContain("BF says: Hello World!");
-    expect(py).toContain("executed=906 instructions");
-    execFileSync(toolPath("ruff"), ["check", dir], { stdio: "pipe" });
-  }, 120_000);
+    const py = execFileSync(PY, [path.join(dir, "bf.py")], { encoding: "utf-8" });
+    expect(normOut(py)).toContain("BF says: Hello World!");
+    expect(normOut(py)).toContain("executed=906 instructions");
+    if (hasTool("ruff")) execFileSync(toolPath("ruff"), ["check", dir], { stdio: "pipe" });
+  });
 
-  test("rust 投射：rustc 真实编译运行输出一致（char_at 映射回归）", () => {
+  toolTest("rustc", "rust 投射：rustc 真实编译运行输出一致（char_at 映射回归）", () => {
     const dir = path.join(SCRATCH, "bf-rs");
     expect(emit("fixtures/turing/bf.hsl", dir)).toBe(true);
     const bin = path.join(dir, "bf-bin");
     execFileSync(toolPath("rustc"), [path.join(dir, "bf.rs"), "-o", bin], { stdio: "pipe" });
-    const rsOut = execFileSync(bin, { encoding: "utf-8" });
-    expect(rsOut).toContain("BF says: Hello World!");
-    expect(rsOut).toContain("executed=906 instructions");
-  }, 120_000);
+    const rsOut = execFileSync(exeOf(bin), { encoding: "utf-8" });
+    expect(normOut(rsOut)).toContain("BF says: Hello World!");
+    expect(normOut(rsOut)).toContain("executed=906 instructions");
+  });
 });
 
 describe("ruff 门禁：图灵语料入册（六语料全绿）", () => {
-  test("bun scripts/ruff-gate.ts 全绿（含三份图灵语料）", () => {
+  toolTest("ruff", "bun scripts/ruff-gate.ts 全绿（含三份图灵语料）", () => {
     const r = Bun.spawnSync([process.execPath, "scripts/ruff-gate.ts"], {
       cwd: process.cwd(), stdout: "pipe", stderr: "pipe",
+      env: { ...process.env, PATH: [path.dirname(toolPath("ruff")), process.env.PATH].filter(Boolean).join(path.delimiter) },
     });
     const text = r.stdout.toString();
     expect(r.exitCode).toBe(0);
     expect(text).toContain("rule110.hsl");
     expect(text).toContain("busy-beaver.hsl");
     expect(text).toContain("bf.hsl");
-  }, 120_000);
+  });
 });

@@ -207,7 +207,9 @@ describe("notify：通知中心", () => {
   test("桌面通知三级降级：无桌面环境 → unavailable 不炸", () => {
     const r = desktopNotify("标题", "内容");
     expect(["sent", "unavailable", "disabled"]).toContain(r);
-  });
+    // v0.5.15：显式 15s 超时 —— headless Windows runner 的 powershell toast
+    // spawn 可能吃满 tryCmd 的 3s 预算 ×多级降级，裸 5s 默认超时不够（CI 实录）。
+  }, 15_000);
 
   test("坏通知文件 → 空列表不炸", () => {
     fs.mkdirSync(path.join(WS, "runtime"), { recursive: true });

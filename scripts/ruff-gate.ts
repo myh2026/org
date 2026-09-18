@@ -32,11 +32,15 @@ const CORPUS: Array<{ hsl: string; note: string }> = [
 ];
 
 function findRuff(): string {
+  // v0.5.15：win32 后缀兼容 —— fs.existsSync 不自动解析 .exe，
+  // 裸检 "ruff" 在 Windows 永远落空（即便 pip 已装）。
+  const exe = process.platform === "win32" ? ".exe" : "";
   for (const c of process.env.PATH?.split(path.delimiter) ?? []) {
-    const p = path.join(c, "ruff");
+    const p = path.join(c, "ruff" + exe);
     if (fs.existsSync(p)) return p;
+    if (!exe && fs.existsSync(path.join(c, "ruff"))) return path.join(c, "ruff");
   }
-  const fallback = path.join(os.homedir(), ".local", "bin", "ruff");
+  const fallback = path.join(os.homedir(), ".local", "bin", "ruff" + exe);
   if (fs.existsSync(fallback)) return fallback;
   console.error("✗ 找不到 ruff。安装：uv tool install ruff（或 pip install ruff）");
   process.exit(2);

@@ -184,9 +184,12 @@ export function desktopNotify(title: string, body: string): DesktopResult {
   }
   const t = title.replace(/["']/g, "");
   const b = body.replace(/["']/g, "").slice(0, 180);
+  // v0.5.15：3s 预算（原 5s）—— headless Windows runner 实测 powershell toast
+  // 挂满 5s 才超时，把 bun test 默认 5s 用例超时一起拖爆（CI 实录 5334ms）。
+  // 桌面通知是尽力而为通道：3s 发不出去就降级，绝不拖率主流程/测试。
   const tryCmd = (args: string[]): boolean => {
     try {
-      const r = Bun.spawnSync(args, { stdout: "ignore", stderr: "ignore", timeout: 5000 } as Parameters<typeof Bun.spawnSync>[1]);
+      const r = Bun.spawnSync(args, { stdout: "ignore", stderr: "ignore", timeout: 3000 } as Parameters<typeof Bun.spawnSync>[1]);
       return r.exitCode === 0;
     } catch {
       return false;

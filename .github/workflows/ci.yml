@@ -167,6 +167,17 @@ jobs:
         shell: bash
         run: bun scripts/setup-hsl.ts
 
+      # v0.5.15：图灵语料 ruff 对拍依赖 —— 本 job 原先不装 ruff，
+      # turing python 投射 3 例 + ruff gate 1 例在 mac/win 假红（ENOENT）。
+      # pip 装进 runner 系统 python 的 Scripts 目录（两端都在 PATH）；
+      # 即便 PATH 失配，测试侧也已优雅降级为 skip（双保险）。
+      - name: 安装 ruff（图灵语料 ruff 对拍依赖）
+        shell: bash
+        run: |
+          PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
+          "$PY" -m pip install --quiet ruff
+          "$PY" -m ruff --version || true
+
       - name: dhv check 全部 HSL 源码（hsl/ + probe/ + dist/ 铸出专家）
         shell: bash
         run: bun cli/org.ts check
