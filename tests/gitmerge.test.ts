@@ -44,7 +44,9 @@ function write(cwd: string, rel: string, content: string): void {
 }
 
 function read(cwd: string, rel: string): string {
-  return fs.readFileSync(path.join(cwd, rel), "utf-8");
+  // CRLF 防线第 2 层（v0.5.16.1 CI 修复）：GitHub win32 runner 机器级 core.autocrlf=true
+  // 会把 checkout 重写的文件混入 \r\n —— 语义断言按 LF 归一比较（与 turing.test.ts normOut 同规）。
+  return fs.readFileSync(path.join(cwd, rel), "utf-8").replace(/\r\n/g, "\n");
 }
 
 /** 标准仓：main 分支 + 基线提交（a.txt 三行 + b.txt）。 */
@@ -54,6 +56,10 @@ function makeRepo(tag: string): string {
   git(repo, ["init", "-q", "-b", "main"]);
   git(repo, ["config", "user.email", "org@test"]);
   git(repo, ["config", "user.name", "org-test"]);
+  // CRLF 防线第 1 层（v0.5.16.1 CI 修复）：GitHub win32 runner 机器级 core.autocrlf=true
+  // 在 merge --abort / checkout 重写文件时把 LF blob 涂成 \r\n —— 仓级关闭换行转
+  // 换，播种与断言字节确定性跨平台一致（macOS/linux 本就无此转换，零变化）。
+  git(repo, ["config", "core.autocrlf", "false"]);
   write(repo, "a.txt", "line1\nline2\nline3\n");
   write(repo, "b.txt", "keep\n");
   git(repo, ["add", "-A"]);
@@ -85,6 +91,7 @@ function makeCloneRepo(tag: string): { origin: string; work: string } {
   git(root, ["clone", "-q", origin, work]);
   git(work, ["config", "user.email", "org@test"]);
   git(work, ["config", "user.name", "org-test"]);
+  git(work, ["config", "core.autocrlf", "false"]); // 同 makeRepo：win32 runner 换行转抈关闭（v0.5.16.1）
   write(work, "a.txt", "v1\n");
   git(work, ["add", "-A"]);
   git(work, ["commit", "-q", "-m", "c1"]);

@@ -1,5 +1,51 @@
 # CHANGELOG
 
+## v0.5.16.1（2026-09-19）—— CI 红灯清零补丁：win32 监狱混形 + gitmerge CRLF + payload 编译态
+
+3a7af68（v0.5.16 合并推送）后 CI 五 job 两红（run 35367288947）：verify 的
+payload 新鲜度门 + win32 cross-platform-tests 三用例。三处根因 + 一处潜伏
+编译态缺陷，同批清零：
+
+### 一、win32 监狱混合分隔符假性越界（系统性 · pathjail 单点收敛）
+
+- **实锤**：`complete_at` 对合法相对路径 `src/app.hsl` 报「路径越界」——
+  native 块把 ws 归一成 `/` 形（`.replace(/\\/g,"/")` 绝对路径原样保留），
+  而 `path.resolve()` 在 win32 产 `\` 形，混形前缀比较必然失败。
+- **同病潜伏一并修**：`git_merge`/`git_rebase` 显式 repo 参数、
+  `plugin_install` 本地源、`browser_screenshot` 相对 out（同混形模式）；
+  7 处 `wsReal` 型监狱对绝对路径输入的同类隐患（正斜杠绝对输入 vs
+  realpathSync 反斜杠根）。
+- **修复**：新增 `lib/pathjail.ts` —— `canonFor/inWsFor`（平台参数化）+
+  `inWorkspace/jailCanonical/jailRelative/resolveInWorkspace`（当前平台）。
+  比较形统一 `/` 分隔符 + win32 大小写折叠（D: vs d: 文件系统不敏感）+
+  POSIX 保持大小写敏感。10 个工具站点全部接入，fs_move 保留零硬依赖
+  （DHV_TS 缺席时内联同形回退 —— 多重优雅降级）。
+- **回归钉**：`tests/pathjail.test.ts`（14 例）—— THE bug shape 正反两向、
+  盘符大小写、POSIX 不折叠、前缀边界（ws-evil ≠ ws 子路径）、词法逃逸
+  仍拒绝（修复不放松监狱）。平台参数化使 win32 分支在任意宿主可测。
+
+### 二、gitmerge 测试 CRLF 双层防线
+
+GitHub win32 runner 机器级 `core.autocrlf=true` 在 merge --abort /
+checkout 重写文件时把 LF blob 涂成 CRLF → 字节精确断言假红（两个冲突
+自动 abort 用例）。**第 1 层**：测试仓播种时 `core.autocrlf=false`
+（makeRepo + makeCloneRepo，跨平台确定性）；**第 2 层**：`read()` 助手
+CRLF→LF 归一（语义断言，与 turing.test.ts normOut 同规）。
+
+### 三、payload 再生（verify 新鲜度门）
+
+合并冲突取 org 侧旧 payload（1,289,806B）vs 接线版（1,289,954B）→
+`bun scripts/build-bin.ts --payload-only` 再生提交。
+
+### 四、编译态工具环 lib/ 缺席（潜伏缺陷 · native-smoke 盲区）
+
+编译态 ROOT=解包目录，而 PAYLOAD_ROOTS 不含 `lib/` → 工具环 native 块
+`import(root+"/lib/*.ts")` 在单二进制形态下 15 个工具全断（native-smoke
+只跑 check/demo/TUI 不踩工具环，故未暴露）。**修复**：`lib` 入
+PAYLOAD_ROOTS（38 文件 · payload 1,260→1,907 KB），lib 均为自包含 TS
+（node 内建 + lib 内相对引用 + bun:sqlite）全量嵌入免维护清单；
+`tests/pathjail.test.ts` 加守卫防 PAYLOAD_ROOTS 回退静默复发。
+
 ## v0.5.16（2026-09-18）—— 治理与扩展批：9 模块统一接线（CLI / 工具环 / Web 三端）
 
 9 个 lib 模块（dbdiag/gitmerge/rbac/iacscan/plugins/openapi/browser/

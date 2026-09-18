@@ -438,7 +438,8 @@ fn tool_db_schema(args: String) -> String {
                     const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
                     const wsReal = fsMod.realpathSync(ws);
                     const lexical = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(wsReal, file);
-                    const inWs = (p) => p === wsReal || p.startsWith(wsReal + pathMod.sep);
+                    const jail = await import(root + "/lib/pathjail.ts"); // v0.5.16.1：win32 混合分隔符收敛（CI run 35367288947 修复）
+                    const inWs = (p) => jail.inWorkspace(wsReal, p);
                     // 第一层：词法判定先行（../ 逃逸在此拦截 —— 即便父目录不存在也能判）
                     if (!inWs(lexical)) return { jail: false, error: "路径越界（须在工作区内）：" + file };
                     // 第二层：符号链实解析（父目录不存在 = 新建文件场景，词法判定已过则降级放行）
@@ -485,7 +486,8 @@ fn tool_db_query(args: String) -> String {
                     const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
                     const wsReal = fsMod.realpathSync(ws);
                     const lexical = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(wsReal, file);
-                    const inWs = (p) => p === wsReal || p.startsWith(wsReal + pathMod.sep);
+                    const jail = await import(root + "/lib/pathjail.ts"); // v0.5.16.1：win32 混合分隔符收敛（CI run 35367288947 修复）
+                    const inWs = (p) => jail.inWorkspace(wsReal, p);
                     // 第一层：词法判定先行（../ 逃逸在此拦截 —— 即便父目录不存在也能判）
                     if (!inWs(lexical)) return { jail: false, error: "路径越界（须在工作区内）：" + file };
                     // 第二层：符号链实解析（父目录不存在 = 新建文件场景，词法判定已过则降级放行）
@@ -536,7 +538,8 @@ fn tool_db_migrate(args: String) -> String {
                     const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
                     const wsReal = fsMod.realpathSync(ws);
                     const lexical = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(wsReal, file);
-                    const inWs = (p) => p === wsReal || p.startsWith(wsReal + pathMod.sep);
+                    const jail = await import(root + "/lib/pathjail.ts"); // v0.5.16.1：win32 混合分隔符收敛（CI run 35367288947 修复）
+                    const inWs = (p) => jail.inWorkspace(wsReal, p);
                     // 第一层：词法判定先行（../ 逃逸在此拦截 —— 即便父目录不存在也能判）
                     if (!inWs(lexical)) return { jail: false, error: "路径越界（须在工作区内）：" + file };
                     // 第二层：符号链实解析（父目录不存在 = 新建文件场景，词法判定已过则降级放行）
@@ -578,7 +581,8 @@ async fn tool_read_pdf(args: String) -> String {
                     const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
                     const wsReal = fsMod.realpathSync(ws);
                     const lexical = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(wsReal, file);
-                    const inWs = (p) => p === wsReal || p.startsWith(wsReal + pathMod.sep);
+                    const jail = await import(root + "/lib/pathjail.ts"); // v0.5.16.1：win32 混合分隔符收敛（CI run 35367288947 修复）
+                    const inWs = (p) => jail.inWorkspace(wsReal, p);
                     // 第一层：词法判定先行（../ 逃逸在此拦截 —— 即便父目录不存在也能判）
                     if (!inWs(lexical)) return { jail: false, error: "路径越界（须在工作区内）：" + file };
                     // 第二层：符号链实解析（父目录不存在 = 新建文件场景，词法判定已过则降级放行）
@@ -617,7 +621,14 @@ fn tool_fs_move(args: String) -> String {
             const wsRaw = norm(String($host.config.workspace || "."));
             const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
             const wsReal = fsMod.realpathSync(ws);
-            const inWs = (p) => p === wsReal || p.startsWith(wsReal + pathMod.sep);
+            // v0.5.16.1：监狱判定单点收敛（pathjail）+ DHV_TS 缺席时内联同形回退（fs_move 是唯一不依赖 org 根的工具，保持零硬依赖）
+            const jail = (() => {
+                const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/");
+                const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/);
+                return m ? import(m[1] + "/lib/pathjail.ts") : Promise.resolve({ inWorkspace: (w, p) => { const c = (s) => { const n = String(s).replace(/\\/g, "/"); return process.platform === "win32" ? n.toLowerCase() : n; }; const wc = c(w); return c(p) === wc || c(p).startsWith(wc + "/"); } });
+            })();
+            const jailMod = await jail;
+            const inWs = (p) => jailMod.inWorkspace(wsReal, p);
             const resolveIn = (p) => {
                 const lexical = pathMod.isAbsolute(p) ? norm(p) : pathMod.resolve(wsReal, p);
                 if (!inWs(lexical)) throw new Error("路径越界（须在工作区内）：" + p);
@@ -712,7 +723,8 @@ async fn tool_db_diagnose(args: String) -> String {
                     const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
                     const wsReal = fsMod.realpathSync(ws);
                     const lexical = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(wsReal, file);
-                    const inWs = (p) => p === wsReal || p.startsWith(wsReal + pathMod.sep);
+                    const jail = await import(root + "/lib/pathjail.ts"); // v0.5.16.1：win32 混合分隔符收敛（CI run 35367288947 修复）
+                    const inWs = (p) => jail.inWorkspace(wsReal, p);
                     if (!inWs(lexical)) return { jail: false, error: "路径越界（须在工作区内）：" + file };
                     try {
                         const parent = fsMod.realpathSync(pathMod.dirname(lexical));
@@ -753,7 +765,8 @@ fn tool_git_merge(args: String) -> String {
             const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
             const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
             const repo = a.repo != null && String(a.repo) !== "" ? pathMod.resolve(ws, String(a.repo)) : ws;
-            if (repo !== ws && !(repo.startsWith(ws + pathMod.sep))) return JSON.stringify({ tool: "git_merge", ok: false, error: "路径越界（repo 须在工作区内）：" + String(a.repo) });
+            const jail = await import(root + "/lib/pathjail.ts"); // v0.5.16.1：win32 混合分隔符收敛
+            if (!jail.inWorkspace(ws, repo)) return JSON.stringify({ tool: "git_merge", ok: false, error: "路径越界（repo 须在工作区内）：" + String(a.repo) });
             const gm = await import(root + "/lib/gitmerge.ts");
             const r = gm.gitMerge(repo, { source: source, ...(a.message != null ? { message: String(a.message) } : {}), noFf: a.no_ff === true || a.noFf === true });
             return JSON.stringify({
@@ -780,7 +793,8 @@ fn tool_git_rebase(args: String) -> String {
             const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
             const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
             const repo = a.repo != null && String(a.repo) !== "" ? pathMod.resolve(ws, String(a.repo)) : ws;
-            if (repo !== ws && !(repo.startsWith(ws + pathMod.sep))) return JSON.stringify({ tool: "git_rebase", ok: false, error: "路径越界（repo 须在工作区内）：" + String(a.repo) });
+            const jail = await import(root + "/lib/pathjail.ts"); // v0.5.16.1：win32 混合分隔符收敛
+            if (!jail.inWorkspace(ws, repo)) return JSON.stringify({ tool: "git_rebase", ok: false, error: "路径越界（repo 须在工作区内）：" + String(a.repo) });
             const gm = await import(root + "/lib/gitmerge.ts");
             const r = gm.gitRebase(repo, { onto: onto });
             return JSON.stringify({
@@ -893,7 +907,8 @@ fn tool_plugin_install(args: String) -> String {
             // git 源（协议 URL）原样透传；本地源解析进工作区（监狱：源须在 ws 内）
             const isGit = /^(?:https?|git|ssh|file):\/\//i.test(source) || /^git@[\w.-]+:[\w./-]+/i.test(source);
             const resolved = isGit ? source : pathMod.resolve(ws, source);
-            if (!isGit && resolved !== ws && !resolved.startsWith(ws + pathMod.sep)) {
+            const jail = await import(root + "/lib/pathjail.ts"); // v0.5.16.1：win32 混合分隔符收敛
+            if (!isGit && !jail.inWorkspace(ws, resolved)) {
                 return JSON.stringify({ tool: "plugin_install", ok: false, error: "路径越界（本地源须在工作区内）：" + source });
             }
             const r = plugins.pluginInstall(ws, resolved);
@@ -944,7 +959,8 @@ fn tool_openapi_parse(args: String) -> String {
                     const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
                     const wsReal = fsMod.realpathSync(ws);
                     const lexical = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(wsReal, file);
-                    const inWs = (p) => p === wsReal || p.startsWith(wsReal + pathMod.sep);
+                    const jail = await import(root + "/lib/pathjail.ts"); // v0.5.16.1：win32 混合分隔符收敛（CI run 35367288947 修复）
+                    const inWs = (p) => jail.inWorkspace(wsReal, p);
                     if (!inWs(lexical)) return { jail: false, error: "路径越界（须在工作区内）：" + file };
                     try {
                         const parent = fsMod.realpathSync(pathMod.dirname(lexical));
@@ -1017,7 +1033,8 @@ async fn tool_browser_screenshot(args: String) -> String {
             // out：工作区相对（监狱）；缺省 browser-<时间戳>.png 落工作区根
             const outRel = a.out != null && String(a.out) !== "" ? String(a.out) : ("browser-" + new Date().toISOString().replace(/[-:T.]/g, "").slice(0, 14) + ".png");
             const outAbs = pathMod.isAbsolute(outRel) ? outRel.replace(/\\/g, "/") : pathMod.resolve(ws, outRel);
-            if (outAbs !== ws && !outAbs.startsWith(ws + pathMod.sep)) return JSON.stringify({ tool: "browser_screenshot", ok: false, error: "路径越界（out 须在工作区内）：" + outRel });
+            const jail = await import(root + "/lib/pathjail.ts"); // v0.5.16.1：win32 混合分隔符收敛
+            if (!jail.inWorkspace(ws, outAbs)) return JSON.stringify({ tool: "browser_screenshot", ok: false, error: "路径越界（out 须在工作区内）：" + outRel });
             const timeoutMs = Math.max(1000, Math.min(60000, Math.floor(Number(a.timeout_ms || a.timeoutMs) || 30000)));
             const browser = await import(root + "/lib/browser.ts");
             const r = await browser.browserScreenshot(url, { out: outAbs, timeoutMs });
@@ -1045,7 +1062,11 @@ async fn tool_complete_at(args: String) -> String {
             const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
             const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
             const abs = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(ws, file);
-            if (abs !== ws && !abs.startsWith(ws + pathMod.sep)) return JSON.stringify({ tool: "complete_at", ok: false, error: "路径越界（须在工作区内）：" + file });
+            // v0.5.16.1 CI 修复：ws 是 "/" 形而 path.resolve() 在 win32 产 "\" 形 ——
+            // 混形前缀比较必然假性越界（run 35367288947 win32 实锤：src/app.hsl 被拒）。
+            // 统一走 pathjail 同形比较（分隔符归一 + win32 盘符大小写折叠）。
+            const jail = await import(root + "/lib/pathjail.ts");
+            if (!jail.inWorkspace(ws, abs)) return JSON.stringify({ tool: "complete_at", ok: false, error: "路径越界（须在工作区内）：" + file });
             let lineText = a.line_text != null ? String(a.line_text) : null;
             let lineNo = 0;
             if (lineText === null && a.line != null) {
