@@ -1,13 +1,7 @@
 {
-<<<<<<< HEAD
-  "ts": "2026-09-18T17:42:03.176Z",
-  "ok": true,
-  "elapsed_ms": 15,
-=======
   "ts": "2026-09-18T17:41:46.115Z",
   "ok": true,
   "elapsed_ms": 12,
->>>>>>> lab-main
   "model": "scripted",
   "task": "acceptance rehearsal: validate sample records",
   "events": 2

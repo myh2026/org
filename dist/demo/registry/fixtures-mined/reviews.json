@@ -1,5 +1,1 @@
-<<<<<<< HEAD
-{"source":"journal","run_id":"2026-09-18T17-42-03-431Z","tracks":{"review:fetch":[{"verdict":"accept"}],"review:parse":[{"verdict":"accept"}],"review:validate":[{"verdict":"accept"}]}}
-=======
 {"source":"journal","run_id":"2026-09-18T17-41-46-310Z","tracks":{"review:fetch":[{"verdict":"accept"}],"review:parse":[{"verdict":"accept"}],"review:validate":[{"verdict":"accept"}]}}
->>>>>>> lab-main
