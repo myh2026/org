@@ -618,6 +618,22 @@ describe("CLI 冒烟（org lsp / org debug）", () => {
     expect(hover.stdout).toContain("fn · lib/app.ts:1");
   }, 60_000);
 
+  test("v0.5.17.1 --workspace= 等号形态：flag 前置 + positional 后置不被吞（控制台 param 追加车道）", () => {
+    // 等号形态：rawPositionals 跳过（带 = 不吃值），parseArgs 解析 workspace
+    const eq = runOrg(["lsp", "definition", `--workspace=${WS}`, "compute"]);
+    expect(eq.ok).toBe(true);
+    expect(eq.stdout).toContain("compute");
+    expect(eq.stdout).toContain("lib/app.ts");
+    // 语义等价：与分离形态同输出形状
+    const sep = runOrg(["lsp", "definition", "compute", "--workspace", WS]);
+    expect(sep.ok).toBe(true);
+    expect(sep.stdout).toContain("lib/app.ts");
+    // debug suggest 同形态（file positional 在 flag 之后）
+    const sug = runOrg(["debug", "suggest", `--workspace=${WS}`, "lib/app.ts"]);
+    expect(sug.ok).toBe(true);
+    expect(sug.stdout).toContain("建议断点");
+  }, 60_000);
+
   test("org lsp protocol / org debug dap：自检退出码 0 + 通过计数", () => {
     const proto = runOrg(["lsp", "protocol"]);
     expect(proto.ok).toBe(true);

@@ -52,6 +52,9 @@ const ENV_VARS = [
 
 beforeEach(() => {
   for (const v of ENV_VARS) SAVED[v] = process.env[v];
+  // v0.5.17.1 环境卫生修复：清零（此前只保存不清零 —— 宿主注入 DEEPSEEK_API_KEY 等
+  // 时「无任何变量 → 空发现」假红；控制台 task-runner 全量测试实弹抓出）。
+  for (const v of ENV_VARS) delete process.env[v];
   process.env.ORG_CONFIG = cfgFile;
   if (fs.existsSync(cfgFile)) fs.rmSync(cfgFile);
 });

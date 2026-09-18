@@ -204,6 +204,7 @@ function parseArgs(argv: string[]): Args {
     const v = argv[i]!;
     if (v === "--task") a.task = argv[++i] ?? "";
     else if (v === "--workspace") a.workspace = path.resolve(argv[++i] ?? ".");
+    else if (v.startsWith("--workspace=")) a.workspace = path.resolve(v.slice("--workspace=".length)); // v0.5.17.1 等号形态（控制台 param 追加车道：flag 前置 + 值后置的 rawPositionals 兼容）
     else if (v === "--fixture") { a.fixture = path.resolve(argv[++i] ?? "."); a.fixtureExplicit = true; }
     else if (v === "--model") { a.model = argv[++i] ?? "scripted"; a.modelExplicit = true; }
     else if (v === "--out") a.out = path.resolve(argv[++i] ?? ".");
