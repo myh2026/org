@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## v0.5.18.2（2026-09-19）—— CI 追修：macOS openrsync 版本行形态
+
+run 35408498464 残余红（mac cross-platform 仅 1 用例 ×2 段）：macOS 12+ 自带
+openrsync 的 `--version` 首行是 `openrsync: protocol version 29`（非
+`openrsync version x.y.z` 形态）→ 版本行断言放宽 match /rsync/i（锁 rsync
+字样不锁发行版语法）。verify/win/native-smoke 四 job 本轮已绿。
+
+本地 remote 53/53 全绿。
 ## v0.5.18.1（2026-09-19）—— CI 环境自适应五修（run 35407741607 三平台红清零）
 
 v0.5.18 合并推送后 CI 三 job 红（verify + cross-platform win/mac）——全部是
