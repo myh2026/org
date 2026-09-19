@@ -198,7 +198,7 @@ describe("远程 Agent：探测降级（无工具宇宙）", () => {
     const p = probeRemote();
     if (p.rsyncAvailable) {
       expect(p.rsyncVersion).toBeTruthy();
-      expect(p.rsyncVersion!).toMatch(/^rsync\s+version/i);
+      expect(p.rsyncVersion!).toMatch(/^(rsync|openrsync)\s+version/i); // macOS 12+ 自带 openrsync —— 锁形态不锁发行版
     } else {
       expect(p.rsyncVersion).toBeNull(); // 缺席即缺席，不臆造版本
     }
@@ -929,10 +929,11 @@ describe("远程 Agent：Web /api/govex/remote 端点", () => {
     expect(j.ssh_keygen).toBeTruthy();
     expect([true, false]).toContain(j.agent_forwarding); // 布尔面（锁形态不锁环境——绝不回显 socket 路径值）
     expect(j.hint).toContain("org remote plan");
-    // 在场时版本解析可观测（环境自适应：CI ssh 在场 / 沙箱缺席）
+    // 在场时版本解析可观测（环境自适应：CI ssh 在场 / 沙箱缺席）——
+    // open_ssh 解析结果嵌在 ssh 面对象内（Web 端点结构）
     if (j.ssh.available) {
-      expect(j.open_ssh).toBeTruthy();
-      expect(j.open_ssh.major).toBeGreaterThanOrEqual(7);
+      expect(j.ssh.open_ssh).toBeTruthy();
+      expect(j.ssh.open_ssh.major).toBeGreaterThanOrEqual(7);
     }
   }, 60_000);
 
