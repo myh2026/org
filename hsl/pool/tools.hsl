@@ -159,6 +159,21 @@
 //   mcp_tools     {server?}         工具清单（spawn → initialize → tools/list
 //                                    + 分页跟进；能力缺席诚实 unsupported）
 //   执行车道（Full 模式 + process_spawn 门 + 审批在环）：
+//   浏览器 DevTools 簇（v0.5.20 · #116 console 面板/网络面板/DOM 交互 ——
+//   CDP 常驻会话引擎，lib/devtools.ts 与 CLI org devtools / Web 同源）：
+//   devtools_probe    {}                引擎/端点探测（CDP 端点发现链四环 +
+//                                      /json/version + /json/list 页面清单；零副作用）
+//   devtools_console  {url?, durationMs?} console 面板（consoleAPICalled 四源：
+//                                      log/warn/error 归一 + exceptionThrown +
+//                                      Log.entryAdded；url 给定先导航采集加载期）
+//   devtools_network  {url?, durationMs?, filter?} 网络面板（请求生命周期表：
+//                                      method/status/mime/size/durationMs/failed）
+//   devtools_interact {action, selector, value?} DOM 交互（执行车道：click/fill/
+//                                      type/press/hover/check —— agent-browser 主
+//                                      车道 + CDP Runtime.evaluate 降级；
+//                                      process_spawn 门 + 审批在环）
+//   MCP 会话池（v0.5.20 长连接复用）：mcp_sessions {} 池观测（hits/misses/
+//   逐出/过期/漂移丢弃/中途死亡恢复 + 每会话年龄/空闲/操作数 —— 只读面）
 //   mcp_call_tool {server, tool, arguments?}  调用 server 工具（server 须在
 //                                    档案不猜默认；秘密键只收 $env:VAR 引用）
 
@@ -253,6 +268,12 @@ export fn tools_prompt(mode: ToolMode) -> String {
     out.push_str("- mcp_servers {} — MCP roster + host-runtime probe (reads <ws>/mcp-servers.json roster + probes bun/bunx/node/npx/python3/uvx spawn runtimes; zero spawn, honest absence with guidance).\n");
     out.push_str("- mcp_tools {\"server\":\"fx\"} — MCP tool enumeration (spawn server per op → initialize handshake → capability negotiation → tools/list with cursor pagination; capability-absent servers return honest unsupported).\n");
     out.push_str("- mcp_call_tool {\"server\":\"fx\",\"tool\":\"echo\",\"arguments\":{\"message\":\"hi\"}} — MCP tool invocation (execution lane: process_spawn gate + approval in loop; server MUST be in roster — never guess a default; secrets only via $env:VAR references).\n");
+    out.push_str("- devtools_probe {} — browser DevTools engine probe (CDP endpoint discovery chain: explicit/env ORG_CDP_URL/agent-browser daemon/default 9222; /json/version + /json/list page roster; zero side effects, honest absence with install hints).\n");
+    out.push_str("- devtools_console {\"url\":\"https://x.test/\",\"durationMs\":2000} — browser console panel (CDP resident session: consoleAPICalled with level normalization warning→warn + exceptionThrown + Log.entryAdded with url:line; optional navigate-first captures load-time console; caps 500 entries / 4KB per entry / 30s window).\n");
+    out.push_str("- devtools_network {\"url\":\"https://x.test/\",\"durationMs\":3000,\"filter\":\"api\"} — browser network panel (request lifecycle table: method/status/mime/size/durationMs/failed+errorText via requestWillBeSent/responseReceived/loadingFinished/loadingFailed pairing; caps 300 requests).\n");
+    out.push_str("- devtools_interact {\"action\":\"click\",\"selector\":\"#submit\",\"value\":\"文本\"?} — DOM interaction (execution lane: click/dblclick/fill/type/press/hover/check/uncheck/select; agent-browser CLI main lane + CDP Runtime.evaluate fallback for click/fill/check; process_spawn gate + approval in loop).\n");
+    out.push_str("- mcp_sessions {} — MCP session pool observability (v0.5.20 long-lived reuse: hits/misses/evictions/expiry/drift-discards/mid-op-death-recovery counters + per-session age/idle/ops; read-only surface, close via CLI org mcp sessions --close).\n");
+
     if mode == ToolMode::Full {
         out.push_str("- fs_write {\"path\":\"...\",\"content\":\"...\",\"preview\":true?} — write a file (may require approval). preview:true returns a unified diff WITHOUT writing (dry-run). Content is scanned for secrets: high-severity key patterns (sk-/ghp_/AKIA… ) are refused — never persist real credentials.\n");
         out.push_str("- fs_edit {\"path\":\"...\",\"old\":\"exact unique text\",\"new\":\"replacement\",\"preview\":true?} — precise edit (may require approval); preview:true returns the diff without writing.\n");
@@ -400,6 +421,10 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         // process_spawn 门 + 审批在环；档案门拒绝发生在门与 spawn 之前，
         // lib/mcp.ts 内部先判）；mcp_servers/mcp_tools 是枚举面协议操作（例外清单）
         "mcp_call_tool" => String::from("process_spawn"),
+        // v0.5.20：DevTools DOM 交互是外部浏览器动作车道（agent-browser 子进程
+        // 或 CDP 连接 —— process_spawn 门 + 审批在环；probe/console/network 是
+        // 只读采集面（例外清单）
+        "devtools_interact" => String::from("process_spawn"),
         _ => String::from("file_read"), // v0.5.15：db_schema/db_query（只读门内建）/symbol_search/read_pdf/review_suggest 均只读
     };
     // 写门例外清单（只读工具 + agent_spawn/audio_compose 自带门）：v0.5.15 新增
@@ -440,7 +465,11 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         && name != String::from("remote_ping")
         // v0.5.19：MCP 枚举面协议操作（档案/运行时探测零 spawn；tools 清单是
         // 只读协议操作 —— server 由用户在 mcp-servers.json 档案显式登记）
-        && name != String::from("mcp_servers") && name != String::from("mcp_tools") {
+        && name != String::from("mcp_servers") && name != String::from("mcp_tools")
+        // v0.5.20：DevTools 只读采集三件（probe 零副作用；console/network 是
+        // 采集面不写任何东西）+ mcp_sessions 池观测（纯读计数）
+        && name != String::from("devtools_probe") && name != String::from("devtools_console")
+        && name != String::from("devtools_network") && name != String::from("mcp_sessions") {
         let approved = gate_write(policy, gate_cap, name.clone(), args.clone()).await;
         if approved == String::from("denied") {
             emit_tool(String::from("tool_denied"), format!("{} {}", name, "capability denied"));
@@ -523,7 +552,12 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "mcp_servers" => tool_mcp_servers(args.clone()),
         "mcp_tools" => tool_mcp_tools(args.clone()),
         "mcp_call_tool" => tool_mcp_call_tool(args.clone()),
-        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/iac_parse/iac_plan/iac_graph/iac_generate/mobile_devices/mobile_logcat/mobile_plan/mcp_servers/mcp_tools/mcp_call_tool/shell_run/agent_spawn/audio_compose/audit_export/review_suggest）", name)),
+        "devtools_probe" => tool_devtools_probe(args.clone()),
+        "devtools_console" => tool_devtools_console(args.clone()),
+        "devtools_network" => tool_devtools_network(args.clone()),
+        "devtools_interact" => tool_devtools_interact(args.clone()),
+        "mcp_sessions" => tool_mcp_sessions(args.clone()),
+        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/iac_parse/iac_plan/iac_graph/iac_generate/mobile_devices/mobile_logcat/mobile_plan/mcp_servers/mcp_tools/mcp_call_tool/devtools_probe/devtools_console/devtools_network/devtools_interact/mcp_sessions/shell_run/agent_spawn/audio_compose/audit_export/review_suggest）", name)),
     };
     emit_tool(String::from("tool_result"), result_summary(result.clone()));
     result
@@ -2256,6 +2290,131 @@ fn tool_mcp_call_tool(args: String) -> String {
             });
         } catch (e) {
             return JSON.stringify({ tool: "mcp_call_tool", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// DevTools 引擎探测（只读：CDP 端点发现链 + 版本/页面清单；零副作用）。
+fn tool_devtools_probe(args: String) -> String {
+    native typescript {
+        try {
+            void args;
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "devtools_probe", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const dt = await import(root + "/lib/devtools.ts");
+            const cdp = typeof args === "string" ? (() => { try { const a = JSON.parse(args); return typeof a.cdp === "string" && a.cdp.trim() ? a.cdp.trim() : undefined; } catch { return undefined; } })() : undefined;
+            const p = await dt.devtoolsProbe(cdp ? { cdpUrl: cdp } : {});
+            return JSON.stringify({
+                tool: "devtools_probe", ok: p.ok, lane: p.lane, agent_browser: p.agentBrowser,
+                ...(p.cdp ? { cdp: { http: p.cdp.httpUrl, source: p.cdp.source, browser: p.cdp.version.browser, protocol: p.cdp.version.protocolVersion, pages: p.cdp.pages.map((pg) => ({ id: pg.id, title: pg.title.slice(0, 60), url: pg.url.slice(0, 120) })) } } : {}),
+                ...(p.hint ? { hint: p.hint } : {}),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "devtools_probe", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// DevTools console 面板（只读采集：consoleAPICalled/exceptionThrown/Log.entryAdded）。
+fn tool_devtools_console(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args || "{}");
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "devtools_console", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const dt = await import(root + "/lib/devtools.ts");
+            const r = await dt.devtoolsConsole({
+                ...(typeof a.url === "string" && a.url.trim() ? { url: a.url.trim() } : {}),
+                ...(Number.isFinite(Number(a.durationMs)) && Number(a.durationMs) > 0 ? { durationMs: Number(a.durationMs) } : {}),
+                ...(typeof a.cdp === "string" && a.cdp.trim() ? { cdpUrl: a.cdp.trim() } : {}),
+            });
+            return JSON.stringify({
+                tool: "devtools_console", ok: r.ok,
+                ...(r.ok ? {
+                    lane: r.lane, ms: r.ms, navigated: r.navigated === true, count: r.entries.length,
+                    entries: r.entries.slice(0, 50).map((e) => ({ source: e.source, level: e.level, text: String(e.text).slice(0, 200), ...(e.url ? { url: e.url.slice(0, 120) } : {}) })),
+                    ...(r.hint ? { hint: r.hint } : {}),
+                } : { kind: r.kind, error: r.error, ...(r.hint ? { hint: r.hint } : {}) }),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "devtools_console", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// DevTools 网络面板（只读采集：请求生命周期表）。
+fn tool_devtools_network(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args || "{}");
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "devtools_network", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const dt = await import(root + "/lib/devtools.ts");
+            const r = await dt.devtoolsNetwork({
+                ...(typeof a.url === "string" && a.url.trim() ? { url: a.url.trim() } : {}),
+                ...(Number.isFinite(Number(a.durationMs)) && Number(a.durationMs) > 0 ? { durationMs: Number(a.durationMs) } : {}),
+                ...(typeof a.filter === "string" && a.filter.trim() ? { filter: a.filter.trim() } : {}),
+                ...(typeof a.cdp === "string" && a.cdp.trim() ? { cdpUrl: a.cdp.trim() } : {}),
+            });
+            return JSON.stringify({
+                tool: "devtools_network", ok: r.ok,
+                ...(r.ok ? {
+                    lane: r.lane, ms: r.ms, navigated: r.navigated === true, count: r.requests.length,
+                    requests: r.requests.slice(0, 60).map((q) => ({ method: q.method, status: q.status, url: String(q.url).slice(0, 160), ...(q.mime ? { mime: q.mime } : {}), ...(q.size !== undefined ? { size: q.size } : {}), ...(q.durationMs !== undefined ? { duration_ms: q.durationMs } : {}), ...(q.failed ? { failed: true, ...(q.errorText ? { error: q.errorText } : {}) } : {}) })),
+                    ...(r.hint ? { hint: r.hint } : {}),
+                } : { kind: r.kind, error: r.error, ...(r.hint ? { hint: r.hint } : {}) }),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "devtools_network", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// DevTools DOM 交互（执行车道：process_spawn 门 + 审批在环；动作白名单在 lib 内部先判）。
+fn tool_devtools_interact(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args || "{}");
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "devtools_interact", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            if (typeof a.action !== "string" || !a.action.trim() || typeof a.selector !== "string" || !a.selector.trim()) {
+                return JSON.stringify({ tool: "devtools_interact", ok: false, kind: "invalid-args", error: "args.action 与 args.selector 必填（action: click/dblclick/fill/type/press/hover/check/uncheck/select）" });
+            }
+            const dt = await import(root + "/lib/devtools.ts");
+            const value = typeof a.value === "string" ? a.value : undefined;
+            const r = await dt.devtoolsInteract(a.action.trim(), a.selector.trim(), value, {
+                ...(typeof a.cdp === "string" && a.cdp.trim() ? { cdpUrl: a.cdp.trim() } : {}),
+            });
+            return JSON.stringify({
+                tool: "devtools_interact", ok: r.ok,
+                ...(r.ok ? { lane: r.lane, action: r.action, selector: r.selector, detail: String(r.detail).slice(0, 200), ms: r.ms } : { kind: r.kind, error: r.error, ...(r.hint ? { hint: r.hint } : {}) }),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "devtools_interact", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// MCP 会话池观测（只读：命中/未命中/逐出/过期/漂移/中途死亡计数 + 每会话年龄/空闲/操作数）。
+fn tool_mcp_sessions(args: String) -> String {
+    native typescript {
+        try {
+            void args;
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "mcp_sessions", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const mcp = await import(root + "/lib/mcp.ts");
+            const st = mcp.mcpSessionStats();
+            return JSON.stringify({
+                tool: "mcp_sessions", ok: true,
+                pool: {
+                    total_sessions: st.totalSessions, max_sessions: st.maxSessions, idle_ttl_ms: st.idleTtlMs,
+                    sessions: st.sessions.map((s) => ({ server: s.server, age_ms: s.ageMs, idle_ms: s.idleMs, ops: s.ops, exited: s.exited })),
+                    counters: { hits: st.hits, misses: st.misses, evictions: st.evictions, expires: st.expires, drift_discards: st.driftDiscards, mid_op_deaths: st.midOpDeaths },
+                },
+                hint: "会话池按 --reuse（CLI）/session:reuse（lib）车道积累；fresh 模式不占池。收池走 CLI org mcp sessions --close",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "mcp_sessions", ok: false, error: String(e && e.message || e) });
         }
     }
 }
