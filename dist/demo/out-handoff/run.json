@@ -1,7 +1,7 @@
 {
-  "ts": "2026-09-19T02:19:32.719Z",
+  "ts": "2026-09-19T02:19:54.259Z",
   "ok": true,
-  "elapsed_ms": 21,
+  "elapsed_ms": 17,
   "model": "scripted",
   "task": "(handoff) small request",
   "events": 5
