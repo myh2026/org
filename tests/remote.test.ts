@@ -198,7 +198,7 @@ describe("远程 Agent：探测降级（无工具宇宙）", () => {
     const p = probeRemote();
     if (p.rsyncAvailable) {
       expect(p.rsyncVersion).toBeTruthy();
-      expect(p.rsyncVersion!).toMatch(/^(rsync|openrsync)\s+version/i); // macOS 12+ 自带 openrsync —— 锁形态不锁发行版
+            expect(p.rsyncVersion!).toMatch(/rsync/i); // rsync/openrsync 版本行形态各异（macOS 12+ 是 "openrsync: protocol version 29"）—— 锁 rsync 字样不锁发行版语法
     } else {
       expect(p.rsyncVersion).toBeNull(); // 缺席即缺席，不臆造版本
     }
