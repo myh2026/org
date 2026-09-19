@@ -14,7 +14,7 @@ prompts 三面独立，缺席诚实 unsupported）+ tools/list 分页跟进 + to
   统一诚实拒绝）· 档案层单一规则源校验（name 唯一/command 非空/args 全字符
   串/cwd 过 pathjail 监狱/**秘密键字面值拒绝 —— 只收 $env:VAR 引用，spawn
   时从父环境解析，缺席拒绝，值永不入档**）· 内容归一（text 拼接/image·
-  resource 计数/16KB 帽）· 协议自检 19 项（纯内存）
+  resource 计数/16KB 帽）· 协议自检 20 项（纯内存）
 - **CLI** `org mcp servers|tools|call|resources|read|prompts|self-test` 七
   子命令（档案缺席/坏档/server 不在档 → 诚实拒绝 + 指引）
 - **工具环** +3：mcp_servers/mcp_tools（只读协议操作，ReadOnly 可用）+
