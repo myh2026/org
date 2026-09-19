@@ -274,7 +274,7 @@
 > （单一规则源校验：name 唯一/command 非空/args 全字符串/cwd 过 pathjail 监狱/**秘密键
 > 字面值拒绝 —— 只收 $env:VAR 引用（spawn 时解析，缺席拒绝，值永不入档）**）+ 能力协商
 > （tools/resources/prompts 三面独立，缺席诚实 unsupported）+ 分页跟进（nextCursor 帽
-> 8 页）+ 内容归一（text 拼接/image·resource 计数/16KB 帽）+ 协议自检 19 项（纯内存）。
+> 8 页）+ 内容归一（text 拼接/image·resource 计数/16KB 帽）+ 协议自检 20 项（纯内存）。
 > CLI `org mcp` 七子命令（servers/tools/call/resources/read/prompts/self-test）；工具环
 > +3（mcp_servers/mcp_tools 只读协议操作 + mcp_call_tool 执行车道 process_spawn 门+审批
 > 在环）；Web GET /api/govex/mcp 只读五动作 + 🔌 面板 Tab（call 不在 Web 只读面 ——

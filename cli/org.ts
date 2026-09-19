@@ -3748,6 +3748,15 @@ async function cmdMcp(a: Args): Promise<number> {
   if (verb === "tools") {
     const name = positional[1];
     const reports = await mcpListTools(ws, name);
+    if (reports.length === 0) {
+      // 档案在但全部停用（或指名的 server 停用已被单报处理）—— 诚实计数而非通用指引
+      const f = loadMcpServers(ws);
+      if (f.kind === "ok") {
+        const disabled = f.entries.filter((e) => e.disabled).length;
+        console.log(`🔧 档案 ${f.entries.length} 条 —— 0 个启用（${disabled} 个停用）。启用（去掉 disabled 字段）后重试`);
+        return 0;
+      }
+    }
     let anyOk = false;
     for (const r of reports) {
       if (r.ok) {
