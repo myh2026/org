@@ -1,5 +1,56 @@
 # CHANGELOG
 
+## v0.5.20（2026-09-19）—— 浏览器 DevTools 常驻会话 + MCP 会话池（#116：✅120/150）
+
+#116 的剩余半面（console 面板/网络面板/DOM 交互 —— v0.5.16 标注「需要常驻
+会话型引擎（CDP 协议）」）+ MCP 会话粒度升级（每操作一会话 → 池化长连接）。
+
+- **lib/devtools.ts**（约 1100 行，新模块）：
+  - **裸 CDP 客户端**（主车道）：端点发现链四环（--cdp → env ORG_CDP_URL →
+    agent-browser 守护进程 `get cdp-url` → 缺省 127.0.0.1:9222）→ HTTP
+    /json/version + /json/list 页面发现 → CdpConnection（WebSocket attach ·
+    id 配对请求响应 · 事件订阅分发 · 坏行拒收 · close 幂等 · pending 统一拒绝）
+  - **console 面板**：Runtime.enable + Log.enable → 三源采集
+    （consoleAPICalled：级别归一 warning→warn + args 拼接；exceptionThrown；
+    Log.entryAdded 带 url:line）；url 给定先导航 —— 采集**加载期** console
+    （CDP 车道独有优势）；帽 500 条/单条 4KB/窗口 30s
+  - **网络面板**：Network.enable →（可选 Page.navigate）→ 四事件生命周期
+    配对（requestWillBeSent/responseReceived/loadingFinished/loadingFailed）→
+    method/status/mime/size/durationMs/failed+errorText 表；loadEventFired +
+    600ms 宽限提前收工；filter 子串过滤；帽 300 条
+  - **DOM 交互**：click/dblclick/fill/type/press/hover/check/uncheck/select
+    （agent-browser 主车道直通 + CDP Runtime.evaluate 降级：querySelector +
+    click/value 赋值 + input/change 事件派发，JSON.stringify 埋参零注入）；
+    选择器消毒（帽 300 + 控制字符拒绝）
+  - **eval**：页面上下文（returnByValue + awaitPromise · agent-browser JSON
+    解析主车道 + CDP 降级）；表达式帽 8KB
+  - 车道语义：**显式 --lane = 不级联**（强制语义）· auto = CDP 败后降级
+    agent-browser · 双缺席诚实指引（engine-absent + 三选一启用指引）
+  - devtoolsSelfTest 12 项纯内存自检
+- **lib/mcp.ts 会话池**（v0.5.20 长连接复用）：McpSessionPool 模块级单例 ——
+  键 = 工作区+server 名；命中（活+档案未漂移+空闲未超 TTL）零 spawn 零握手；
+  档案漂移（command/args/cwd/env 指纹变更）→ 换血；空闲超 TTL（缺省 5min）→
+  优雅关闭换血；LRU 帽 4；操作中死亡 → 丢弃后**单次**换血重试（诚实恢复不
+  无限）；并发去重（同 key 共享一次 spawn）；mcpSessionStats/mcpTunePool/
+  mcpCloseSessions 观测面；五个高层操作 +session:"fresh"|"reuse"（缺省 fresh
+  —— v0.5.19 语义不变）
+- **CLI**：`org devtools probe|console|network|interact|eval|close|self-test`
+  七子命令（--cdp/--lane/--target/--url/--duration/--filter/--value 旗标）+
+  `org mcp sessions [--close]` + mcp 操作 `--reuse` 旗标
+- **工具环** +5：devtools_probe/devtools_console/devtools_network/mcp_sessions
+  （只读例外清单）+ devtools_interact（process_spawn 门 + 审批在环）
+- **Web**：GET /api/govex/devtools 只读四动作（probe/console/network/selftest
+  —— interact/eval/close 是动作面走 CLI，与 mcp call 的 remote 口径一致）+
+  /api/govex/mcp +action=sessions
+- **tests/fixtures/cdp-fixture-server.ts**：真 HTTP /json/* + WebSocket CDP
+  协议对话的假服务端（FAKE_CDP_CONSOLE/EXCEPTION/LOG_ENTRY/NET/EVAL/
+  SEL_MISS/GARBAGE/DIE_SILENT/HANG/PAGE_URL 十一控制面）
+- **tests/devtools.test.ts 50 例**：纯函数 12 · engine-absent 6 · fixture 真
+  会话 12 · 坏行为容错 6 · agent-browser 车道 4（在场条件跑）· CLI 2 · Web 5 ·
+  工具环 e2e 2；tests/mcp.test.ts +12（会话池：同 pid 复用/fresh 不占池/漂移
+  换血/TTL 过期/中途死亡重试/LRU 逐出/收池/五操作同池/CLI/Web）
+- 主表 #116 🟡→✅（**✅120/150 · 🟡30 · ⬜0**）；测试 1205 → **1266**
+
 ## v0.5.19（2026-09-19）—— MCP 客户端桥（#122 / C12：专家矩阵 25/25 满贯）
 
 org 作为 MCP **客户端**：按 <ws>/mcp-servers.json 档案 spawn 外部 MCP server

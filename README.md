@@ -5,7 +5,7 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.5.19_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Status](https://img.shields.io/badge/status-v0.5.20_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
 [![Tests](https://img.shields.io/badge/tests-686%2F686_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.66-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
@@ -19,7 +19,7 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **v0.5.19 当前状态**：可运行实现，机制级测试全绿。本版为 **MCP 客户端桥**（#122 主表 🟡→✅ + 专家表 C12 🟡→✅ —— 专家矩阵 25/25 满贯）：lib/mcp.ts —— mcp-servers.json 档案（秘密键只收 $env:VAR 引用，值永不入档）→ spawn 外部 server（stdio 换行分帧 JSON-RPC）→ initialize 握手 + 能力协商（tools/resources/prompts 三面独立，缺席诚实 unsupported）→ tools/list 分页 / tools/call（isError 双层语义）/ resources / prompts。CLI `org mcp` 七子命令 · 工具环 +3（mcp_servers/mcp_tools 只读 + mcp_call_tool 走 process_spawn 门+审批在环）· Web /api/govex/mcp 只读五动作 + 🔌 面板。测试 1154 → **1205**（mcp 51）。主表 ✅119/150 · 🟡31 · ⬜0。
+> **v0.5.20 当前状态**：可运行实现，机制级测试全绿。本版为 **浏览器 DevTools 常驻会话半面 + MCP 会话池**（#116 主表 🟡→✅）：lib/devtools.ts —— 裸 CDP 客户端（端点发现链 --cdp → ORG_CDP_URL → agent-browser 守护进程 → 127.0.0.1:9222；WebSocket attach + id 配对请求/事件订阅）：console 面板（三源：consoleAPICalled 级别归一 + exceptionThrown + Log.entryAdded；可选导航先采集加载期）· 网络面板（请求生命周期配对 status/mime/size/durationMs/failed）· DOM 交互（click/fill + agent-browser 车道 type/press/hover 直通）· eval；agent-browser CLI 降级车道（文本行实测契约解析）；显式 lane 不级联 · 双缺席诚实指引。**MCP 会话池**（v0.5.20）：mcp.ts 池化长连接（--reuse：命中零 spawn 零握手 · 档案漂移/空闲超 TTL/LRU 帽 4/中途死亡单次换血重试 · sessions 观测面）。CLI `org devtools` 七子命令 + `org mcp sessions` · 工具环 +5（devtools_probe/console/network 只读 + devtools_interact 走门 + mcp_sessions 只读）· Web /api/govex/devtools 只读四动作 + 🖥 面板。测试 1205 → **1266**（devtools 50 + mcp 池 12 − 计数合并 1）。主表 ✅120/150 · 🟡30 · ⬜0。
 
 > **v0.5.18 当前状态**：可运行实现，机制级测试全绿。本版为**终局三 ⬜ 清零批**——能力矩阵 150 项未做项归零（✅ 118/150 · 🟡32 · ⬜0）。三簇并进：**IaC 深度实现**（#44：org iac · 内置 HCL 子集解析器（heredoc/插值/splat）→ 依赖图（拓扑/环检测）→ 人读 Plan → manifest 逆向生成往返自洽；terraform/tofu 在场时 validate 外部车道只读，缺席内置车道为主车道——与 #147 iacscan 扫描面互补）、**移动端调试**（#117：org mobile · adb devices/logcat 五元组 dump/WebView CDP forward 四层降级/apk 魔数 + plan 纯函数保底（平台×症状矩阵），全链多重优雅降级）、**远程 Agent**（#133：org remote · remote-hosts.json 主机档案门（私钥内容混入拒绝）+ 会话级 exec（白名单只读默认）+ rsync→scp→指引三层 sync + 部署计划四式——与 #68 cloud_ssh 单命令执行互补的会话/部署层）；工具环 +11 工具（iac×4/mobile×3/remote×3 只读 + remote_exec 走 process_spawn 门+审批在环）、Web +3 端点 + ⚒/📱/🛰 三面板 Tab。测试 977 → **1093**（iac 63 · mobile 60 · remote 53）。
 

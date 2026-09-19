@@ -9,6 +9,8 @@
 //   FAKE_MCP_SLOW_MS    slow 工具的响应延迟（测超时）
 //   FAKE_MCP_GARBAGE_N  启动时先吐 N 行非 JSON 人话（测分帧器拒收）
 //   FAKE_MCP_DIE_AFTER  处理完第 N 条消息后进程退出（测早夭诊断）
+//   FAKE_MCP_DIE_ON_CALL 处理第 N 次 tools/call 时在响应前退出（测会话池
+//                       中途死亡 → 单次换血重试 —— v0.5.20）
 //   FAKE_MCP_PROBE_REQ  "1" = initialize 后先发一条 sampling/createMessage
 //                       server→client 请求（测客户端自动 -32601 响应）
 // 内置工具面（tools/list）：
@@ -16,6 +18,9 @@
 //   add   {a,b}      → a+b（text 块 + structuredContent）
 //   fail  {}         → isError:true + 错误文本（协议层成功、工具层失败）
 //   slow  {}         → FAKE_MCP_SLOW_MS 毫秒后回 "slept Nms"
+//   stats {}         → {pid, inits, messages}（v0.5.20 会话池验收：同 pid =
+//                       同进程复用；inits = 本进程摆手次数；messages = 已处理
+//                       消息数 —— 池化复用的可观测证据面）
 // 资源面：org://readme / org://notes 两个 text 资源；提示词面：review 一个。
 // ============================================================================
 //
@@ -50,6 +55,7 @@ const TOOLS = [
   { name: "add", description: "整数加法 a+b", inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] } },
   { name: "fail", description: "工具层失败（isError:true）", inputSchema: { type: "object", properties: {} } },
   { name: "slow", description: "延迟响应（测超时）", inputSchema: { type: "object", properties: {} } },
+  { name: "stats", description: "会话池验收面：pid/inits/messages（同 pid = 同进程复用的可观测证据）", inputSchema: { type: "object", properties: {} } },
 ];
 
 const RESOURCES = [
@@ -59,12 +65,15 @@ const RESOURCES = [
 
 let handled = 0;
 let probeSent = false;
+let inits = 0;
+let callSeq = 0;
 
 function handle(msg: Msg): void {
   handled++;
   const id = msg.id ?? null;
   switch (msg.method) {
     case "initialize": {
+      inits++;
       const params = (msg.params ?? {}) as Record<string, unknown>;
       const clientVersion = typeof params.protocolVersion === "string" ? params.protocolVersion : "2024-11-05";
       const capabilities: Record<string, unknown> = {};
@@ -111,6 +120,13 @@ function handle(msg: Msg): void {
     }
     case "tools/call": {
       if (!hasCap("tools")) { respondErr(id, -32601, "server 无 tools 能力"); break; }
+      callSeq++;
+      const dieOnCall = Number(process.env.FAKE_MCP_DIE_ON_CALL ?? 0);
+      if (dieOnCall > 0 && callSeq >= dieOnCall) {
+        // 响应前自杀 —— 客户端 pending 请求由 exited 钩子拒绝（会话池中途死亡车道）
+        process.stderr.write("fixture server: died before responding to tools/call\n");
+        process.exit(71);
+      }
       const params = (msg.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
       const args = params.arguments ?? {};
       if (params.name === "echo") {
@@ -123,6 +139,8 @@ function handle(msg: Msg): void {
       } else if (params.name === "slow") {
         const ms = Number(process.env.FAKE_MCP_SLOW_MS ?? 500);
         setTimeout(() => respond(id, { content: [{ type: "text", text: `slept ${ms}ms` }] }), ms);
+      } else if (params.name === "stats") {
+        respond(id, { content: [{ type: "text", text: JSON.stringify({ pid: process.pid, inits, messages: handled }) }], structuredContent: { pid: process.pid, inits, messages: handled } });
       } else {
         respondErr(id, -32602, `未知工具：${String(params.name)}`);
       }

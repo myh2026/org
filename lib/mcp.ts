@@ -654,7 +654,7 @@ async function withSession<T>(
   entry: McpServerEntry,
   ws: string,
   fn: (client: McpClient) => Promise<T>,
-  opts?: { requestTimeoutMs?: number },
+  opts?: { requestTimeoutMs?: number; session?: McpSessionMode },
 ): Promise<{ ok: true; value: T } | { ok: false; kind: "env-ref-missing" | "spawn" | "timeout" | "protocol"; reason: string }> {
   const envRes = resolveMcpEnv(entry);
   if (!envRes.ok) return { ok: false, kind: "env-ref-missing", reason: envRes.reason ?? "env 引用解析失败" };
@@ -683,6 +683,278 @@ async function withSession<T>(
   }
 }
 
+// ---- 会话池（v0.5.20 长连接复用：每操作一会话 → 池化常驻）-----------------------
+//
+// v0.5.19 的会话粒度是「每操作一会话」（spawn → initialize → 操作 → close），
+// 诚实但昂贵：每次 tools/call 都重付一次进程启动 + 握手。会话池把活会话按
+// 「工作区 + server 名」缓存复用：
+//   - 命中（进程活着 + 档案未漂移 + 空闲未超 TTL）→ 直接复用（零 spawn 零握手）
+//   - 档案漂移（command/args/cwd/env 变更）→ 丢弃旧会话重 spawn（新配置生效）
+//   - 空闲超 TTL → 优雅关闭重 spawn（长寿命 server 的状态陈旧面收敛）
+//   - LRU 帽（缺省 4）：超帽逐出最久未用会话
+//   - 操作中死亡（server 崩了）→ 丢弃后**单次**重试（诚实恢复，绝不无限）
+//   - 并发去重：同 key 并发 acquire 共享同一次 spawn
+// 观测面：mcpSessionStats()（命中/未命中/逐出/过期/漂移丢弃计数 + 每会话
+// 年龄/空闲/操作数）；mcpCloseSessions() 显式收池（CLI org mcp sessions --close）。
+
+/** 会话池缺省预算（LRU 帽 4 会话 · 空闲 TTL 5 分钟）。 */
+export const MCP_POOL_DEFAULTS = { maxSessions: 4, idleTtlMs: 5 * 60_000 } as const;
+
+export interface McpPoolTuning {
+  maxSessions?: number;
+  idleTtlMs?: number;
+}
+
+interface PooledSession {
+  server: string;
+  ws: string;
+  /** 档案身份指纹（command/args/cwd + 解析后 env 的 k=v 排序）—— 漂移检测。 */
+  identity: string;
+  client: McpClient;
+  bornAt: number;
+  lastUsed: number;
+  ops: number;
+}
+
+export interface McpPoolSessionView {
+  server: string;
+  ws: string;
+  ageMs: number;
+  idleMs: number;
+  ops: number;
+  exited: boolean;
+}
+
+export interface McpPoolStats {
+  totalSessions: number;
+  sessions: McpPoolSessionView[];
+  hits: number;
+  misses: number;
+  evictions: number;
+  expires: number;
+  driftDiscards: number;
+  midOpDeaths: number;
+  maxSessions: number;
+  idleTtlMs: number;
+}
+
+/** 池状态（模块级单例 —— CLI 单进程语义；每个 op 查询它）。 */
+const pool: {
+  sessions: Map<string, PooledSession>;
+  inFlight: Map<string, Promise<McpClient>>;
+  hits: number;
+  misses: number;
+  evictions: number;
+  expires: number;
+  driftDiscards: number;
+  midOpDeaths: number;
+  tuning: Required<McpPoolTuning>;
+} = {
+  sessions: new Map(),
+  inFlight: new Map(),
+  hits: 0,
+  misses: 0,
+  evictions: 0,
+  expires: 0,
+  driftDiscards: 0,
+  midOpDeaths: 0,
+  tuning: { maxSessions: MCP_POOL_DEFAULTS.maxSessions, idleTtlMs: MCP_POOL_DEFAULTS.idleTtlMs },
+};
+
+/** 会话键（工作区 + server 名 —— 同名 server 在不同工作区互不混池）。 */
+function poolKey(ws: string, server: string): string {
+  return `${ws.replace(/\\/g, "/")}\u0000${server}`;
+}
+
+/** 档案身份指纹：command/args/cwd + 解析后 env 排序（值入指纹 —— env 变更也触发换血）。 */
+function entryIdentity(entry: McpServerEntry, env: Record<string, string>): string {
+  const envFp = Object.keys(env).sort().map((k) => `${k}=${env[k]}`).join("\u0001");
+  return JSON.stringify([entry.command, entry.args ?? [], entry.cwd ?? "", envFp]);
+}
+
+/** 丢弃一条池内会话（已退出的免 close；在飞的由 acquire 竞态窗兜底）。 */
+async function discardSession(s: PooledSession): Promise<void> {
+  pool.sessions.delete(poolKey(s.ws, s.server));
+  if (!s.client.exited) await s.client.close();
+}
+
+/** spawn + initialize 一个新会话（并发去重：同 key 共享同一次 spawn）。 */
+async function spawnPooled(ws: string, entry: McpServerEntry, opts?: { requestTimeoutMs?: number }): Promise<
+  { ok: true; client: McpClient } | { ok: false; kind: "env-ref-missing" | "spawn" | "timeout" | "protocol"; reason: string }
+> {
+  const envRes = resolveMcpEnv(entry);
+  if (!envRes.ok) return { ok: false, kind: "env-ref-missing", reason: envRes.reason ?? "env 引用解析失败" };
+  let cwd: string | undefined;
+  if (entry.cwd !== undefined) {
+    cwd = resolveInWorkspace(ws, entry.cwd);
+    if (!inWorkspace(ws, cwd)) {
+      return { ok: false, kind: "spawn", reason: `cwd 越界拒绝：${entry.cwd}（须在工作区内 —— pathjail 监狱）` };
+    }
+  }
+  const identity = entryIdentity(entry, envRes.env);
+  const key = poolKey(ws, entry.name);
+  // 并发去重：已在 spawn 的 key 直接等它的结果（misses 只计一次）
+  const existing = pool.inFlight.get(key);
+  if (existing) return { ok: true, client: await existing };
+  const p = (async () => {
+    const client = spawnMcpServer(entry.command, entry.args ?? [], { env: envRes.env, cwd, ...(opts?.requestTimeoutMs ? { requestTimeoutMs: opts.requestTimeoutMs } : {}) });
+    try {
+      await client.initialize();
+    } catch (e) {
+      // 握手失败即废 —— 立即收尸，绝不留半初始化会话在池里
+      await client.close().catch(() => {});
+      throw e;
+    }
+    return client;
+  })();
+  pool.inFlight.set(key, p);
+  try {
+    const client = await p;
+    const now = Date.now();
+    // LRU 帽：插入前逐出最久未用的**其他**会话（绝不逐出正在用的自己）
+    const others = [...pool.sessions.values()].filter((s) => poolKey(s.ws, s.server) !== key);
+    while (pool.sessions.size >= pool.tuning.maxSessions && others.length > 0) {
+      others.sort((a, b) => a.lastUsed - b.lastUsed);
+      const victim = others.shift()!;
+      pool.evictions++;
+      await discardSession(victim);
+    }
+    // 同 key 旧会话（理论上已被 acquire 清理 —— 兜底再丢一次）
+    const old = pool.sessions.get(key);
+    if (old) await discardSession(old);
+    pool.sessions.set(key, { server: entry.name, ws, identity, client, bornAt: now, lastUsed: now, ops: 0 });
+    pool.misses++;
+    return { ok: true as const, client };
+  } catch (e) {
+    const msg = (e as Error).message;
+    const kind = msg.includes("超时") ? "timeout" : msg.includes("spawn") ? "spawn" : "protocol";
+    return { ok: false as const, kind: kind as "timeout" | "spawn" | "protocol", reason: msg };
+  } finally {
+    pool.inFlight.delete(key);
+  }
+}
+
+/**
+ * 池化 acquire：命中（活 + 未漂移 + 未超 TTL）→ 复用并计数 hits；漂移 →
+ * 丢弃换血（driftDiscards）；超 TTL → 关闭换血（expires）；已退 → 换血。
+ * 未命中 → spawnPooled（并发去重）。
+ */
+async function poolAcquire(
+  ws: string,
+  entry: McpServerEntry,
+  opts?: { requestTimeoutMs?: number },
+): Promise<{ ok: true; client: McpClient; reused: boolean } | { ok: false; kind: "env-ref-missing" | "spawn" | "timeout" | "protocol"; reason: string }> {
+  const key = poolKey(ws, entry.name);
+  const s = pool.sessions.get(key);
+  if (s) {
+    const envRes = resolveMcpEnv(entry);
+    if (!envRes.ok) {
+      // env 引用失效（原 var 被删）→ 旧会话作废，诚实拒绝
+      await discardSession(s);
+      return { ok: false, kind: "env-ref-missing", reason: envRes.reason ?? "env 引用解析失败" };
+    }
+    const identity = entryIdentity(entry, envRes.env);
+    if (s.client.exited) {
+      await discardSession(s); // 已退（免 close）—— 走换血
+    } else if (s.identity !== identity) {
+      pool.driftDiscards++;
+      await discardSession(s);
+    } else if (Date.now() - s.lastUsed > pool.tuning.idleTtlMs) {
+      pool.expires++;
+      await discardSession(s);
+    } else {
+      pool.hits++;
+      s.lastUsed = Date.now();
+      s.ops++;
+      return { ok: true, client: s.client, reused: true };
+    }
+  }
+  const r = await spawnPooled(ws, entry, opts);
+  if (!r.ok) return r;
+  const pooled = pool.sessions.get(key);
+  if (pooled) pooled.ops++;
+  return { ok: true, client: r.client, reused: false };
+}
+
+/** 池观测面（CLI org mcp sessions / Web action=sessions / 测试）。 */
+export function mcpSessionStats(): McpPoolStats {
+  const now = Date.now();
+  return {
+    totalSessions: pool.sessions.size,
+    sessions: [...pool.sessions.values()].map((s) => ({
+      server: s.server,
+      ws: s.ws,
+      ageMs: now - s.bornAt,
+      idleMs: now - s.lastUsed,
+      ops: s.ops,
+      exited: s.client.exited,
+    })),
+    hits: pool.hits,
+    misses: pool.misses,
+    evictions: pool.evictions,
+    expires: pool.expires,
+    driftDiscards: pool.driftDiscards,
+    midOpDeaths: pool.midOpDeaths,
+    maxSessions: pool.tuning.maxSessions,
+    idleTtlMs: pool.tuning.idleTtlMs,
+  };
+}
+
+/** 池调参（测试用：TTL/帽可缩到毫秒级验证过期与逐出）。 */
+export function mcpTunePool(t: McpPoolTuning): void {
+  if (typeof t.maxSessions === "number" && Number.isFinite(t.maxSessions) && t.maxSessions >= 1) pool.tuning.maxSessions = Math.floor(t.maxSessions);
+  if (typeof t.idleTtlMs === "number" && Number.isFinite(t.idleTtlMs) && t.idleTtlMs >= 1) pool.tuning.idleTtlMs = Math.floor(t.idleTtlMs);
+}
+
+/** 显式收池（CLI org mcp sessions --close；ws 省缺 = 全部工作区）。 */
+export async function mcpCloseSessions(ws?: string): Promise<{ closed: number }> {
+  const victims = [...pool.sessions.values()].filter((s) => ws === undefined || s.ws.replace(/\\/g, "/") === ws.replace(/\\/g, "/"));
+  let closed = 0;
+  for (const s of victims) {
+    await discardSession(s);
+    closed++;
+  }
+  return { closed };
+}
+
+/**
+ * 池化会话包装（session:"reuse" 车道）：acquire → fn →（不关，标记空闲）。
+ * fn 中途死亡（server 崩溃）→ 丢弃 + **单次**换血重试（midOpDeaths++）；
+ * 重试仍败按最后一次错误诚实返回。
+ */
+async function withReusedSession<T>(
+  entry: McpServerEntry,
+  ws: string,
+  fn: (client: McpClient) => Promise<T>,
+  opts?: { requestTimeoutMs?: number; session?: McpSessionMode },
+): Promise<{ ok: true; value: T } | { ok: false; kind: "env-ref-missing" | "spawn" | "timeout" | "protocol"; reason: string }> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const acq = await poolAcquire(ws, entry, opts);
+    if (!acq.ok) return acq;
+    try {
+      const value = await fn(acq.client);
+      // 用完归还：只更新 lastUsed（ops 已在 acquire 计）
+      const s = pool.sessions.get(poolKey(ws, entry.name));
+      if (s) s.lastUsed = Date.now();
+      return { ok: true, value };
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (acq.reused && /已退出|EPIPE|broken pipe/i.test(msg)) {
+        // 池内会话中途死亡 —— 丢弃换血，单次重试（诚实恢复不无限）
+        pool.midOpDeaths++;
+        const dead = pool.sessions.get(poolKey(ws, entry.name));
+        if (dead) await discardSession(dead);
+        continue;
+      }
+      const kind = msg.includes("超时") ? "timeout" : msg.includes("spawn") ? "spawn" : "protocol";
+      return { ok: false, kind: kind as "timeout" | "spawn" | "protocol", reason: msg };
+    }
+  }
+  // 第二次也死（连 spawn 都起不来或 fn 连续两死）—— 走到这里意味着两次尝试
+  // 都抛了非死亡类错误后重入；给出诚实兜底
+  return { ok: false, kind: "protocol", reason: `池化会话连续两次操作失败（server ${entry.name} 不稳定 —— 建议检查 server 自身日志）` };
+}
+
 export interface McpToolsReport {
   ok: boolean;
   kind: "ok" | "no-config" | "invalid-config" | "unsupported" | "spawn" | "timeout" | "protocol" | "env-ref-missing";
@@ -692,8 +964,22 @@ export interface McpToolsReport {
   reason?: string;
 }
 
+/** 会话车道选择：fresh = 每操作一会话（v0.5.19 语义）；reuse = 池化长连接（v0.5.20）。 */
+export type McpSessionMode = "fresh" | "reuse";
+
+/** 按 session 模式选择会话包装器（fresh 默认 —— 向后兼容 v0.5.19 行为）。 */
+function wrapSession<T>(
+  mode: McpSessionMode | undefined,
+  entry: McpServerEntry,
+  ws: string,
+  fn: (client: McpClient) => Promise<T>,
+  opts?: { requestTimeoutMs?: number },
+): Promise<{ ok: true; value: T } | { ok: false; kind: "env-ref-missing" | "spawn" | "timeout" | "protocol"; reason: string }> {
+  return mode === "reuse" ? withReusedSession(entry, ws, fn, opts) : withSession(entry, ws, fn, opts);
+}
+
 /** tools/list（分页跟进；能力缺席诚实 unsupported）。单 server 或全部（name 省缺）。 */
-export async function mcpListTools(ws: string, name?: string): Promise<McpToolsReport[]> {
+export async function mcpListTools(ws: string, name?: string, opts?: { session?: McpSessionMode; requestTimeoutMs?: number }): Promise<McpToolsReport[]> {
   const f = loadMcpServers(ws);
   if (f.kind === "absent") return [{ ok: false, kind: "no-config", server: name ?? "*", tools: [], reason: f.reason }];
   if (f.kind === "invalid-json" || f.kind === "not-array") {
@@ -706,7 +992,7 @@ export async function mcpListTools(ws: string, name?: string): Promise<McpToolsR
   }
   const out: McpToolsReport[] = [];
   for (const entry of targets) {
-    const r = await withSession(entry, ws, async (client) => {
+    const r = await wrapSession(opts?.session, entry, ws, async (client) => {
       const info = client.serverInfo!;
       if (!info.capabilities.tools) {
         return { ok: false as const, kind: "unsupported" as const, server: entry.name, tools: [] as McpToolDescriptor[], reason: `server ${entry.name}（${info.serverName} ${info.serverVersion}）未声明 tools 能力 —— 诚实缺席（协议协商结果）` };
@@ -734,7 +1020,7 @@ export async function mcpListTools(ws: string, name?: string): Promise<McpToolsR
 }
 
 /** tools/call（执行车道 —— CLI 真跑 / 工具环 process_spawn 门 + 审批在环）。 */
-export async function mcpCallTool(ws: string, server: string, tool: string, args?: Record<string, unknown>, opts?: { requestTimeoutMs?: number }): Promise<McpCallToolResult> {
+export async function mcpCallTool(ws: string, server: string, tool: string, args?: Record<string, unknown>, opts?: { requestTimeoutMs?: number; session?: McpSessionMode }): Promise<McpCallToolResult> {
   const f = loadMcpServers(ws);
   if (f.kind === "absent") return { ok: false, kind: "no-config", server, tool, reason: f.reason };
   if (f.kind === "invalid-json" || f.kind === "not-array") return { ok: false, kind: "protocol", server, tool, reason: f.reason };
@@ -749,7 +1035,7 @@ export async function mcpCallTool(ws: string, server: string, tool: string, args
     return { ok: false, kind: "invalid-args", server, tool, reason: "arguments 须为 JSON 对象（工具入参键值对）" };
   }
   const entry = found.entry;
-  const r = await withSession(entry, ws, async (client) => {
+  const r = await wrapSession(opts?.session, entry, ws, async (client) => {
     const info = client.serverInfo!;
     if (!info.capabilities.tools) {
       return { ok: false as const, kind: "unsupported" as const, server, tool, reason: `server ${server} 未声明 tools 能力 —— 无法调用（协议协商结果）` };
@@ -767,7 +1053,7 @@ export async function mcpCallTool(ws: string, server: string, tool: string, args
       ...(res.structuredContent !== undefined ? { structuredContent: res.structuredContent } : {}),
       serverInfo: info,
     };
-  }, opts);
+  }, { requestTimeoutMs: opts?.requestTimeoutMs, session: opts?.session });
   if (r.ok) return r.value as McpCallToolResult;
   const kind = r.kind === "timeout" ? "timeout" : r.kind === "spawn" ? "spawn" : "protocol";
   return { ok: false, kind, server, tool, reason: r.reason };
@@ -782,7 +1068,7 @@ export interface McpResourcesReport {
 }
 
 /** resources/list（能力缺席诚实 unsupported）。 */
-export async function mcpListResources(ws: string, name?: string): Promise<McpResourcesReport[]> {
+export async function mcpListResources(ws: string, name?: string, opts?: { session?: McpSessionMode; requestTimeoutMs?: number }): Promise<McpResourcesReport[]> {
   const f = loadMcpServers(ws);
   if (f.kind === "absent") return [{ ok: false, kind: "no-config", server: name ?? "*", resources: [], reason: f.reason }];
   if (f.kind === "invalid-json" || f.kind === "not-array") return [{ ok: false, kind: "invalid-config", server: name ?? "*", resources: [], reason: f.reason }];
@@ -793,7 +1079,7 @@ export async function mcpListResources(ws: string, name?: string): Promise<McpRe
   }
   const out: McpResourcesReport[] = [];
   for (const entry of targets) {
-    const r = await withSession(entry, ws, async (client) => {
+    const r = await wrapSession(opts?.session, entry, ws, async (client) => {
       const info = client.serverInfo!;
       if (!info.capabilities.resources) {
         return { ok: false as const, kind: "unsupported" as const, server: entry.name, resources: [] as McpResourceDescriptor[], reason: `server ${entry.name} 未声明 resources 能力 —— 诚实缺席` };
@@ -830,13 +1116,13 @@ export interface McpReadResult {
 }
 
 /** resources/read（只读协议操作）。 */
-export async function mcpReadResource(ws: string, server: string, uri: string): Promise<McpReadResult> {
+export async function mcpReadResource(ws: string, server: string, uri: string, opts?: { session?: McpSessionMode; requestTimeoutMs?: number }): Promise<McpReadResult> {
   const f = loadMcpServers(ws);
   if (f.kind === "absent") return { ok: false, kind: "no-config", server, uri, contents: [], reason: f.reason };
   const found = findMcpServer(f, server);
   if ("notFound" in found) return { ok: false, kind: "server-not-found", server, uri, contents: [], reason: `server ${server} 未在档案 —— 不猜默认` };
   if ("disabled" in found) return { ok: false, kind: "server-disabled", server, uri, contents: [], reason: `server ${server} 已停用` };
-  const r = await withSession(found.entry, ws, async (client) => {
+  const r = await wrapSession(opts?.session, found.entry, ws, async (client) => {
     const info = client.serverInfo!;
     if (!info.capabilities.resources) {
       return { ok: false as const, kind: "unsupported" as const, server, uri, contents: [] as McpReadResult["contents"], reason: `server ${server} 未声明 resources 能力 —— 无法读取` };
@@ -864,7 +1150,7 @@ export interface McpPromptsReport {
 }
 
 /** prompts/list（能力缺席诚实 unsupported）。 */
-export async function mcpListPrompts(ws: string, name?: string): Promise<McpPromptsReport[]> {
+export async function mcpListPrompts(ws: string, name?: string, opts?: { session?: McpSessionMode; requestTimeoutMs?: number }): Promise<McpPromptsReport[]> {
   const f = loadMcpServers(ws);
   if (f.kind === "absent") return [{ ok: false, kind: "no-config", server: name ?? "*", prompts: [], reason: f.reason }];
   if (f.kind === "invalid-json" || f.kind === "not-array") return [{ ok: false, kind: "invalid-config", server: name ?? "*", prompts: [], reason: f.reason }];
@@ -875,7 +1161,7 @@ export async function mcpListPrompts(ws: string, name?: string): Promise<McpProm
   }
   const out: McpPromptsReport[] = [];
   for (const entry of targets) {
-    const r = await withSession(entry, ws, async (client) => {
+    const r = await wrapSession(opts?.session, entry, ws, async (client) => {
       const info = client.serverInfo!;
       if (!info.capabilities.prompts) {
         return { ok: false as const, kind: "unsupported" as const, server: entry.name, prompts: [] as McpPromptDescriptor[], reason: `server ${entry.name} 未声明 prompts 能力 —— 诚实缺席` };

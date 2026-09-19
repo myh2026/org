@@ -183,7 +183,7 @@
 | 113 | 数据库查询诊断 | ✅ | **v0.5.16** lib/dbdiag.ts `dbDiagnose`：EXPLAIN QUERY PLAN 只读通道（前导词白名单 SELECT/WITH + 写动词骨架扫描堵 WITH…INSERT 漏网 + readonly 连接纵深）→ 计划解析（索引命中/全表扫描/涉及表，SCAN CONSTANT ROW 伪步骤不计）+ 四类调优建议；:memory: 瞬态可 setup 播种（文件库拒绝）。三端：CLI `org dbdiag` · 工具环 `db_diagnose`（只读）· Web 🩺 表单；tests/dbdiag 16 例 |
 | 114 | 依赖冲突诊断 | ✅ | vendored 漂移守卫（版本比对 + 浅克隆）+ 锁文件纪律 |
 | 115 | 根因分析与验证 | ✅ | 复发计数（跨运行 recurrence.json）→ 补丁提案 → 金丝雀验证闭环 |
-| 116 | 浏览器 DevTools | 🟡 | **v0.5.16 交付可本地化半面**：DOM 快照（标题/正文/链接/图片清单）+ 整页截图 + 引擎探测（lib/browser.ts 多引擎降级，与 #30 同源）；CLI/工具环/Web 三端可用。**console 面板/网络面板/DOM 交互（点击/输入）未做** —— 需要常驻会话型引擎（CDP 协议），是路线图；行按诚实口径定 🟡 |
+| 116 | 浏览器 DevTools | ✅ | **v0.5.16 可本地化半面**：DOM 快照 + 截图 + 引擎探测（lib/browser.ts 多引擎降级，与 #30 同源）。**v0.5.20 常驻会话半面补齐**：lib/devtools.ts —— 裸 CDP 客户端（端点发现链 --cdp → ORG_CDP_URL → agent-browser 守护进程（get cdp-url）→ 127.0.0.1:9222 四环；HTTP /json/version+/json/list 页面发现 → WebSocket attach → id 配对请求响应 + 事件订阅）：console 面板（Runtime/Log 域三源：consoleAPICalled 级别归一 warning→warn + exceptionThrown + Log.entryAdded 带 url:line；可选导航先采集加载期 console——CDP 车道独有）、网络面板（requestWillBeSent/responseReceived/loadingFinished/loadingFailed 生命周期配对 → method/status/mime/size/durationMs/failed+errorText；loadEventFired+宽限提前收工）、DOM 交互（click/fill/check Runtime.evaluate 交互脚本 JSON.stringify 埋参零注入）、eval（returnByValue+awaitPromise）+ agent-browser CLI 降级车道（console/errors/network requests 文本行实测契约解析 + click/fill/type/press/hover 直通）；显式 lane = 不级联（强制语义）· auto = CDP 败后降级；双缺席诚实指引。三端：CLI `org devtools probe/console/network/interact/eval/close/self-test` · 工具环 `devtools_probe/devtools_console/devtools_network`（只读例外清单）+ `devtools_interact`（process_spawn 门+审批在环）· Web 🖥 面板（只读三动作）；tests/devtools 50 例 + tests/fixtures/cdp-fixture-server.ts 假 CDP 服务端（真 HTTP+WebSocket 协议对话：GARBAGE 拒收/DIE_SILENT 中途死亡/HANG 超时/SEL_MISS/分页网序）。真第三方浏览器会话是诚实边界（协议层由 fixture 实弹锁定 + agent-browser 守护进程真实 Chromium 实测） |
 | 117 | 移动端调试 | ✅ | **v0.5.18**：lib/mobile.ts —— 多重优雅降级全链：devices 三层（adb 缺席→无设备→未授权，devices -l 多设备/offline 诚实入列 + iOS idevice 面）/ logcat 五元组 dump（-d 快照，tag/级别/包名三重过滤）/ forward 四层（adb→设备→/proc/net/unix socket 发现→CDP /json 页面清单，本地 9222 探测）/ apk 两层（aapt badging→PK 魔数）/ plan 纯函数保底（平台×症状矩阵步骤化计划，零外部依赖永远可用）+ mobileSelfTest 自检。三端：CLI `org mobile probe/devices/logcat/forward/apk/plan/self-test` · 工具环 `mobile_devices/mobile_logcat/mobile_plan`（全只读）· Web 📱 面板；tests/mobile 60 例。真机实测是诚实边界（沙箱无真机；外部车道全用假脚本锁定） |
 | 118 | 分布式追踪 | 🟡 | trace 概念在事件 seq/ts 全链贯通；无 APM 接入 |
 | 119 | 监控告警关联 | 🟡 | 漂移告警 + 预算水位 + 通知中心；外部监控未接 |
@@ -264,7 +264,7 @@
 | E24 成本限额/多模型 | ✅ | 预算水位 + 21 车道 + key 池轮换 |
 | E25 评测/配置管理 | ✅ | 评分卡归因 + org config v3 |
 
-**统计（v0.5.19 MCP 协议翻译批后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 119 · 🟡 31 · ⬜ 0；专家 25 项 → ✅ 25 · 🟡 0 · ⬜ 0。
+**统计（v0.5.20 DevTools 常驻会话批后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 120 · 🟡 30 · ⬜ 0；专家 25 项 → ✅ 25 · 🟡 0 · ⬜ 0。
 
 > v0.5.19 MCP 客户端桥（#122 主表 🟡→✅ + 专家表 C12 🟡→✅ —— **专家矩阵 25/25 满贯**）：
 > lib/mcp.ts 单一实现三端消费 —— stdio 换行分帧 JSON-RPC（跨 chunk 半行缓冲 + 坏行拒收
@@ -279,7 +279,7 @@
 > +3（mcp_servers/mcp_tools 只读协议操作 + mcp_call_tool 执行车道 process_spawn 门+审批
 > 在环）；Web GET /api/govex/mcp 只读五动作 + 🔌 面板 Tab（call 不在 Web 只读面 ——
 > remote 口径）。tests/mcp 51 例（fixture server 真 spawn 实弹：握手/协商/分页/能力缺席/
-> 人话日志拒收/早夭/超时/门序/三端冒烟/e2e 双层治理）。主表 ✅119/150 · 🟡31。
+> 人话日志拒收/早夭/超时/门序/三端冒烟/e2e 双层治理）。主表 ✅120/150 · 🟡30。
 
 > v0.5.17 LSP/DAP 深度簇（#26/#108 两项 ⬜→✅）：lib/lsp.ts + lib/debug.ts 单一实现三端消费 —— JSON-RPC 2.0 分帧层（LSP 与 DAP 共用：粘包/半包/多字节字符字节边界精确）+ 构造器全家桶（initialize→initialized→shutdown→exit 生命周期）+ 内置符号索引车道（definition/references/hover，0 基 uri/range + 1 基人读双形）+ 外部 server 车道（detectLspServers 七家 which 探测 + spawnLspServer/LspClient 真协议对话，echo 型假 server 测试锁定全生命周期）+ 断点建议器（符号级入口/启发式级分支/循环/return 前，confidence 双级 + reason）+ DAP 构造器四件套 + 调试计划（步骤化 + 协议就绪消息序列）。CLI +2 命令（org lsp 五子命令 · org debug 三子命令 + breakpoints 别名）、工具环 +6 工具（全只读，native 块动态 import 与 lib 同源，file 过 pathjail）、Web +2 端点（GET /api/govex/lsp 五动作 · GET /api/govex/debug 三动作）+ 🐞 面板 Tab。诚实边界：真编辑器级 LSP 会话（didOpen/didChange 增量同步）与真 debug adapter attach（node --inspect/debugpy/lldb-dap）是路线图；tests/lsp 41 例（分帧/内置车道/假 server 全生命周期/建议器/DAP/jail/CLI+Web+工具环三端冒烟）。
 
