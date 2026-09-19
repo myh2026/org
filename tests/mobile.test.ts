@@ -517,10 +517,17 @@ describe("移动端：降级路径（无工具宇宙）", () => {
         expect(f.reason!.length).toBeGreaterThan(10);
       }
     }
-    // 沙箱/常见 CI：全缺席 → adb 指引含 platform-tools 与 plan 保底车道
+    // 沙箱/常见 CI：全缺席 → adb 指引含 platform-tools 与 plan 保底车道。
+    // 环境自适应第三形态（v0.5.19.1 · run 35414790984 windows 实录）：runner
+    // SDK 车道有 adb 但 --version 探活失败（坏安装/残缺缓存）—— lib 诚实
+    // 降级「坏安装按缺席降级」并附探活 stderr 尾巴。这同样是诚实缺席，
+    // 断言接受两种形态（锁「降级指引自带」不锁具体指引文本 —— cloud 哲学）。
     if (!p.adb.available) {
-      expect(p.adb.reason).toContain("platform-tools");
-      expect(p.adb.reason).toContain("org mobile plan");
+      const reason = p.adb.reason ?? "";
+      const cleanAbsent = reason.includes("platform-tools");
+      const brokenInstall = reason.includes("探活失败");
+      expect(cleanAbsent || brokenInstall).toBe(true);
+      if (cleanAbsent) expect(reason).toContain("org mobile plan");
       expect(p.summary.androidFace).toBe(false);
     }
     expect(typeof p.summary.facesUp).toBe("number");

@@ -1,26 +1,26 @@
-1|2026-09-19T02:14:08.938Z|1:decompose|kernel|open|抓取某站点近一周公告，输出结构化表格
-2|2026-09-19T02:14:08.944Z|1:decompose|kernel|decompose|抓取某站点近一周公告，输出结构化表格
-3|2026-09-19T02:14:08.949Z|1:decompose|kernel|clarify|输出字段偏好：标题、日期、部门、分类？
-4|2026-09-19T02:14:08.949Z|1:decompose|kernel|clarify|日期格式用 ISO 8601 还是保留原文？
-5|2026-09-19T02:14:08.950Z|1:decompose|kernel|answer|字段偏好：标题、日期、部门、分类
-6|2026-09-19T02:14:08.950Z|1:decompose|kernel|answer|日期用 ISO 8601，无法解析的保留原文并标注
-7|2026-09-19T02:14:08.952Z|2:route|router|route|task#1 fetch -> A:inline
-8|2026-09-19T02:14:08.954Z|3:supervise|pool|dispatch|task#1 channel=inline (kernel context)
-9|2026-09-19T02:14:08.956Z|3:supervise|supervisor|review|task#1 fetch verdict=Accept coverage=1.00
-10|2026-09-19T02:14:08.959Z|3:supervise|pool|worker-done|task#1 coverage=1.00 tokens=0
-11|2026-09-19T02:14:08.961Z|2:route|router|route|task#2 parse -> B:reuse
-12|2026-09-19T02:14:08.962Z|3:supervise|pool|dispatch|task#2 channel=reuse notice-parser
-13|2026-09-19T02:14:08.983Z|3:supervise|supervisor|review|task#2 parse verdict=Accept coverage=1.00
-14|2026-09-19T02:14:08.986Z|3:supervise|pool|worker-done|task#2 coverage=1.00 tokens=480
-15|2026-09-19T02:14:08.987Z|2:route|router|route|task#3 validate -> C:generate
-16|2026-09-19T02:14:08.988Z|3:supervise|pool|dispatch|task#3 channel=factory mint
-17|2026-09-19T02:14:09.126Z|2:route|factory|mint-register|record-validator@1.0.0 eval=1
-18|2026-09-19T02:14:09.193Z|3:supervise|supervisor|review|task#3 validate verdict=Revise coverage=0.80
-19|2026-09-19T02:14:09.195Z|3:supervise|supervisor|re-dispatch|task#3 revise #1: remedy: count date_status=unparsed as valid (flagged, not excluded)
-20|2026-09-19T02:14:09.195Z|3:supervise|pool|dispatch|task#3 channel=factory mint
-21|2026-09-19T02:14:09.259Z|3:supervise|supervisor|review|task#3 validate verdict=Accept coverage=1.00
-22|2026-09-19T02:14:09.261Z|3:supervise|pool|worker-done|task#3 coverage=1.00 tokens=0
-23|2026-09-19T02:14:09.263Z|4:aggregate|registry|asset|frozen notice-parser.norm_date
-24|2026-09-19T02:14:09.263Z|4:aggregate|registry|asset|expert record-validator@1.0.0
-25|2026-09-19T02:14:09.263Z|4:aggregate|registry|asset|memory: task memory index: 3 entries
-26|2026-09-19T02:14:09.263Z|4:aggregate|scorecard|drift|静默更新检测：alerts=0 baseline=registry/scorecards/baseline-scripted.json
+1|2026-09-19T02:19:31.371Z|1:decompose|kernel|open|抓取某站点近一周公告，输出结构化表格
+2|2026-09-19T02:19:31.378Z|1:decompose|kernel|decompose|抓取某站点近一周公告，输出结构化表格
+3|2026-09-19T02:19:31.383Z|1:decompose|kernel|clarify|输出字段偏好：标题、日期、部门、分类？
+4|2026-09-19T02:19:31.384Z|1:decompose|kernel|clarify|日期格式用 ISO 8601 还是保留原文？
+5|2026-09-19T02:19:31.384Z|1:decompose|kernel|answer|字段偏好：标题、日期、部门、分类
+6|2026-09-19T02:19:31.384Z|1:decompose|kernel|answer|日期用 ISO 8601，无法解析的保留原文并标注
+7|2026-09-19T02:19:31.387Z|2:route|router|route|task#1 fetch -> A:inline
+8|2026-09-19T02:19:31.388Z|3:supervise|pool|dispatch|task#1 channel=inline (kernel context)
+9|2026-09-19T02:19:31.390Z|3:supervise|supervisor|review|task#1 fetch verdict=Accept coverage=1.00
+10|2026-09-19T02:19:31.392Z|3:supervise|pool|worker-done|task#1 coverage=1.00 tokens=0
+11|2026-09-19T02:19:31.394Z|2:route|router|route|task#2 parse -> B:reuse
+12|2026-09-19T02:19:31.395Z|3:supervise|pool|dispatch|task#2 channel=reuse notice-parser
+13|2026-09-19T02:19:31.417Z|3:supervise|supervisor|review|task#2 parse verdict=Accept coverage=1.00
+14|2026-09-19T02:19:31.420Z|3:supervise|pool|worker-done|task#2 coverage=1.00 tokens=480
+15|2026-09-19T02:19:31.422Z|2:route|router|route|task#3 validate -> C:generate
+16|2026-09-19T02:19:31.423Z|3:supervise|pool|dispatch|task#3 channel=factory mint
+17|2026-09-19T02:19:31.557Z|2:route|factory|mint-register|record-validator@1.0.0 eval=1
+18|2026-09-19T02:19:31.624Z|3:supervise|supervisor|review|task#3 validate verdict=Revise coverage=0.80
+19|2026-09-19T02:19:31.626Z|3:supervise|supervisor|re-dispatch|task#3 revise #1: remedy: count date_status=unparsed as valid (flagged, not excluded)
+20|2026-09-19T02:19:31.626Z|3:supervise|pool|dispatch|task#3 channel=factory mint
+21|2026-09-19T02:19:31.692Z|3:supervise|supervisor|review|task#3 validate verdict=Accept coverage=1.00
+22|2026-09-19T02:19:31.694Z|3:supervise|pool|worker-done|task#3 coverage=1.00 tokens=0
+23|2026-09-19T02:19:31.696Z|4:aggregate|registry|asset|frozen notice-parser.norm_date
+24|2026-09-19T02:19:31.696Z|4:aggregate|registry|asset|expert record-validator@1.0.0
+25|2026-09-19T02:19:31.696Z|4:aggregate|registry|asset|memory: task memory index: 3 entries
+26|2026-09-19T02:19:31.696Z|4:aggregate|scorecard|drift|静默更新检测：alerts=0 baseline=registry/scorecards/baseline-scripted.json
