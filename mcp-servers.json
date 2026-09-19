@@ -1,0 +1,8 @@
+[
+  {
+    "name": "fixture-demo",
+    "command": "bun",
+    "args": ["tests/fixtures/mcp-fixture-server.ts"],
+    "env": { "LOG_LEVEL": "info" }
+  }
+]
