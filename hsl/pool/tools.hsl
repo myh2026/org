@@ -149,6 +149,19 @@
 //                                    allow_full:true 显式；host 须在档案；
 //                                    失败三分类 超时/拒连/鉴权）
 
+// v0.5.19 MCP 客户端桥（#122 / 专家表 C12 —— 协议翻译半面）：org 作为
+//   MCP 客户端，按 <ws>/mcp-servers.json 档案 spawn 外部 server（stdio
+//   换行分帧 JSON-RPC），initialize 握手 + 能力协商（tools/resources/
+//   prompts 三面，缺席诚实 unsupported）+ 分页跟进。与 adapters/bridge.hsl
+//   的外部 subagent 登记互补：登记不再是纸面 —— 真握手真调用。
+//   只读（ReadOnly 模式可用；枚举面协议操作，零写副作用）：
+//   mcp_servers   {}                档案 + 宿主运行时探测（零 spawn）
+//   mcp_tools     {server?}         工具清单（spawn → initialize → tools/list
+//                                    + 分页跟进；能力缺席诚实 unsupported）
+//   执行车道（Full 模式 + process_spawn 门 + 审批在环）：
+//   mcp_call_tool {server, tool, arguments?}  调用 server 工具（server 须在
+//                                    档案不猜默认；秘密键只收 $env:VAR 引用）
+
 // ============================================================================
 
 import { CapabilityPolicy, AccessMode } from "../policy/capability.hsl";
@@ -236,6 +249,10 @@ export fn tools_prompt(mode: ToolMode) -> String {
     out.push_str("- remote_probe {} — one-shot remote-session toolchain probe: ssh (which + -V + OpenSSH version parse) / scp / rsync / ssh-keygen + SSH_AUTH_SOCK agent environment (boolean only, never the socket path). Absence is an honest degrade with install hints; the plan lane always works.\n");
     out.push_str("- remote_plan {\"mode\":\"git\"|\"rsync\"|\"container\"|\"all\"} — remote agent deployment plan (pure function, no spawn): target recon (bun/git/disk/ports) → deploy styles (git clone / rsync workspace / container via org cloud dockerfile) → run-queue remotization (org web --port + ORG_WEB_HOST=0.0.0.0 gateway model) → rollback steps. Each step has cmd + note + degrade hint.\n");
     out.push_str("- remote_ping {\"host\":\"deploy\",\"rounds\":4} — remote heartbeat latency: N rounds of ssh echo round-trip timing (min/avg/max, default 4 capped at 10; failed rounds counted honestly, stats over successful rounds only). host MUST be in the workspace remote-hosts.json roster — absent = refuse, never guess a default.\n");
+    // v0.5.19：MCP 客户端桥（#122/C12 —— 协议翻译半面：登记 → 真握手真调用）
+    out.push_str("- mcp_servers {} — MCP roster + host-runtime probe (reads <ws>/mcp-servers.json roster + probes bun/bunx/node/npx/python3/uvx spawn runtimes; zero spawn, honest absence with guidance).\n");
+    out.push_str("- mcp_tools {\"server\":\"fx\"} — MCP tool enumeration (spawn server per op → initialize handshake → capability negotiation → tools/list with cursor pagination; capability-absent servers return honest unsupported).\n");
+    out.push_str("- mcp_call_tool {\"server\":\"fx\",\"tool\":\"echo\",\"arguments\":{\"message\":\"hi\"}} — MCP tool invocation (execution lane: process_spawn gate + approval in loop; server MUST be in roster — never guess a default; secrets only via $env:VAR references).\n");
     if mode == ToolMode::Full {
         out.push_str("- fs_write {\"path\":\"...\",\"content\":\"...\",\"preview\":true?} — write a file (may require approval). preview:true returns a unified diff WITHOUT writing (dry-run). Content is scanned for secrets: high-severity key patterns (sk-/ghp_/AKIA… ) are refused — never persist real credentials.\n");
         out.push_str("- fs_edit {\"path\":\"...\",\"old\":\"exact unique text\",\"new\":\"replacement\",\"preview\":true?} — precise edit (may require approval); preview:true returns the diff without writing.\n");
@@ -379,6 +396,10 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         // 门 + 审批在环；白名单/host 档案拒绝发生在门与 spawn 之前，lib/remote.ts
         // 内部先判）；remote_probe/remote_plan/remote_ping 是只读工具（例外清单）
         "remote_exec" => String::from("process_spawn"),
+        // v0.5.19：MCP 调用是外部 server 执行车道（spawn + server 端逻辑 ——
+        // process_spawn 门 + 审批在环；档案门拒绝发生在门与 spawn 之前，
+        // lib/mcp.ts 内部先判）；mcp_servers/mcp_tools 是枚举面协议操作（例外清单）
+        "mcp_call_tool" => String::from("process_spawn"),
         _ => String::from("file_read"), // v0.5.15：db_schema/db_query（只读门内建）/symbol_search/read_pdf/review_suggest 均只读
     };
     // 写门例外清单（只读工具 + agent_spawn/audio_compose 自带门）：v0.5.15 新增
@@ -416,7 +437,10 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         && name != String::from("iac_graph") && name != String::from("iac_generate")
         // v0.5.18：远程 Agent 簇只读三件（probe/plan 纯内存 + ping 走档案白名单；exec 是执行车道走门）
         && name != String::from("remote_probe") && name != String::from("remote_plan")
-        && name != String::from("remote_ping") {
+        && name != String::from("remote_ping")
+        // v0.5.19：MCP 枚举面协议操作（档案/运行时探测零 spawn；tools 清单是
+        // 只读协议操作 —— server 由用户在 mcp-servers.json 档案显式登记）
+        && name != String::from("mcp_servers") && name != String::from("mcp_tools") {
         let approved = gate_write(policy, gate_cap, name.clone(), args.clone()).await;
         if approved == String::from("denied") {
             emit_tool(String::from("tool_denied"), format!("{} {}", name, "capability denied"));
@@ -496,7 +520,10 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "remote_plan" => tool_remote_plan(args.clone()),
         "remote_ping" => tool_remote_ping(args.clone()),
         "remote_exec" => tool_remote_exec(args.clone()),
-        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/iac_parse/iac_plan/iac_graph/iac_generate/mobile_devices/mobile_logcat/mobile_plan/shell_run/agent_spawn/audio_compose/audit_export/review_suggest）", name)),
+        "mcp_servers" => tool_mcp_servers(args.clone()),
+        "mcp_tools" => tool_mcp_tools(args.clone()),
+        "mcp_call_tool" => tool_mcp_call_tool(args.clone()),
+        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/iac_parse/iac_plan/iac_graph/iac_generate/mobile_devices/mobile_logcat/mobile_plan/mcp_servers/mcp_tools/mcp_call_tool/shell_run/agent_spawn/audio_compose/audit_export/review_suggest）", name)),
     };
     emit_tool(String::from("tool_result"), result_summary(result.clone()));
     result
@@ -2140,6 +2167,99 @@ fn tool_remote_exec(args: String) -> String {
     }
 }
 
+// v0.5.19 MCP 客户端桥三工具（#122/C12 —— native 块动态 import lib/mcp.ts，
+// 与 CLI org mcp / Web /api/govex/mcp 同源）。
+
+/// MCP 档案 + 宿主运行时探测（只读，零 spawn）。
+fn tool_mcp_servers(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "mcp_servers", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const mcp = await import(root + "/lib/mcp.ts");
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const runtimes = mcp.probeMcpRuntimes();
+            const f = mcp.loadMcpServers(ws);
+            return JSON.stringify({
+                tool: "mcp_servers", ok: true,
+                roster: {
+                    kind: f.kind,
+                    entries: f.entries.map((e) => ({ name: e.name, command: e.command, args: (e.args || []).length, disabled: e.disabled === true })),
+                    ...(f.reason ? { reason: f.reason } : {}),
+                },
+                runtimes: runtimes.map((r) => ({ name: r.name, available: r.available })),
+                runtimes_available: runtimes.filter((r) => r.available).length,
+                hint: "档案缺席/宿主缺席不是失败 —— 登记 mcp-servers.json 后 mcp_tools/mcp_call_tool 即可握手（$env:VAR 引用管理秘密）",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "mcp_servers", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// MCP 工具清单（枚举面协议操作：spawn → initialize → tools/list + 分页跟进）。
+fn tool_mcp_tools(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "mcp_tools", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const mcp = await import(root + "/lib/mcp.ts");
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const server = typeof a.server === "string" && a.server.trim() ? a.server.trim() : undefined;
+            const reports = await mcp.mcpListTools(ws, server);
+            const anyOk = reports.some((r) => r.ok);
+            return JSON.stringify({
+                tool: "mcp_tools", ok: anyOk,
+                servers: reports.map((r) => ({
+                    server: r.server, ok: r.ok, kind: r.kind,
+                    tools: (r.tools || []).map((t) => ({ name: t.name, description: (t.description || "").slice(0, 120) })),
+                    ...(r.serverInfo ? { server_info: { name: r.serverInfo.serverName, version: r.serverInfo.serverVersion, protocol: r.serverInfo.protocolVersion } } : {}),
+                    ...(r.reason ? { reason: r.reason } : {}),
+                })),
+                hint: anyOk ? undefined : "档案缺席/坏档/宿主缺席 —— org mcp servers 查档案与宿主面",
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "mcp_tools", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// MCP 工具调用（执行车道：process_spawn 门 + 审批在环；档案门在 lib 内部先判）。
+fn tool_mcp_call_tool(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "mcp_call_tool", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            if (typeof a.server !== "string" || !a.server.trim() || typeof a.tool !== "string" || !a.tool.trim()) {
+                return JSON.stringify({ tool: "mcp_call_tool", ok: false, kind: "invalid-args", error: "args.server 与 args.tool 必填（server 须在 <工作区>/mcp-servers.json 档案内 —— 不在档案 = 拒绝不猜默认）" });
+            }
+            const mcp = await import(root + "/lib/mcp.ts");
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const callArgs = (a.arguments !== undefined && a.arguments !== null && typeof a.arguments === "object" && !Array.isArray(a.arguments)) ? a.arguments : undefined;
+            const r = await mcp.mcpCallTool(ws, a.server.trim(), a.tool.trim(), callArgs);
+            return JSON.stringify({
+                tool: "mcp_call_tool", ok: r.ok, ...(r.kind ? { kind: r.kind } : {}),
+                server: r.server, invoked: r.tool,
+                ...(r.isError ? { is_error: true } : {}),
+                ...(r.content ? { content: { text: String(r.content.text).slice(0, 8192), text_blocks: r.content.textBlocks, image_blocks: r.content.imageBlocks, resource_blocks: r.content.resourceBlocks, truncated: r.content.truncated } } : {}),
+                ...(r.structuredContent !== undefined ? { structured: r.structuredContent } : {}),
+                ...(r.serverInfo ? { server_info: { name: r.serverInfo.serverName, version: r.serverInfo.serverVersion } } : {}),
+                ...(r.reason ? { reason: r.reason } : {}),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "mcp_call_tool", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
 
 fn tool_semantic_search(args: String) -> String {
     native typescript {
@@ -2892,6 +3012,21 @@ fn result_summary(result: String) -> String {
                 if (tool === "remote_ping") {
                     const st = o.stats || {};
                     return tool + (o.ok ? " ok min/avg/max=" + String(st.min ?? "?") + "/" + String(st.avg ?? "?") + "/" + String(st.max ?? "?") + "ms 失败" + String(o.failures ?? "?") + "/" + String(o.rounds ?? "?") : " " + String(o.reason || "失败").slice(0, 90));
+                }
+                // v0.5.19 MCP 客户端桥的观测摘要（journal 人读面；servers 按
+                // 「档案 N 条 + 宿主 M/6」口径，tools 按 server 逐家计数）
+                if (tool === "mcp_servers") {
+                    const roster = o.roster || {};
+                    return tool + " ok runtimes=" + String(o.runtimes_available ?? "?") + "/" + String((o.runtimes || []).length) + " 档案=" + String((roster.entries || []).length) + "条" + (roster.kind === "absent" ? "（未创建）" : "");
+                }
+                if (tool === "mcp_tools") {
+                    const oks = (o.servers || []).filter(function (s) { return s.ok; });
+                    const n = oks.reduce(function (acc, s) { return acc + (s.tools || []).length; }, 0);
+                    return tool + (o.ok ? " ok " + oks.length + "家" + n + "工具" + ((oks[0] && oks[0].server_info) ? " top=" + String(oks[0].server) + "(" + String(oks[0].server_info.name) + ")" : "") : " " + String(((o.servers || [])[0] || {}).reason || "档案缺席/无 server").slice(0, 90));
+                }
+                if (tool === "mcp_call_tool") {
+                    const c = o.content || {};
+                    return tool + (o.ok ? " ok " + String(o.server) + "." + String(o.invoked ?? "?") + (o.is_error ? " 工具层失败(isError)" : " 文本" + String(c.text_blocks ?? "?") + "块") : " [" + String(o.kind || "?") + "] " + String(o.reason || o.error || "").split("\n")[0].slice(0, 90));
                 }
                 return tool + " ok " + size + " chars";
             }

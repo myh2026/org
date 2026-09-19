@@ -170,6 +170,9 @@ import { suggestBreakpoints, debugPlan, dapSelfTest } from "../lib/debug.ts"; //
 import { probeMobile, mobileDevices, mobileLogcat, mobileDebugPlan, mobileSelfTest, MOBILE_PLAN_PLATFORMS } from "../lib/mobile.ts"; // v0.5.18 移动端调试（#117）
 import { probeRemote, loadRemoteHosts, findRemoteHost, remotePing, remoteDeployPlan,
          REMOTE_HOSTS_FILE } from "../lib/remote.ts"; // v0.5.18 远程 Agent 簇（#133 —— 会话/部署/计划层，与 cloud_ssh 互补）
+import { probeMcpRuntimes, loadMcpServers, MCP_SERVERS_FILE, MCP_SERVERS_GUIDANCE, mcpSelfTest,
+         mcpListTools, mcpListResources, mcpReadResource, mcpListPrompts,
+         type McpToolDescriptor, type McpResourceDescriptor, type McpPromptDescriptor } from "../lib/mcp.ts"; // v0.5.19 MCP 客户端桥（#122/C12 —— 协议翻译半面）
 import { iacParseFile, iacGraph, iacPlan, iacGenerate, probeIac, iacValidate } from "../lib/iac.ts"; // v0.5.18 IaC 深度实现层（#44）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
@@ -1821,6 +1824,79 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
             return json({ ok: false, error: (e as Error).message }, 400);
           }
         }
+        // v0.5.19 🔌 MCP 客户端桥（#122/C12）：GET ?action=servers|tools|resources|read|prompts|selftest。
+        // 与 CLI org mcp / 工具环 mcp_* 同源 lib/mcp.ts。只读五动作（servers/tools/
+        // resources/prompts 是枚举面协议操作；read 是资源读取）—— call 是执行
+        // 车道，只在 CLI/工具环（process_spawn 门 + 审批在环），Web 保持只读（remote 口径）。
+        if (route === "GET /api/govex/mcp") {
+          const action = String(url.searchParams.get("action") ?? "servers").trim();
+          const rws = readWorkspaceOf(ws);
+          try {
+            if (action === "servers") {
+              const f = loadMcpServers(rws);
+              const runtimes = probeMcpRuntimes();
+              return json({
+                ok: true,
+                kind: f.kind,
+                entries: f.entries.map((e) => ({ name: e.name, command: e.command, args: e.args ?? [], disabled: e.disabled === true })),
+                validations: f.validations,
+                runtimes: runtimes.map((r) => ({ name: r.name, available: r.available })),
+                ...(f.kind === "absent" ? { guidance: MCP_SERVERS_GUIDANCE } : {}),
+              });
+            }
+            if (action === "tools") {
+              const server = String(url.searchParams.get("server") ?? "").trim() || undefined;
+              const reports = await mcpListTools(rws, server);
+              return json({
+                ok: reports.some((r) => r.ok),
+                servers: reports.map((r) => ({
+                  server: r.server, ok: r.ok, kind: r.kind,
+                  tools: r.tools.map((t: McpToolDescriptor) => ({ name: t.name, description: t.description })),
+                  ...(r.serverInfo ? { serverInfo: { name: r.serverInfo.serverName, version: r.serverInfo.serverVersion, protocol: r.serverInfo.protocolVersion } } : {}),
+                  ...(r.reason ? { reason: r.reason } : {}),
+                })),
+              });
+            }
+            if (action === "resources") {
+              const server = String(url.searchParams.get("server") ?? "").trim() || undefined;
+              const reports = await mcpListResources(rws, server);
+              return json({
+                ok: reports.some((r) => r.ok),
+                servers: reports.map((r) => ({
+                  server: r.server, ok: r.ok, kind: r.kind,
+                  resources: r.resources.map((t: McpResourceDescriptor) => ({ uri: t.uri, name: t.name, mimeType: t.mimeType })),
+                  ...(r.reason ? { reason: r.reason } : {}),
+                })),
+              });
+            }
+            if (action === "read") {
+              const server = String(url.searchParams.get("server") ?? "").trim();
+              const uri = String(url.searchParams.get("uri") ?? "").trim();
+              if (!server || !uri) return json({ ok: false, error: "server 与 uri 必填（如 server=fx&uri=org://readme）" }, 400);
+              const r = await mcpReadResource(rws, server, uri);
+              return json({
+                ok: r.ok, kind: r.kind, server: r.server, uri: r.uri,
+                contents: r.contents, ...(r.reason ? { reason: r.reason } : {}),
+              });
+            }
+            if (action === "prompts") {
+              const server = String(url.searchParams.get("server") ?? "").trim() || undefined;
+              const reports = await mcpListPrompts(rws, server);
+              return json({
+                ok: reports.some((r) => r.ok),
+                prompts: reports.flatMap((r) => r.prompts.map((p: McpPromptDescriptor) => ({ server: r.server, name: p.name, description: p.description }))),
+                servers: reports.map((r) => ({ server: r.server, ok: r.ok, kind: r.kind, ...(r.reason ? { reason: r.reason } : {}) })),
+              });
+            }
+            if (action === "selftest") {
+              const r = mcpSelfTest();
+              return json({ ok: r.ok, passed: r.passed, total: r.total, checks: r.checks });
+            }
+            return json({ ok: false, error: `未知 action：${action || "（空）"}（servers/tools/resources/read/prompts/selftest —— 只读面；call 不在 Web 只读面，走 CLI org mcp call / 工具环 mcp_call_tool）` }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
         // v0.5.18 ⚒ IaC 深度（#44）：GET ?action=parse|plan|graph&file=… | generate&manifest=<JSON 串>
         // | probe | validate&dir=…。与 CLI org iac / 工具环 iac_* 同源 lib/iac.ts
         // （内置 HCL 子集解析器主车道；probe 探测 terraform/tofu/tflint，缺席诚实降级）。
@@ -2417,6 +2493,7 @@ export async function webMain(argv: string[]): Promise<number> {
   console.log(`  云生态     GET/POST /api/govex/cloud（v0.5.17 #67/#68/#72/#74：probe 全景/dockerfile/compose/manifest/terraform 模板 + docker/ssh/k8s 白名单执行）`);
   console.log(`  移动端     GET /api/govex/mobile（v0.5.18 #117：probe 三面探测/devices 设备清单/logcat dump 五元组/plan 计划保底 + selftest —— 只读动作）`);
   console.log(`  远程 Agent  GET /api/govex/remote（v0.5.18 #133：probe 四工具探测/hosts 主机档案/plan 部署计划四式/ping 心跳 —— 只读四动作）`);
+  console.log(`  MCP 客户端桥  GET /api/govex/mcp（v0.5.19 #122/C12：servers 档案+宿主探测/tools 工具清单/resources 资源/read 读取/prompts 提示词 —— 只读五动作；call 执行车道走 CLI/工具环）`);
   console.log(`  IaC 深度   GET /api/govex/iac（v0.5.18 #44：HCL 解析/依赖图/人读 Plan/manifest 逆向生成 + probe 五面探测；与 iacscan 扫描互补）`);
   console.log(`  模型       ${p.model}（GUI 可切 scripted/deepseek，请求体可逐次覆盖）`);
   // v0.4.13：网关三件套可见性 —— 直连服务商（DeepSeek 等）的鉴权/模型/超时
@@ -3616,6 +3693,7 @@ function renderIndexHtml(): string {
       <button class="tbtab" id="gxTabMobile" type="button" role="tab" onclick="gxTab('mobile')">📱 移动端</button>
       <button class="tbtab" id="gxTabIacx" type="button" role="tab" onclick="gxTab('iacx')">⚒ IaC深度</button>
       <button class="tbtab" id="gxTabRemote" type="button" role="tab" onclick="gxTab('remote')">🛰 远程 Agent</button>
+      <button class="tbtab" id="gxTabMcp" type="button" role="tab" onclick="gxTab('mcp')">🔌 MCP 桥</button>
     </div>
   </div>
 
@@ -3858,6 +3936,25 @@ function renderIndexHtml(): string {
         <span class="tbmeta">计划是纯函数（工具缺席也交付）</span>
       </div>
       <div class="tbout" id="gxRmtPlanOut" style="max-height:320px"><div class="schempty">部署计划：目标机摸底（bun/git/磁盘/端口）→ 部署三式（git clone / rsync 工作区 / 容器）→ run 队列远程化（org web + 网关模型）→ 回滚。心跳 = ssh echo 往返 min/avg/max。CLI 同款 org remote ping/plan。执行车道（remote exec）走工具环/CLI（process_spawn 门 + 审批在环）。</div></div>
+    </section>
+
+    <section class="tbsec" id="gxSecMcp" hidden>
+      <div class="tbbar">
+        <button type="button" onclick="gxMcpServers()">🔌 档案+宿主</button>
+        <button type="button" onclick="gxMcpTools()">🔧 工具清单</button>
+        <button type="button" onclick="gxMcpResources()">📄 资源</button>
+        <button type="button" onclick="gxMcpPrompts()">💬 提示词</button>
+        <button type="button" onclick="gxMcpSelftest()">🧪 自检</button>
+        <span class="tbmeta" id="gxMcpMeta"></span>
+      </div>
+      <div class="tbout" id="gxMcpOut" style="margin-bottom:10px"><div class="schempty">MCP 客户端桥（#122/C12）：org 作为 MCP 客户端，按 mcp-servers.json 档案 spawn 外部 server（stdio 换行分帧 JSON-RPC），initialize 握手 + 能力协商（tools/resources/prompts 三面，缺席诚实 unsupported）+ 分页跟进。env 秘密键只收 $env:VAR 引用（值永不入档案）。CLI 同款 org mcp servers/tools。</div></div>
+      <div class="tbbar">
+        <input id="gxMcpServer" type="text" placeholder="server 名（档案内）" autocomplete="off" aria-label="MCP server 名" style="max-width:150px">
+        <input id="gxMcpUri" type="text" placeholder="资源 URI（如 org://readme）" autocomplete="off" aria-label="资源 URI" style="max-width:220px">
+        <button type="button" onclick="gxMcpRead()">📖 读取资源</button>
+        <span class="tbmeta">call 执行车道走 CLI/工具环（Web 保持只读）</span>
+      </div>
+      <div class="tbout" id="gxMcpReadOut" style="max-height:320px"><div class="schempty">资源读取：server 须在 mcp-servers.json 档案（不猜默认）· URI 由 server 声明（resources 清单可查）· 只读协议操作。CLI 同款 org mcp read。</div></div>
     </section>
   </div>
 
@@ -5582,7 +5679,116 @@ function gxRemotePlan() {
   }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
 }
 
-var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Lsp", "lsp"], ["Git", "git"], ["Collab", "collab"], ["Cloud", "cloud"], ["Mobile", "mobile"], ["Iacx", "iacx"], ["Remote", "remote"]];
+function gxMcpServers() {
+  const out = document.getElementById("gxMcpOut"), meta = document.getElementById("gxMcpMeta");
+  out.innerHTML = '<div class="schempty">读取中…（档案 mcp-servers.json + 六宿主运行时探测 —— 不 spawn 任何 server）</div>';
+  fetch("/api/govex/mcp?action=servers").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    let h = "";
+    if (j.kind === "absent") {
+      h += '<div class="schempty">档案未创建（mcp-servers.json）—— 一切会话操作拒绝（不猜默认）</div><div class="tbmeta">💡 ' + esc(j.guidance) + "</div>";
+    } else {
+      h += '<div class="tbmeta">档案：' + (j.entries || []).length + " 个过检条目</div>";
+      for (const e of j.entries || []) {
+        h += '<div class="tbrow">' + (e.disabled ? "⏸" : "✓") + " <b>" + esc(e.name) + "</b> <code>" + esc(e.command) + " " + esc((e.args || []).join(" ").slice(0, 60)) + "</code>" + (e.disabled ? "（已停用）" : "") + "</div>";
+      }
+      for (const v of (j.validations || []).filter(function (x) { return !x.ok; })) {
+        h += '<div class="tbrow">✗ ' + esc(v.name) + " —— " + esc(v.reason || "未过检") + "</div>";
+      }
+    }
+    h += '<div class="tbmeta" style="margin-top:4px">宿主运行时（spawn 前提）：</div>';
+    for (const r of j.runtimes || []) {
+      h += '<div class="tbrow">🖥 ' + esc(r.name) + " " + (r.available ? '<span class="spwc">✓ 在场</span>' : "⬜ 缺席") + "</div>";
+    }
+    meta.textContent = "档案 + 宿主探测（零 spawn）";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxMcpTools() {
+  const out = document.getElementById("gxMcpOut"), meta = document.getElementById("gxMcpMeta");
+  out.innerHTML = '<div class="schempty">握手中…（spawn 档案内全部 server → initialize + 能力协商 + tools/list 分页跟进）</div>';
+  fetch("/api/govex/mcp?action=tools").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok && !(j.servers || []).length) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    let h = "", total = 0;
+    for (const s of j.servers || []) {
+      if (s.ok) {
+        total += (s.tools || []).length;
+        h += '<div class="tbrow">✓ <b>' + esc(s.server) + "</b> —— " + (s.tools || []).length + " 个工具" + (s.serverInfo ? "（" + esc(s.serverInfo.name) + " " + esc(s.serverInfo.version) + " · 协议 " + esc(s.serverInfo.protocol) + "）" : "") + "</div>";
+        for (const t of s.tools || []) {
+          h += '<div class="tbsym">🔧 <b>' + esc(t.name) + "</b> " + esc(t.description || "") + "</div>";
+        }
+      } else {
+        h += '<div class="tbrow">✗ <b>' + esc(s.server) + "</b> —— " + esc(s.reason || s.kind) + "</div>";
+      }
+    }
+    meta.textContent = total + " 个工具";
+    out.innerHTML = h || '<div class="schempty">（无 server 在档）</div>';
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxMcpResources() {
+  const out = document.getElementById("gxMcpOut"), meta = document.getElementById("gxMcpMeta");
+  out.innerHTML = '<div class="schempty">读取中…（resources/list —— 能力缺席的 server 诚实 unsupported）</div>';
+  fetch("/api/govex/mcp?action=resources").then(function (r) { return r.json(); }).then(function (j) {
+    let h = "", total = 0;
+    for (const s of j.servers || []) {
+      if (s.ok) {
+        total += (s.resources || []).length;
+        h += '<div class="tbrow">✓ <b>' + esc(s.server) + "</b> —— " + (s.resources || []).length + " 个资源</div>";
+        for (const t of s.resources || []) {
+          h += '<div class="tbsym">📄 <code>' + esc(t.uri) + "</code> " + esc(t.name || "") + (t.mimeType ? "（" + esc(t.mimeType) + "）" : "") + "</div>";
+        }
+      } else {
+        h += '<div class="tbrow">✗ <b>' + esc(s.server) + "</b> —— " + esc(s.reason || s.kind) + "</div>";
+      }
+    }
+    meta.textContent = total + " 个资源";
+    out.innerHTML = h || '<div class="schempty">（无 server 在档 / 无 resources 能力）</div>';
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxMcpPrompts() {
+  const out = document.getElementById("gxMcpOut"), meta = document.getElementById("gxMcpMeta");
+  out.innerHTML = '<div class="schempty">读取中…（prompts/list —— 能力缺席的 server 诚实 unsupported）</div>';
+  fetch("/api/govex/mcp?action=prompts").then(function (r) { return r.json(); }).then(function (j) {
+    let h = "";
+    for (const p of j.prompts || []) {
+      h += '<div class="tbsym">💬 <b>' + esc(p.name) + "</b>（" + esc(p.server) + "） " + esc(p.description || "") + "</div>";
+    }
+    for (const s of (j.servers || []).filter(function (x) { return !x.ok; })) {
+      h += '<div class="tbrow">✗ <b>' + esc(s.server) + "</b> —— " + esc(s.reason || s.kind) + "</div>";
+    }
+    meta.textContent = (j.prompts || []).length + " 个提示词";
+    out.innerHTML = h || '<div class="schempty">（无 server 在档 / 无 prompts 能力）</div>';
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxMcpRead() {
+  const out = document.getElementById("gxMcpReadOut");
+  const server = document.getElementById("gxMcpServer").value.trim();
+  const uri = document.getElementById("gxMcpUri").value.trim();
+  if (!server || !uri) { out.innerHTML = '<div class="schempty">server 名与资源 URI 都必填（工具清单里可查 server 名；资源清单里可查 URI）</div>'; return; }
+  out.innerHTML = '<div class="schempty">读取中…（resources/read —— 只读协议操作）</div>';
+  fetch("/api/govex/mcp?action=read&server=" + encodeURIComponent(server) + "&uri=" + encodeURIComponent(uri)).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.reason || j.error) + "</div>"; return; }
+    let h = "";
+    for (const c of j.contents || []) {
+      h += '<div class="tbrow">📄 <code>' + esc(c.uri) + "</code>" + (c.mimeType ? "（" + esc(c.mimeType) + "）" : "") + "</div>";
+      if (c.text) h += '<pre style="margin:4px 0 8px 0;white-space:pre-wrap">' + esc(c.text) + "</pre>";
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxMcpSelftest() {
+  const out = document.getElementById("gxMcpOut"), meta = document.getElementById("gxMcpMeta");
+  out.innerHTML = '<div class="schempty">自检中…（换行分帧 · 构造器 · 档案校验 · env 引用解析 · 内容归一 —— 纯内存）</div>';
+  fetch("/api/govex/mcp?action=selftest").then(function (r) { return r.json(); }).then(function (j) {
+    meta.textContent = j.passed + "/" + j.total + " 通过";
+    let h = "";
+    for (const c of j.checks || []) {
+      h += '<div class="tbrow">' + (c.ok ? "✓" : "✗") + " " + esc(c.name) + (c.detail ? "（" + esc(c.detail) + "）" : "") + "</div>";
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Lsp", "lsp"], ["Git", "git"], ["Collab", "collab"], ["Cloud", "cloud"], ["Mobile", "mobile"], ["Iacx", "iacx"], ["Remote", "remote"], ["Mcp", "mcp"]];
 function gxTab(sec) {
   for (const [k, id] of GX_TABS) {
     document.getElementById("gxTab" + k).classList.toggle("on", id === sec);
