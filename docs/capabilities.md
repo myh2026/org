@@ -194,7 +194,7 @@
 | # | 能力 | 状态 | 实现位置 / 说明 |
 |:--|:--|:--|:--|
 | 121 | 插件系统 | 🟡 | `org import`（用户 harness 导入 + check 闸门 + 即刻复用）+ 工厂 stock；无动态加载。**v0.5.16 补插件包市场半面**（lib/plugins.ts 事务性安装/清单/移除，见 #132 —— 只装不执行，动态加载是路线图） |
-| 122 | MCP 支持 | 🟡 | adapters/bridge.hsl（外部 subagent 登记）；协议翻译未做（登记≠在岗，诚实标注） |
+| 122 | MCP 支持 | ✅ | **v0.5.19 协议翻译半面交付**：lib/mcp.ts MCP 客户端桥 —— <ws>/mcp-servers.json 档案（秘密键只收 $env:VAR 引用，值永不入档）→ spawn 外部 server（stdio 换行分帧 JSON-RPC）→ initialize 握手 + 能力协商（tools/resources/prompts 三面独立，缺席诚实 unsupported）→ tools/list 分页跟进 / tools/call（isError 双层语义）/ resources list+read / prompts/list。三端：CLI `org mcp` 七子命令 · 工具环 mcp_servers/mcp_tools（只读）+ mcp_call_tool（process_spawn 门 + 审批在环）· Web GET /api/govex/mcp 只读五动作 + 🔌 面板。与 adapters/bridge.hsl 外部 subagent 登记互补：登记 → 真握手真调用。诚实边界：会话粒度=每操作一会话（长连接复用/采样/roots 订阅是路线图）；协议层由 fixture server 实弹锁定（真 spawn 真握手真调用 51 例） |
 | 123 | 自定义命令 | ✅ | 斜杠命令 22 个 + TUI `:命令` + Web 面板动作（三端同权） |
 | 124 | 工作流编排 | ✅ | **HSL graph**（node/edge/guard + G 拓扑校验）+ 监督回路四阶段 + 工厂管线 |
 | 125 | 多模型切换 | ✅ | 21 服务商车道 + key 池 + 降级链 + `/model`/`:model`/Web 段控热切换 |
@@ -249,7 +249,7 @@
 | B9 语义检索 | ✅ | 同 #19（v0.5.8 四入口：CLI org search / Web 🔍 / 工具环 semantic_search / @? RAG 注入，tests 行为对拍 top-1 一致） |
 | B10 文档/图理解 | ✅ | 文本全链 + **图片理解（v0.5.13 视觉入口：lib/vision.ts 多图 ≤4 + 魔数唤探 + Web 📷 分析→引用闭环 + CLI org vision）** + **PDF 读取（v0.5.15：lib/pdfread.ts 三层降级链 pdftotext → uv+pypdf → 诚实失败 · org read CLI + read_pdf 工具环）** |
 | C11 工具调用 | ✅ | 工具环六工具 + 能力门 + 审批在环 |
-| C12 MCP/插件注册 | 🟡 | org import + adapter 登记（协议翻译路线图） |
+| C12 MCP/插件注册 | ✅ | org import + adapter 登记 + **v0.5.19 MCP 协议翻译**（lib/mcp.ts 客户端桥：档案 → spawn → initialize → 能力协商 → tools/resources/prompts 翻译到三端；mcp_call_tool 执行车道走门+审批）—— 「登记 ≠ 在岗」的缺口闭合，专家矩阵 25/25 |
 | C13 工作流编排 | ✅ | HSL graph（拓扑可验证的 SOP） |
 | C14 多 Agent 协作 | ✅ | 主控-专家 + 工厂 + 池 + 移交 |
 | C15 后台/队列/沙箱 | ✅ | 任务队列 + SIGSTOP + 路径监狱/白名单/超时 |
@@ -264,11 +264,27 @@
 | E24 成本限额/多模型 | ✅ | 预算水位 + 21 车道 + key 池轮换 |
 | E25 评测/配置管理 | ✅ | 评分卡归因 + org config v3 |
 
-**统计（v0.5.18 终局三 ⬜ 清零批后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 118 · 🟡 32 · ⬜ 0；专家 25 项 → ✅ 24 · 🟡 1 · ⬜ 0。
+**统计（v0.5.19 MCP 协议翻译批后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 119 · 🟡 31 · ⬜ 0；专家 25 项 → ✅ 25 · 🟡 0 · ⬜ 0。
+
+> v0.5.19 MCP 客户端桥（#122 主表 🟡→✅ + 专家表 C12 🟡→✅ —— **专家矩阵 25/25 满贯**）：
+> lib/mcp.ts 单一实现三端消费 —— stdio 换行分帧 JSON-RPC（跨 chunk 半行缓冲 + 坏行拒收
+> 计数 + 内嵌换行构造性拒绝）+ McpClient 生命周期（initialize 握手 → notifications/
+> initialized → 请求/通知 → close；server→client 请求自动响应：ping→{} / sampling→
+> -32601 诚实最小；早夭/EPIPE 竞态窗容忍 + pending 统一诚实拒绝）+ 档案层 mcp-servers.json
+> （单一规则源校验：name 唯一/command 非空/args 全字符串/cwd 过 pathjail 监狱/**秘密键
+> 字面值拒绝 —— 只收 $env:VAR 引用（spawn 时解析，缺席拒绝，值永不入档）**）+ 能力协商
+> （tools/resources/prompts 三面独立，缺席诚实 unsupported）+ 分页跟进（nextCursor 帽
+> 8 页）+ 内容归一（text 拼接/image·resource 计数/16KB 帽）+ 协议自检 19 项（纯内存）。
+> CLI `org mcp` 七子命令（servers/tools/call/resources/read/prompts/self-test）；工具环
+> +3（mcp_servers/mcp_tools 只读协议操作 + mcp_call_tool 执行车道 process_spawn 门+审批
+> 在环）；Web GET /api/govex/mcp 只读五动作 + 🔌 面板 Tab（call 不在 Web 只读面 ——
+> remote 口径）。tests/mcp 51 例（fixture server 真 spawn 实弹：握手/协商/分页/能力缺席/
+> 人话日志拒收/早夭/超时/门序/三端冒烟/e2e 双层治理）。主表 ✅119/150 · 🟡31。
 
 > v0.5.17 LSP/DAP 深度簇（#26/#108 两项 ⬜→✅）：lib/lsp.ts + lib/debug.ts 单一实现三端消费 —— JSON-RPC 2.0 分帧层（LSP 与 DAP 共用：粘包/半包/多字节字符字节边界精确）+ 构造器全家桶（initialize→initialized→shutdown→exit 生命周期）+ 内置符号索引车道（definition/references/hover，0 基 uri/range + 1 基人读双形）+ 外部 server 车道（detectLspServers 七家 which 探测 + spawnLspServer/LspClient 真协议对话，echo 型假 server 测试锁定全生命周期）+ 断点建议器（符号级入口/启发式级分支/循环/return 前，confidence 双级 + reason）+ DAP 构造器四件套 + 调试计划（步骤化 + 协议就绪消息序列）。CLI +2 命令（org lsp 五子命令 · org debug 三子命令 + breakpoints 别名）、工具环 +6 工具（全只读，native 块动态 import 与 lib 同源，file 过 pathjail）、Web +2 端点（GET /api/govex/lsp 五动作 · GET /api/govex/debug 三动作）+ 🐞 面板 Tab。诚实边界：真编辑器级 LSP 会话（didOpen/didChange 增量同步）与真 debug adapter attach（node --inspect/debugpy/lldb-dap）是路线图；tests/lsp 41 例（分帧/内置车道/假 server 全生命周期/建议器/DAP/jail/CLI+Web+工具环三端冒烟）。
 
 > v0.5.17 云生态簇（#67/#68/#72/#74 四项 ⬜→✅）：lib/cloud.ts 单一实现三端消费 —— 探测（docker/ssh/kubectl/terraform/10 家云 CLI，各带硬超时）→ 白名单真实车道（docker 16 子命令/kubectl 15 子命令 + 数组参数零 shell 面 + 拒绝先于 spawn）→ 模板/计划降级车道（Dockerfile 四型/compose/K8s manifest 五族/terraform 骨架/ssh-config + dockerPlan 五意图）→ 诚实拒绝（host 白名单/路径监狱）。CLI +1 命令（org cloud 十六子命令）、工具环 +6 工具（cloud_probe/cloud_dockerfile/cloud_clis 只读；cloud_docker/cloud_ssh/cloud_k8s 执行车道 process_spawn 门+审批）、Web +2 端点（GET/POST /api/govex/cloud）+ ☁ 面板 Tab（探测全景卡片 + 模板生成器 + 白名单执行）。诚实边界：沙箱无 docker/kubectl/ssh/云 CLI，降级车道是主车道；真实车道代码路径完整但无真实守护进程/集群/远程主机可实测（#68/#72 附诚实注）。
+
 > v0.5.18 终局三 ⬜ 清零簇（#44/#117/#133 三项 ⬜→✅，主 Agent 矩阵 ⬜ 归零）：三簇各一
   个单一实现三端消费 —— lib/iac.ts（HCL 子集解析器主车道 + 依赖图/拓扑/环检测 + 人读 Plan +
   manifest 逆向生成往返自洽；terraform/tofu/tflint 外部探测，在场 validate 只读）·
