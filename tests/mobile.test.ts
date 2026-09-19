@@ -552,9 +552,12 @@ describe("移动端：降级路径（无工具宇宙）", () => {
       expect(r.reason).toContain("adb");
       expect(r.reason).toContain("org mobile plan");
     } else {
-      expect(r.ok).toBe(true); // SDK 车道真 adb 的诚实结果（无设备等）
+      // CI runner 预装 Android SDK（ANDROID_HOME/常见位置探测可绕过置空的 PATH）→
+      // 真 adb 可达：no-device 等诚实形态 ok 可 false —— 锁 kind 集合不锁 ok
+      expect(["no-device", "unauthorized", "multi-device", "timeout", "failed"]).toContain(r.kind);
+      expect(r.reason ?? "").toBeTruthy();
     }
-    expect(r.entries).toEqual([]);
+    expect(r.entries ?? []).toEqual([]);
   }, 30_000);
 
   test("mobileForward：PATH 置空 → tool-absent（或 SDK 车道诚实降级）+ 不 throw", async () => {
@@ -573,7 +576,7 @@ describe("移动端：降级路径（无工具宇宙）", () => {
       expect(r.lane === "magic" || r.lane === "aapt").toBe(true); // 真 aapt 对伪 APK dump 必败 → 魔数兜底恒成立
       expect(r.sizeBytes).toBe(4096);
       expect(r.magic!.apk).toBe(true);
-      if (r.lane === "magic") expect(r.reason).toContain("诚实降级");
+      if (r.lane === "magic") expect(r.reason).toMatch(/降级/); // 缺席→「诚实降级」/在场 dump 失败→「魔数车道降级」两种到达方式都是诚实形态
       expect(apk.length).toBeGreaterThan(0);
       // 非 APK 魔数（ELF 头）→ failed + 文件头预览
       makeFakeApk(ws, "builds/not-apk", false);
@@ -1127,7 +1130,7 @@ describe("移动端：Web /api/govex/mobile 端点", () => {
     expect(j.hint).toContain("org mobile plan");
   }, 60_000);
 
-  test("GET action=devices：假 adb 注入 PATH（服务进程内 spawn 传运行期 env）→ 4 台就绪 2 + iOS 面缺席", async () => {
+  test.skipIf(!POSIX)("GET action=devices：假 adb 注入 PATH（服务进程内 spawn 传运行期 env）→ 4 台就绪 2 + iOS 面缺席", async () => {
     const ctx = injectPath();
     try {
       process.env.FAKE_ADB_DEVICES_FILE = DEVICES_FILE;
@@ -1144,7 +1147,7 @@ describe("移动端：Web /api/govex/mobile 端点", () => {
     }
   }, 60_000);
 
-  test("GET action=logcat：tag=chromium → 五元组条目 + count + argv 形态", async () => {
+  test.skipIf(!POSIX)("GET action=logcat：tag=chromium → 五元组条目 + count + argv 形态", async () => {
     const ctx = injectPath();
     try {
       process.env.FAKE_ADB_DEVICES_FILE = DEVICES_FILE;
@@ -1211,7 +1214,7 @@ describe("移动端：工具环 e2e（mobile_* 三工具 · 只读模式可用�
       .map((e) => String((e.data as { detail?: string }).detail ?? ""));
   }
 
-  test("mobile_devices + mobile_logcat + mobile_plan：result_summary 可观测（假 adb 注入 PATH → 确定性）", () => {
+  test.skipIf(!POSIX)("mobile_devices + mobile_logcat + mobile_plan：result_summary 可观测（假 adb 注入 PATH → 确定性）", () => {
     const WS = path.join(WS_ROOT, `t${String(++wsSeq).padStart(3, "0")}`);
     fs.cpSync(path.join(process.cwd(), "demo-ws"), WS, { recursive: true });
     const fixture = path.join(TEST_RUN, `mobile-fixture-${wsSeq}.json`);
@@ -1243,7 +1246,7 @@ describe("移动端：工具环 e2e（mobile_* 三工具 · 只读模式可用�
     expect(tr[2]).toContain("mobile_plan ok android crash 4步（纯函数保底）");
   }, 120_000);
 
-  test("mobile_plan 非法平台 + mobile_logcat 多设备降级：错误摘要面可观测（kind 进 result_summary）", () => {
+  test.skipIf(!POSIX)("mobile_plan 非法平台 + mobile_logcat 多设备降级：错误摘要面可观测（kind 进 result_summary）", () => {
     const WS = path.join(WS_ROOT, `t${String(++wsSeq).padStart(3, "0")}`);
     fs.cpSync(path.join(process.cwd(), "demo-ws"), WS, { recursive: true });
     const fixture = path.join(TEST_RUN, `mobile-fixture-${wsSeq}.json`);

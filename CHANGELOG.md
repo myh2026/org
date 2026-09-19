@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## v0.5.18.1（2026-09-19）—— CI 环境自适应五修（run 35407741607 三平台红清零）
+
+v0.5.18 合并推送后 CI 三 job 红（verify + cross-platform win/mac）——全部是
+「沙箱无工具 vs runner 预装」环境面差异，按 v0.5.17.2 哲学（锁形态不锁环境）修：
+
+1. mobileLogcat PATH 置空用例：runner 预装 Android SDK（ANDROID_HOME/常见位置
+   探测可绕过置空的 PATH）→ else 分支 ok 断言改 kind 集合（真 adb 无设备
+   ok=false 是诚实形态）。
+2. mobileApkInfo 魔数车道 reason：缺席「诚实降级」vs 在场 dump 失败「魔数车道
+   降级」两种到达方式都诚实 → 断言放宽 match /降级/。
+3. remote Web probe：open_ssh 解析结果嵌在 ssh 面对象内（j.ssh.open_ssh）——
+   测试键位对齐（runner ssh 在场时才触达该断言，沙箱缺席故本地全绿）。
+4. probeRemote rsync 版本行：macOS 12+ 自带 openrsync → 正则放宽
+   /^(rsync|openrsync)\s+version/i。
+5. win32 假 adb 注入 4 用例（Web devices/logcat + 工具环 e2e×2）补
+   skipIf(!POSIX)（POSIX shell 脚本注入 win 不可行，诚实跳过非假红）。
+
+本地验证：mobile + remote 113/113 全绿。
 ## v0.5.18（2026-09-19）—— 终局三 ⬜ 清零批：IaC 深度 + 移动端调试 + 远程 Agent（⬜3→⬜0，✅118/150）
 
 v0.5.17 三簇批 CI 全绿基线之上，能力矩阵**终局三 ⬜ 清零**（子智能体 15-A/15-B/15-C
