@@ -687,38 +687,37 @@ describe("DevTools：工具环 e2e（devtools_probe / devtools_console / mcp_ses
       .map((e) => String((e.data as { detail?: string }).detail ?? ""));
   }
 
-  test("devtools_probe（fixture CDP 端点）：真探测版本/页面", () => {
-    const WS = path.join(WS_ROOT, `t${String(++wsSeq).padStart(3, "0")}`);
-    fs.cpSync(path.join(process.cwd(), "demo-ws"), WS, { recursive: true });
-    const fixture = path.join(TEST_RUN, `devtools-fixture-${wsSeq}.json`);
-    fs.writeFileSync(fixture, JSON.stringify({ tracks: {
-      "direct:notice-parser": [
-        '<tool>{"name":"devtools_probe","args":{"cdp":"FIXTURE_URL"}}</tool>',
-        "最终答案：DevTools 探测完成。",
-      ],
-    } }));
-    const out = path.join(TEST_RUN, "out-devtools", "probe");
-    fs.rmSync(out, { recursive: true, force: true });
-    fs.mkdirSync(out, { recursive: true });
-    const fxScript = fixture.replace(/FIXTURE_URL/, "CDP_URL_PLACEHOLDER");
-    void fxScript;
-    // 占位替换：CDP 端点在 beforeAll 起 fixture —— 本用例内联起（端点随机）
-    // 简化：直接探测死端口验证只读例外清单形态（探测面不是失败）
-    const patched = JSON.parse(fs.readFileSync(fixture, "utf-8") as string);
-    patched.tracks["direct:notice-parser"] = patched.tracks["direct:notice-parser"].map((line: string) =>
-      line.replace("FIXTURE_URL", "http://127.0.0.1:1"),
-    );
-    fs.writeFileSync(fixture, JSON.stringify(patched));
-    const r = runDhv([
-      "run", path.join(process.cwd(), "hsl/pool/direct.hsl"), "--workspace", WS, "--task", "(direct) DevTools 工具环",
-      "--model", "scripted", "--fixture", fixture, "--out", out,
-      "--allow", "bun,node,ls,cat,grep,diff,git",
-    ], { ORG_ASK_EXPERT: "notice-parser", ORG_ASK_SESSION: "devtools", ORG_ASK_QUESTION: "探测", ORG_TOOLS: "1" });
-    expect(r.ok).toBe(true);
-    const tr = toolResults(out);
-    expect(tr.length).toBe(1);
-    expect(tr[0]).toContain("devtools_probe ok");
-    fs.rmSync(WS, { recursive: true, force: true });
+  test("devtools_probe（fixture CDP 端点）：真探测版本/页面", async () => {
+    // 用例内起 fixture CDP（随机端口）—— 探测确定性不依赖宿主引擎
+    // （CI 无 agent-browser/无 9222 —— 死端口探测在引擎缺席宇宙是 ok:false，
+    // 那是诚实降级不是失败；本用例锁「有端点 → ok」的正面车道）
+    const fx = await startCdpFixture();
+    try {
+      const WS = path.join(WS_ROOT, `t${String(++wsSeq).padStart(3, "0")}`);
+      fs.cpSync(path.join(process.cwd(), "demo-ws"), WS, { recursive: true });
+      const fixture = path.join(TEST_RUN, `devtools-fixture-${wsSeq}.json`);
+      fs.writeFileSync(fixture, JSON.stringify({ tracks: {
+        "direct:notice-parser": [
+          `<tool>{"name":"devtools_probe","args":{"cdp":"${fx.httpUrl}"}}</tool>`,
+          "最终答案：DevTools 探测完成。",
+        ],
+      } }));
+      const out = path.join(TEST_RUN, "out-devtools", "probe");
+      fs.rmSync(out, { recursive: true, force: true });
+      fs.mkdirSync(out, { recursive: true });
+      const r = runDhv([
+        "run", path.join(process.cwd(), "hsl/pool/direct.hsl"), "--workspace", WS, "--task", "(direct) DevTools 工具环",
+        "--model", "scripted", "--fixture", fixture, "--out", out,
+        "--allow", "bun,node,ls,cat,grep,diff,git",
+      ], { ORG_ASK_EXPERT: "notice-parser", ORG_ASK_SESSION: "devtools", ORG_ASK_QUESTION: "探测", ORG_TOOLS: "1" });
+      expect(r.ok).toBe(true);
+      const tr = toolResults(out);
+      expect(tr.length).toBe(1);
+      expect(tr[0]).toContain("devtools_probe ok");
+      fs.rmSync(WS, { recursive: true, force: true });
+    } finally {
+      fx.stop();
+    }
   }, 120_000);
 
   test("devtools_console + mcp_sessions（fixture CDP + 池观测只读例外）", async () => {
