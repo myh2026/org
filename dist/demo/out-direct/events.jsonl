@@ -1,10 +1,10 @@
-{"seq":0,"ts":"2026-09-19T02:13:42.331Z","name":"run_start","data":{"entry":"/home/runner/work/org-lab/org-lab/hsl/pool/direct.hsl","model":"scripted","task":"(direct) multi-turn","scale":"microkernel"}}
-{"seq":1,"ts":"2026-09-19T02:13:42.345Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
-{"seq":2,"ts":"2026-09-19T02:13:42.345Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
-{"seq":3,"ts":"2026-09-19T02:13:42.352Z","name":"journal","data":{"name":"direct_ctx","detail":"notice-parser/demo turn=1 ctx=94 window=131072"}}
-{"seq":4,"ts":"2026-09-19T02:13:42.352Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
-{"seq":5,"ts":"2026-09-19T02:13:42.364Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
-{"seq":6,"ts":"2026-09-19T02:13:42.365Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
-{"seq":7,"ts":"2026-09-19T02:13:42.372Z","name":"journal","data":{"name":"direct_ctx","detail":"notice-parser/demo turn=2 ctx=144 window=131072"}}
-{"seq":8,"ts":"2026-09-19T02:13:42.372Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
-{"seq":9,"ts":"2026-09-19T02:13:42.373Z","name":"run_end","data":{"elapsed_ms":42,"ok":true}}
+{"seq":0,"ts":"2026-09-19T02:19:32.604Z","name":"run_start","data":{"entry":"/home/runner/work/org-lab/org-lab/hsl/pool/direct.hsl","model":"scripted","task":"(direct) multi-turn","scale":"microkernel"}}
+{"seq":1,"ts":"2026-09-19T02:19:32.617Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
+{"seq":2,"ts":"2026-09-19T02:19:32.617Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
+{"seq":3,"ts":"2026-09-19T02:19:32.624Z","name":"journal","data":{"name":"direct_ctx","detail":"notice-parser/demo turn=1 ctx=94 window=131072"}}
+{"seq":4,"ts":"2026-09-19T02:19:32.625Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
+{"seq":5,"ts":"2026-09-19T02:19:32.638Z","name":"capability_granted","data":{"capability":"llm_call","mode":"direct"}}
+{"seq":6,"ts":"2026-09-19T02:19:32.638Z","name":"journal","data":{"name":"direct_open","detail":"notice-parser"}}
+{"seq":7,"ts":"2026-09-19T02:19:32.641Z","name":"journal","data":{"name":"direct_ctx","detail":"notice-parser/demo turn=2 ctx=144 window=131072"}}
+{"seq":8,"ts":"2026-09-19T02:19:32.641Z","name":"journal","data":{"name":"direct_close","detail":"notice-parser"}}
+{"seq":9,"ts":"2026-09-19T02:19:32.642Z","name":"run_end","data":{"elapsed_ms":38,"ok":true}}
