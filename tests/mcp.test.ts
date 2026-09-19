@@ -12,7 +12,7 @@
 //      name 重复 / disabled 语义 / save 全量校验拒绝半档 / findMcpServer；
 //   3. env 引用解析：$env: 取父环境值 / 引用缺席诚实拒绝；
 //   4. 真会话（spawn fixture server）：initialize 握手（serverInfo/能力
-//      三面/版本协商记录）· tools/list 四工具 · tools/call echo/add/fail
+//      三面/版本协商记录）· tools/list 五工具（v0.5.20 +stats）· tools/call echo/add/fail
 //      （isError 语义）/ 分页 nextCursor 跟进 · resources/list+read ·
 //      prompts/list · server→client 请求自动 -32601 + 通知收集 · 分帧器
 //      拒收人话日志行不炸 · 早夭诚实诊断（code=70 + stderr 尾巴）·
@@ -41,6 +41,7 @@ import {
   resolveMcpEnv, probeMcpRuntimes, MCP_SERVERS_FILE, MCP_SERVERS_GUIDANCE,
   spawnMcpServer, normalizeContent, mcpSelfTest,
   mcpListTools, mcpCallTool, mcpListResources, mcpReadResource, mcpListPrompts,
+  mcpSessionStats, mcpCloseSessions, mcpTunePool, MCP_POOL_DEFAULTS,
   type McpServerEntry,
 } from "../lib/mcp.ts";
 import { TEST_RUN, runOrg, runDhv, eventsOf } from "./helpers";
@@ -313,11 +314,11 @@ describe("MCP：真会话（fixture server 实弹）", () => {
     });
   }, 30_000);
 
-  test("tools/list 四工具（含 inputSchema）+ tools/call echo/add", async () => {
+  test("tools/list 五工具（含 inputSchema，v0.5.20 +stats）+ tools/call echo/add", async () => {
     await withFixture({}, async (client) => {
       await client.initialize();
       const res = (await client.request("tools/list", {})) as { tools: Array<{ name: string }> };
-      expect(res.tools.map((t) => t.name).sort()).toEqual(["add", "echo", "fail", "slow"]);
+      expect(res.tools.map((t) => t.name).sort()).toEqual(["add", "echo", "fail", "slow", "stats"]);
       const echo = (await client.request("tools/call", makeToolsCallParams("echo", { message: "你好 org" }))) as { content: Array<{ type: string; text: string }> };
       expect(echo.content[0].text).toBe("你好 org");
       const add = (await client.request("tools/call", makeToolsCallParams("add", { a: 2, b: 3 }))) as { content: Array<{ text: string }>; structuredContent: { result: number } };
@@ -335,7 +336,7 @@ describe("MCP：真会话（fixture server 实弹）", () => {
     });
   }, 30_000);
 
-  test("分页：nextCursor 跟进（每页 1 个 → 4 页收齐）", async () => {
+  test("分页：nextCursor 跟进（每页 1 个 → 5 页收齐）", async () => {
     process.env.FAKE_MCP_PAGINATE = "1";
     await withFixture({}, async (client) => {
       await client.initialize();
@@ -348,8 +349,8 @@ describe("MCP：真会话（fixture server 实弹）", () => {
         cursor = res.nextCursor;
         pages++;
       } while (cursor !== undefined && pages < 10);
-      expect(pages).toBe(5); // 4 页工具 + 1 页空收尾
-      expect(names.sort()).toEqual(["add", "echo", "fail", "slow"]);
+      expect(pages).toBe(6); // 5 页工具 + 1 页空收尾
+      expect(names.sort()).toEqual(["add", "echo", "fail", "slow", "stats"]);
     });
   }, 30_000);
 
@@ -378,7 +379,7 @@ describe("MCP：真会话（fixture server 实弹）", () => {
       await Bun.sleep(100);
       expect(client.rejectedLines()).toBe(3);
       const res = (await client.request("tools/list", {})) as { tools: Array<{ name: string }> };
-      expect(res.tools.length).toBe(4);
+      expect(res.tools.length).toBe(5);
     });
   }, 30_000);
 
@@ -464,7 +465,7 @@ describe("MCP：高层操作（mcpListTools/mcpCallTool/... 门序与降级）",
     } finally { fs.rmSync(ws, { recursive: true, force: true }); }
   });
 
-  test("mcpListTools：真档案实弹（fixture 四工具 + serverInfo 附带）", async () => {
+  test("mcpListTools：真档案实弹（fixture 五工具 + serverInfo 附带）", async () => {
     const ws = tmpWs("tools");
     try {
       saveMcpServers(ws, [fixtureEntry("fx")]);
@@ -472,7 +473,7 @@ describe("MCP：高层操作（mcpListTools/mcpCallTool/... 门序与降级）",
       expect(reports.length).toBe(1);
       expect(reports[0].ok).toBe(true);
       expect(reports[0].server).toBe("fx");
-      expect(reports[0].tools.map((t) => t.name).sort()).toEqual(["add", "echo", "fail", "slow"]);
+      expect(reports[0].tools.map((t) => t.name).sort()).toEqual(["add", "echo", "fail", "slow", "stats"]);
       expect(reports[0].serverInfo?.serverName).toBe("fixture-mcp");
     } finally { fs.rmSync(ws, { recursive: true, force: true }); }
   }, 30_000);
@@ -624,7 +625,7 @@ describe("MCP：CLI 冒烟（org mcp）", () => {
     } finally { fs.rmSync(ws, { recursive: true, force: true }); }
   }, 120_000);
 
-  test("org mcp tools：真 spawn fixture → 四工具表渲染", () => {
+  test("org mcp tools：真 spawn fixture → 五工具表渲染", () => {
     const ws = tmpWs("cli-tools");
     try {
       saveMcpServers(ws, [fixtureEntry("fx")]);
@@ -819,4 +820,193 @@ describe("MCP：工具环 e2e（mcp_servers / mcp_tools / mcp_call_tool）", () 
     expect(tr[0]).toContain("server-not-found");
     fs.rmSync(WS, { recursive: true, force: true });
   }, 120_000);
+});
+
+// ---- 9. 会话池（v0.5.20 长连接复用：每操作一会话 → 池化常驻）-----------------------
+
+describe("MCP：会话池（session reuse —— 命中零 spawn 零握手）", () => {
+  // 池是模块级单例：每个用例独立工作区 + 用后收池（不留跨用例状态）
+  afterEach(async () => {
+    await mcpCloseSessions();
+  });
+
+  test("mcpSessionStats()：空池形态（字段齐全 + 计数全零）", () => {
+    const st = mcpSessionStats();
+    expect(st.totalSessions).toBe(0);
+    expect(st.sessions.length).toBe(0);
+    expect(st.hits).toBe(0);
+    expect(st.misses).toBe(0);
+    expect(st.evictions).toBe(0);
+    expect(st.expires).toBe(0);
+    expect(st.driftDiscards).toBe(0);
+    expect(st.midOpDeaths).toBe(0);
+    expect(st.maxSessions).toBe(MCP_POOL_DEFAULTS.maxSessions);
+    expect(st.idleTtlMs).toBe(MCP_POOL_DEFAULTS.idleTtlMs);
+  });
+
+  test("reuse 同 pid 复用（stats 工具证据面）：两次 call 同进程 · hits=1/misses=1", async () => {
+    const ws = tmpWs("pool-reuse");
+    saveMcpServers(ws, [fixtureEntry("fx")]);
+    const r1 = await mcpCallTool(ws, "fx", "stats", {}, { session: "reuse" });
+    const r2 = await mcpCallTool(ws, "fx", "stats", {}, { session: "reuse" });
+    expect(r1.ok && r2.ok).toBe(true);
+    const pid1 = (r1.structuredContent as { pid: number } | undefined)?.pid;
+    const pid2 = (r2.structuredContent as { pid: number } | undefined)?.pid;
+    expect(pid1).toBe(pid2); // 同一 server 进程 —— 复用的可观测证据
+    // 第二次的消息数 > 第一次（同进程累计）—— 长连接语义
+    const m1 = (r1.structuredContent as { messages: number } | undefined)?.messages;
+    const m2 = (r2.structuredContent as { messages: number } | undefined)?.messages;
+    expect(m2!).toBeGreaterThan(m1!);
+    const st = mcpSessionStats();
+    expect(st.totalSessions).toBe(1);
+    expect(st.sessions[0]?.server).toBe("fx");
+    expect(st.sessions[0]?.ops).toBe(2);
+    expect(st.hits).toBe(1);
+    expect(st.misses).toBe(1);
+    fs.rmSync(ws, { recursive: true, force: true });
+  }, 30_000);
+
+  test("fresh 模式不占池（v0.5.19 语义不变）：两次 call 不同 pid · 池仍空", async () => {
+    const ws = tmpWs("pool-fresh");
+    saveMcpServers(ws, [fixtureEntry("fx")]);
+    const r1 = await mcpCallTool(ws, "fx", "stats", {}, { session: "fresh" });
+    const r2 = await mcpCallTool(ws, "fx", "stats", {}, {}); // 缺省 = fresh
+    expect(r1.ok && r2.ok).toBe(true);
+    const pid1 = (r1.structuredContent as { pid: number } | undefined)?.pid;
+    const pid2 = (r2.structuredContent as { pid: number } | undefined)?.pid;
+    expect(pid1).not.toBe(pid2); // 每操作一会话 —— 各自 spawn
+    expect(mcpSessionStats().totalSessions).toBe(0); // fresh 不占池
+    fs.rmSync(ws, { recursive: true, force: true });
+  }, 30_000);
+
+  test("档案漂移丢弃：改 args 后 reuse → 换血（新进程）+ driftDiscards=1", async () => {
+    const ws = tmpWs("pool-drift");
+    saveMcpServers(ws, [fixtureEntry("fx")]);
+    const r1 = await mcpCallTool(ws, "fx", "stats", {}, { session: "reuse" });
+    expect(r1.ok).toBe(true);
+    // 改档案：args 加一个无害旗标（fixture 忽略未知 env/args）→ 身份指纹变
+    saveMcpServers(ws, [{ name: "fx", command: "bun", args: [FIXTURE_SERVER, "--drift-probe"] } as McpServerEntry]);
+    const r2 = await mcpCallTool(ws, "fx", "stats", {}, { session: "reuse" });
+    expect(r2.ok).toBe(true);
+    const pid1 = (r1.structuredContent as { pid: number } | undefined)?.pid;
+    const pid2 = (r2.structuredContent as { pid: number } | undefined)?.pid;
+    expect(pid1).not.toBe(pid2); // 漂移 → 旧会话作废重 spawn
+    expect(mcpSessionStats().driftDiscards).toBe(1);
+    fs.rmSync(ws, { recursive: true, force: true });
+  }, 30_000);
+
+  test("空闲超 TTL 换血：TTL 调到 50ms · 睡 80ms 后 reuse → 新进程 + expires=1", async () => {
+    const ws = tmpWs("pool-ttl");
+    saveMcpServers(ws, [fixtureEntry("fx")]);
+    const r1 = await mcpCallTool(ws, "fx", "stats", {}, { session: "reuse" });
+    expect(r1.ok).toBe(true);
+    mcpTunePool({ idleTtlMs: 50 });
+    await new Promise((r) => setTimeout(r, 80));
+    const r2 = await mcpCallTool(ws, "fx", "stats", {}, { session: "reuse" });
+    mcpTunePool({ idleTtlMs: MCP_POOL_DEFAULTS.idleTtlMs }); // 还原缺省
+    expect(r2.ok).toBe(true);
+    const pid1 = (r1.structuredContent as { pid: number } | undefined)?.pid;
+    const pid2 = (r2.structuredContent as { pid: number } | undefined)?.pid;
+    expect(pid1).not.toBe(pid2); // 空闲超时 → 优雅关闭重 spawn
+    expect(mcpSessionStats().expires).toBe(1);
+    fs.rmSync(ws, { recursive: true, force: true });
+  }, 30_000);
+
+  test("中途死亡单次重试：DIE_ON_CALL=2 → 第二次操作换血恢复 + midOpDeaths=1", async () => {
+    const ws = tmpWs("pool-death");
+    saveMcpServers(ws, [{ name: "die", command: "bun", args: [FIXTURE_SERVER], env: { FAKE_MCP_DIE_ON_CALL: "2" } } as McpServerEntry]);
+    const r1 = await mcpCallTool(ws, "die", "echo", { message: "first" }, { session: "reuse" });
+    expect(r1.ok).toBe(true);
+    // 第二次 call：服务端响应前自杀 → 池丢弃 + 单次换血重试（新进程 call 计数重置）
+    const r2 = await mcpCallTool(ws, "die", "echo", { message: "second" }, { session: "reuse" });
+    expect(r2.ok).toBe(true);
+    if (r2.ok) expect(r2.content?.text).toBe("second");
+    expect(mcpSessionStats().midOpDeaths).toBe(1);
+    fs.rmSync(ws, { recursive: true, force: true });
+  }, 30_000);
+
+  test("LRU 逐出：帽调到 1 · 两 server 交替 reuse → 最久未用被逐 + evictions 计数", async () => {
+    const ws = tmpWs("pool-lru");
+    saveMcpServers(ws, [fixtureEntry("fx-a"), fixtureEntry("fx-b")]);
+    mcpTunePool({ maxSessions: 1 });
+    const a1 = await mcpCallTool(ws, "fx-a", "stats", {}, { session: "reuse" });
+    expect(a1.ok).toBe(true);
+    const b1 = await mcpCallTool(ws, "fx-b", "stats", {}, { session: "reuse" });
+    expect(b1.ok).toBe(true);
+    // 帽 1：fx-b 入池时 fx-a 被逐出 → fx-a 再用必然重 spawn
+    const st = mcpSessionStats();
+    expect(st.totalSessions).toBe(1);
+    expect(st.evictions).toBeGreaterThanOrEqual(1);
+    expect(st.sessions[0]?.server).toBe("fx-b");
+    mcpTunePool({ maxSessions: MCP_POOL_DEFAULTS.maxSessions }); // 还原
+    fs.rmSync(ws, { recursive: true, force: true });
+  }, 30_000);
+
+  test("mcpCloseSessions：收池清零（closed 计数）", async () => {
+    const ws = tmpWs("pool-close");
+    saveMcpServers(ws, [fixtureEntry("fx")]);
+    await mcpCallTool(ws, "fx", "stats", {}, { session: "reuse" });
+    expect(mcpSessionStats().totalSessions).toBe(1);
+    const r = await mcpCloseSessions();
+    expect(r.closed).toBe(1);
+    expect(mcpSessionStats().totalSessions).toBe(0);
+    fs.rmSync(ws, { recursive: true, force: true });
+  }, 30_000);
+
+  test("reuse 车道 tools/list + resources/read + prompts/list 三面同池复用", async () => {
+    const ws = tmpWs("pool-ops");
+    saveMcpServers(ws, [fixtureEntry("fx")]);
+    const t = await mcpListTools(ws, "fx", { session: "reuse" });
+    expect(t[0]?.ok).toBe(true);
+    const pid1 = (t[0]?.serverInfo as unknown as { serverName: string }).serverName; // 先占位 —— 真正断言用 stats
+    void pid1;
+    const c1 = await mcpCallTool(ws, "fx", "stats", {}, { session: "reuse" });
+    expect(c1.ok).toBe(true);
+    const res = await mcpListResources(ws, "fx", { session: "reuse" });
+    expect(res[0]?.ok).toBe(true);
+    const read = await mcpReadResource(ws, "fx", "org://readme", { session: "reuse" });
+    expect(read.ok).toBe(true);
+    const pr = await mcpListPrompts(ws, "fx", { session: "reuse" });
+    expect(pr[0]?.ok).toBe(true);
+    const c2 = await mcpCallTool(ws, "fx", "stats", {}, { session: "reuse" });
+    expect(c2.ok).toBe(true);
+    const pidA = (c1.structuredContent as { pid: number } | undefined)?.pid;
+    const pidB = (c2.structuredContent as { pid: number } | undefined)?.pid;
+    expect(pidA).toBe(pidB); // 五类操作全走同一池化会话
+    fs.rmSync(ws, { recursive: true, force: true });
+  }, 30_000);
+
+  test("CLI：org mcp sessions 池观测（空池形态不炸）+ call --reuse 真跑", async () => {
+    const ws = tmpWs("pool-cli");
+    saveMcpServers(ws, [fixtureEntry("fx")]);
+    // 空池
+    const s0 = runOrg(["mcp", "sessions", "--workspace", ws]);
+    expect(s0.ok).toBe(true);
+    expect(s0.stdout).toContain("会话池");
+    expect(s0.stdout).toContain("池空");
+    // CLI 子进程的池与测试进程隔离 —— call --reuse 在子进程内池化（两次同 pid）
+    const c1 = runOrg(["mcp", "call", "fx", "stats", "--workspace", ws, "--reuse"]);
+    expect(c1.ok).toBe(true);
+    expect(c1.stdout).toContain('"pid"');
+    // 子进程退出即收池 —— 无泄漏（进程边界即池边界）
+    const s1 = runOrg(["mcp", "sessions", "--workspace", ws]);
+    expect(s1.ok).toBe(true);
+    fs.rmSync(ws, { recursive: true, force: true });
+  }, 60_000);
+
+  test("Web：action=sessions 池观测只读面", async () => {
+    const ws = tmpWs("pool-web");
+    saveMcpServers(ws, [fixtureEntry("fx")]);
+    const server = startWebServer({ workspace: ws, port: 0, model: "scripted" });
+    const base = `http://127.0.0.1:${server.port}`;
+    try {
+      const r = await (await fetch(`${base}/api/govex/mcp?action=sessions`)).json();
+      expect(r.ok).toBe(true);
+      expect(r.stats.totalSessions).toBe(0);
+      expect(r.stats.maxSessions).toBe(MCP_POOL_DEFAULTS.maxSessions);
+    } finally {
+      server.stop(true);
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

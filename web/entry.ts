@@ -172,7 +172,9 @@ import { probeRemote, loadRemoteHosts, findRemoteHost, remotePing, remoteDeployP
          REMOTE_HOSTS_FILE } from "../lib/remote.ts"; // v0.5.18 远程 Agent 簇（#133 —— 会话/部署/计划层，与 cloud_ssh 互补）
 import { probeMcpRuntimes, loadMcpServers, MCP_SERVERS_FILE, MCP_SERVERS_GUIDANCE, mcpSelfTest,
          mcpListTools, mcpListResources, mcpReadResource, mcpListPrompts,
-         type McpToolDescriptor, type McpResourceDescriptor, type McpPromptDescriptor } from "../lib/mcp.ts"; // v0.5.19 MCP 客户端桥（#122/C12 —— 协议翻译半面）
+         type McpToolDescriptor, type McpResourceDescriptor, type McpPromptDescriptor,
+         mcpSessionStats } from "../lib/mcp.ts"; // v0.5.19 MCP 客户端桥（#122/C12）+ v0.5.20 会话池观测
+import { devtoolsProbe, devtoolsConsole, devtoolsNetwork, devtoolsSelfTest } from "../lib/devtools.ts"; // v0.5.20 浏览器 DevTools（#116 console/网络面板 —— CDP 常驻会话，只读面）
 import { iacParseFile, iacGraph, iacPlan, iacGenerate, probeIac, iacValidate } from "../lib/iac.ts"; // v0.5.18 IaC 深度实现层（#44）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
@@ -1892,7 +1894,62 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
               const r = mcpSelfTest();
               return json({ ok: r.ok, passed: r.passed, total: r.total, checks: r.checks });
             }
-            return json({ ok: false, error: `未知 action：${action || "（空）"}（servers/tools/resources/read/prompts/selftest —— 只读面；call 不在 Web 只读面，走 CLI org mcp call / 工具环 mcp_call_tool）` }, 400);
+            if (action === "sessions") {
+              // v0.5.20 会话池观测（只读 —— 收池走 CLI org mcp sessions --close）
+              const st = mcpSessionStats();
+              return json({ ok: true, stats: st });
+            }
+            return json({ ok: false, error: `未知 action：${action || "（空）"}（servers/tools/resources/read/prompts/sessions/selftest —— 只读面；call 不在 Web 只读面，走 CLI org mcp call / 工具环 mcp_call_tool）` }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
+        // v0.5.20 🖥 浏览器 DevTools（#116 console/网络面板）：GET ?action=probe|console|network|selftest
+        // &cdp=<端点>&url=<导航>&duration=<ms>&filter=<子串>。与 CLI org devtools / 工具环
+        // devtools_* 同源 lib/devtools.ts（CDP 常驻会话主车道 + agent-browser 降级）。
+        // 只读面（interact/eval/close 是动作面 —— 走 CLI org devtools interact/eval，
+        // 与 mcp call 的 remote 口径一致）。
+        if (route === "GET /api/govex/devtools") {
+          const action = String(url.searchParams.get("action") ?? "probe").trim();
+          const cdp = String(url.searchParams.get("cdp") ?? "").trim() || undefined;
+          try {
+            if (action === "probe") {
+              const p = await devtoolsProbe({ ...(cdp ? { cdpUrl: cdp } : {}) });
+              return json({
+                ok: p.ok, lane: p.lane, agentBrowser: p.agentBrowser,
+                ...(p.cdp ? { cdp: p.cdp } : {}),
+                ...(p.hint ? { hint: p.hint } : {}),
+              });
+            }
+            if (action === "console") {
+              const navUrl = String(url.searchParams.get("url") ?? "").trim() || undefined;
+              const duration = Number(url.searchParams.get("duration") ?? "2000");
+              const r = await devtoolsConsole({
+                ...(navUrl ? { url: navUrl } : {}), durationMs: Number.isFinite(duration) ? duration : undefined,
+                ...(cdp ? { cdpUrl: cdp } : {}),
+              });
+              return json(r.ok
+                ? { ok: true, lane: r.lane, entries: r.entries, ms: r.ms, navigated: r.navigated, ...(r.hint ? { hint: r.hint } : {}) }
+                : { ok: false, kind: r.kind, error: r.error, ...(r.hint ? { hint: r.hint } : {}) });
+            }
+            if (action === "network") {
+              const navUrl = String(url.searchParams.get("url") ?? "").trim() || undefined;
+              const duration = Number(url.searchParams.get("duration") ?? "3000");
+              const filter = String(url.searchParams.get("filter") ?? "").trim() || undefined;
+              const r = await devtoolsNetwork({
+                ...(navUrl ? { url: navUrl } : {}), durationMs: Number.isFinite(duration) ? duration : undefined,
+                ...(filter ? { filter } : {}),
+                ...(cdp ? { cdpUrl: cdp } : {}),
+              });
+              return json(r.ok
+                ? { ok: true, lane: r.lane, requests: r.requests, ms: r.ms, navigated: r.navigated, ...(r.hint ? { hint: r.hint } : {}) }
+                : { ok: false, kind: r.kind, error: r.error, ...(r.hint ? { hint: r.hint } : {}) });
+            }
+            if (action === "selftest") {
+              const r = devtoolsSelfTest();
+              return json({ ok: r.ok, passed: r.passed, total: r.total, checks: r.checks });
+            }
+            return json({ ok: false, error: `未知 action：${action || "（空）"}（probe/console/network/selftest —— 只读面；interact/eval/close 是动作面，走 CLI org devtools）` }, 400);
           } catch (e) {
             return json({ ok: false, error: (e as Error).message }, 400);
           }

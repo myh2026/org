@@ -84,7 +84,13 @@ import {
 import {
   probeMcpRuntimes, loadMcpServers, saveMcpServers, MCP_SERVERS_FILE, MCP_SERVERS_GUIDANCE, mcpSelfTest,
   mcpListTools, mcpCallTool, mcpListResources, mcpReadResource, mcpListPrompts,
-} from "../lib/mcp.ts"; // v0.5.19 MCP 客户端桥（#122 / C12 —— 协议翻译半面：登记 → 真握手真调用）
+  mcpSessionStats, mcpCloseSessions, MCP_POOL_DEFAULTS,
+} from "../lib/mcp.ts"; // v0.5.19 MCP 客户端桥（#122 / C12）+ v0.5.20 会话池（长连接复用）
+import {
+  devtoolsProbe, devtoolsConsole, devtoolsNetwork, devtoolsEval, devtoolsInteract, devtoolsClose,
+  devtoolsSelfTest, CDP_DEFAULT_HTTP, ORG_CDP_URL_ENV,
+  type DevtoolsInteractAction,
+} from "../lib/devtools.ts"; // v0.5.20 浏览器 DevTools（#116 console/网络面板/DOM 交互 —— CDP 常驻会话）
 import { listApprovals, decideApproval, clearGranted } from "../lib/approvals.ts";
 import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
@@ -3718,6 +3724,29 @@ async function cmdMcp(a: Args): Promise<number> {
   const positional = a.rest.filter((r) => !r.startsWith("--"));
   const verb = positional[0] ?? "help";
   const ws = defaultWorkspace(a);
+  const reuse = a.rest.includes("--reuse"); // v0.5.20：池化长连接车道（缺省 fresh 保持 v0.5.19 语义）
+  const sessionMode = reuse ? ("reuse" as const) : undefined;
+
+  // ---- 会话池观测/收池（v0.5.20 长连接复用）----
+  if (verb === "sessions") {
+    if (a.rest.includes("--close")) {
+      const r = await mcpCloseSessions();
+      console.log(`🔌 MCP 会话池已收池：关闭 ${r.closed} 个活会话`);
+      return 0;
+    }
+    const st = mcpSessionStats();
+    console.log(`🔌 MCP 会话池（长连接复用 —— 调用侧 --reuse 启用；帽 ${st.maxSessions} 会话 · 空闲 TTL ${Math.round(st.idleTtlMs / 1000)}s）：`);
+    if (st.totalSessions === 0) {
+      console.log(`  池空（无 --reuse 操作发生过；fresh 模式不占池）`);
+    } else {
+      for (const s of st.sessions) {
+        console.log(`  ${s.exited ? "✗" : "✓"} ${s.server.padEnd(20)} 年龄 ${Math.round(s.ageMs / 1000)}s · 空闲 ${Math.round(s.idleMs / 1000)}s · ${s.ops} 次操作${s.exited ? "（已退 —— 下次 --reuse 换血）" : ""}`);
+      }
+    }
+    console.log(`\n  计数：命中 ${st.hits} · 未命中 ${st.misses} · 逐出 ${st.evictions} · 过期 ${st.expires} · 漂移丢弃 ${st.driftDiscards} · 中途死亡恢复 ${st.midOpDeaths}`);
+    console.log(`\n  （org mcp tools/call/resources/read/prompts 加 --reuse 即走池化车道；org mcp sessions --close 显式收池）`);
+    return 0;
+  }
 
   // ---- 档案 + 运行时探测面（不 spawn 任何 server）----
   if (verb === "servers") {
@@ -3747,7 +3776,7 @@ async function cmdMcp(a: Args): Promise<number> {
   // ---- 工具清单（initialize 握手 + tools/list + 分页跟进）----
   if (verb === "tools") {
     const name = positional[1];
-    const reports = await mcpListTools(ws, name);
+    const reports = await mcpListTools(ws, name, { session: sessionMode });
     if (reports.length === 0) {
       // 档案在但全部停用（或指名的 server 停用已被单报处理）—— 诚实计数而非通用指引
       const f = loadMcpServers(ws);
@@ -3800,7 +3829,7 @@ async function cmdMcp(a: Args): Promise<number> {
       console.error(`✗ arguments 不是合法 JSON：${argsRaw.slice(0, 40)}`);
       return 2;
     }
-    const r = await mcpCallTool(ws, server, tool, args);
+    const r = await mcpCallTool(ws, server, tool, args, { session: sessionMode });
     if (!r.ok) {
       console.error(`✗ ${r.reason}`);
       if (r.kind === "no-config") console.error(`  ${MCP_SERVERS_GUIDANCE}`);
@@ -3819,7 +3848,7 @@ async function cmdMcp(a: Args): Promise<number> {
   // ---- 资源清单 / 读取 ----
   if (verb === "resources") {
     const name = positional[1];
-    const reports = await mcpListResources(ws, name);
+    const reports = await mcpListResources(ws, name, { session: sessionMode });
     let anyOk = false;
     for (const r of reports) {
       if (r.ok) {
@@ -3839,7 +3868,7 @@ async function cmdMcp(a: Args): Promise<number> {
       console.error(`用法：org mcp read <server> <uri>（如 org mcp read fx org://readme）`);
       return 2;
     }
-    const r = await mcpReadResource(ws, server, uri);
+    const r = await mcpReadResource(ws, server, uri, { session: sessionMode });
     if (!r.ok) {
       console.error(`✗ ${r.reason}`);
       return 1;
@@ -3854,7 +3883,7 @@ async function cmdMcp(a: Args): Promise<number> {
   // ---- 提示词清单 ----
   if (verb === "prompts") {
     const name = positional[1];
-    const reports = await mcpListPrompts(ws, name);
+    const reports = await mcpListPrompts(ws, name, { session: sessionMode });
     let anyOk = false;
     for (const r of reports) {
       if (r.ok) {
@@ -3880,6 +3909,190 @@ async function cmdMcp(a: Args): Promise<number> {
   console.error(`未知子命令：${verb}`);
   console.error(`用法：org mcp servers · tools [name] · call <server> <tool> [json] · resources [name] · read <server> <uri>`);
   console.error(`      org mcp prompts [name] · self-test（#122/C12 MCP 客户端桥统一入口）`);
+  return 2;
+}
+
+// ---- org devtools：浏览器 DevTools（v0.5.20 · #116 剩余半面）--------------------
+
+/** devtools 子命令的旗标解析（--cdp/--duration/--url/--filter/--value/--target/--lane）。 */
+function dtFlag(rest: string[], name: string): string | undefined {
+  for (let i = 0; i < rest.length; i++) {
+    const v = rest[i]!;
+    if (v === name) return rest[i + 1];
+    if (v.startsWith(`${name}=`)) return v.slice(name.length + 1);
+  }
+  return undefined;
+}
+
+/** 从 rest 剥掉旗标与值后的位置参数序列。 */
+function dtPositional(rest: string[]): string[] {
+  const flagsWithValue = new Set(["--cdp", "--duration", "--url", "--filter", "--value", "--target", "--lane", "--timeout"]);
+  const out: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const v = rest[i]!;
+    if (flagsWithValue.has(v)) { i++; continue; }
+    if (v.startsWith("--")) continue; // 无值旗标（未来用）
+    out.push(v);
+  }
+  return out;
+}
+
+/** 数值旗标（非法/缺席 → undefined，由 lib 消毒缺省接管）。 */
+function dtNum(rest: string[], name: string): number | undefined {
+  const v = dtFlag(rest, name);
+  if (v === undefined) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** 车道旗标消毒（cdp/agent-browser 外 → undefined 走 auto）。 */
+function dtLane(rest: string[]): "cdp" | "agent-browser" | undefined {
+  const v = dtFlag(rest, "--lane");
+  return v === "cdp" || v === "agent-browser" ? v : undefined;
+}
+
+/** 交互动作白名单。 */
+const DEVTOOLS_ACTIONS = new Set<string>(["click", "dblclick", "fill", "type", "press", "hover", "check", "uncheck", "select"]);
+
+/**
+ * org devtools probe|console|network|interact|eval|close|self-test —— 浏览器
+ * DevTools 统一入口（#116 console 面板/网络面板/DOM 交互）。双车道：CDP
+ * 常驻会话（端点发现链：--cdp → ORG_CDP_URL → agent-browser 守护进程 →
+ * 127.0.0.1:9222）主 · agent-browser CLI 降级；双缺席诚实指引（exit 1）。
+ * 探测全景缺席是结果不是失败（probe exit 0）；denied/采集失败 exit 1。
+ */
+async function cmdDevtools(a: Args): Promise<number> {
+  const positional = dtPositional(a.rest);
+  const verb = positional[0] ?? "help";
+  const cdpUrl = dtFlag(a.rest, "--cdp");
+  const lane = dtLane(a.rest);
+  const targetId = dtFlag(a.rest, "--target");
+
+  // ---- 引擎/端点探测面（零副作用观测）----
+  if (verb === "probe") {
+    const p = await devtoolsProbe({ ...(cdpUrl ? { cdpUrl } : {}) });
+    console.log(`🖥 浏览器 DevTools 引擎探测：`);
+    if (p.cdp) {
+      console.log(`  CDP 端点 ✓ ${p.cdp.httpUrl}（来源：${p.cdp.source}）`);
+      console.log(`  浏览器：${p.cdp.version.browser} · 协议 ${p.cdp.version.protocolVersion}`);
+      console.log(`  页面 target：${p.cdp.pages.length} 个`);
+      for (const pg of p.cdp.pages.slice(0, 10)) console.log(`    · [${pg.id.slice(0, 8)}] ${pg.title.slice(0, 40)} — ${pg.url.slice(0, 70)}`);
+    } else {
+      console.log(`  CDP 端点 ✗ 缺席（--cdp / ${ORG_CDP_URL_ENV} / agent-browser 守护 / ${CDP_DEFAULT_HTTP} 四环全未命中）`);
+    }
+    console.log(`  agent-browser CLI：${p.agentBrowser ? "✓ 在场" : "✗ 缺席"}`);
+    if (p.hint) console.log(`\n  ${p.hint}`);
+    return 0;
+  }
+
+  // ---- console 面板 ----
+  if (verb === "console") {
+    const url = dtFlag(a.rest, "--url");
+    const durationMs = dtNum(a.rest, "--duration");
+    const r = await devtoolsConsole({ ...(url ? { url } : {}), ...(durationMs ? { durationMs } : {}), ...(cdpUrl ? { cdpUrl } : {}), ...(lane ? { lane } : {}), ...(targetId ? { targetId } : {}) });
+    if (!r.ok) {
+      console.error(`✗ console 面板失败（${r.kind}）：${r.error}`);
+      if (r.hint) console.error(`  ${r.hint}`);
+      return 1;
+    }
+    console.log(`🖥 console 面板（车道：${r.lane}${r.navigated ? " · 已导航" : ""} · ${r.ms}ms）：${r.entries.length} 条`);
+    for (const e of r.entries) {
+      console.log(`  [${e.level.toUpperCase().padEnd(5)}] ${e.source.padEnd(10)} ${e.text.slice(0, 100)}${e.url ? `（${e.url.slice(0, 60)}:${e.line ?? "?"}）` : ""}`);
+    }
+    if (r.hint) console.log(`\n  ${r.hint}`);
+    return 0;
+  }
+
+  // ---- 网络面板 ----
+  if (verb === "network") {
+    const url = dtFlag(a.rest, "--url");
+    const durationMs = dtNum(a.rest, "--duration");
+    const filter = dtFlag(a.rest, "--filter");
+    const r = await devtoolsNetwork({ ...(url ? { url } : {}), ...(durationMs ? { durationMs } : {}), ...(filter ? { filter } : {}), ...(cdpUrl ? { cdpUrl } : {}), ...(lane ? { lane } : {}), ...(targetId ? { targetId } : {}) });
+    if (!r.ok) {
+      console.error(`✗ 网络面板失败（${r.kind}）：${r.error}`);
+      if (r.hint) console.error(`  ${r.hint}`);
+      return 1;
+    }
+    console.log(`🖥 网络面板（车道：${r.lane}${r.navigated ? " · 已导航" : ""} · ${r.ms}ms）：${r.requests.length} 条`);
+    for (const q of r.requests) {
+      const status = q.failed ? `✗ ${q.errorText ?? "failed"}` : `${q.status ?? "?"}`;
+      console.log(`  ${q.method.padEnd(6)} ${status.padEnd(q.failed ? 30 : 4)} ${q.url.slice(0, 80)}${q.mime ? `（${q.mime}）` : ""}${q.size !== undefined ? ` ${q.size}B` : ""}${q.durationMs !== undefined ? ` ${q.durationMs}ms` : ""}`);
+    }
+    if (r.hint) console.log(`\n  ${r.hint}`);
+    return 0;
+  }
+
+  // ---- DOM 交互 ----
+  if (verb === "interact" || DEVTOOLS_ACTIONS.has(verb)) {
+    // 两种形态：org devtools interact <action> <sel> [--value v] | org devtools click <sel> [value]
+    let action: string;
+    let sel: string | undefined;
+    let value: string | undefined;
+    if (verb === "interact") {
+      action = positional[1] ?? "";
+      sel = positional[2];
+      value = dtFlag(a.rest, "--value") ?? positional[3];
+    } else {
+      action = verb;
+      sel = positional[1];
+      value = dtFlag(a.rest, "--value") ?? positional[2];
+    }
+    if (!DEVTOOLS_ACTIONS.has(action)) {
+      console.error(`未知交互动作：${action}（click/dblclick/fill/type/press/hover/check/uncheck/select）`);
+      return 2;
+    }
+    if (!sel) {
+      console.error(`用法：org devtools interact <action> <选择器> [--value 值]（如 org devtools interact click #submit）`);
+      return 2;
+    }
+    const r = await devtoolsInteract(action as DevtoolsInteractAction, sel, value, { ...(cdpUrl ? { cdpUrl } : {}), ...(lane ? { lane } : {}), ...(targetId ? { targetId } : {}) });
+    if (!r.ok) {
+      console.error(`✗ ${action} 失败（${r.kind}）：${r.error}`);
+      if (r.hint) console.error(`  ${r.hint}`);
+      return 1;
+    }
+    console.log(`✓ ${r.lane} 车道 · ${r.detail}（${r.ms}ms）`);
+    return 0;
+  }
+
+  // ---- eval ----
+  if (verb === "eval") {
+    const expr = positional.slice(1).join(" ");
+    if (!expr) {
+      console.error(`用法：org devtools eval <表达式>（如 org devtools eval "document.title"）—— 页面上下文执行`);
+      return 2;
+    }
+    const r = await devtoolsEval(expr, { ...(cdpUrl ? { cdpUrl } : {}), ...(lane ? { lane } : {}), ...(targetId ? { targetId } : {}) });
+    if (!r.ok) {
+      console.error(`✗ eval 失败（${r.kind}）：${r.error}`);
+      if (r.hint) console.error(`  ${r.hint}`);
+      return 1;
+    }
+    console.log(`✓ ${r.lane} 车道（${r.ms}ms）：${JSON.stringify(r.value)?.slice(0, 400)}`);
+    return 0;
+  }
+
+  // ---- 关词守护进程（显式动作）----
+  if (verb === "close") {
+    const r = await devtoolsClose();
+    console.log(r.ok ? `✓ ${r.output}` : `✗ ${r.output}`);
+    return r.ok ? 0 : 1;
+  }
+
+  // ---- 协议层自检（纯内存）----
+  if (verb === "self-test" || verb === "selftest") {
+    const t = devtoolsSelfTest();
+    console.log("🧪 DevTools 协议层自检（级别归一 · 文本化 · 行解析 · 选择器消毒 · URL 校验 —— 纯内存）");
+    for (const c of t.checks) console.log(`  ${c.passed ? "✓" : "✗"} ${c.name}${c.detail ? `（${c.detail}）` : ""}`);
+    console.log(`\n  ${t.passed}/${t.total} 通过`);
+    return t.ok ? 0 : 1;
+  }
+
+  console.error(`未知子命令：${verb}`);
+  console.error(`用法：org devtools probe · console [--url U] [--duration ms] · network [--url U] [--filter s] · interact <action> <sel>`);
+  console.error(`      org devtools eval <表达式> · close · self-test（#116 console/网络面板/DOM 交互 —— CDP 常驻会话）`);
+  console.error(`      通用旗标：--cdp <端点> · --lane cdp|agent-browser · --target <pageId>`);
   return 2;
 }
 
@@ -4073,6 +4286,7 @@ export async function orgMain(): Promise<number> {
     case "remote": return cmdRemote(a);
     // v0.5.19 MCP 客户端桥（capabilities #122 / C12 —— 协议翻译半面）
     case "mcp": return cmdMcp(a);
+    case "devtools": return cmdDevtools(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -4270,13 +4484,25 @@ export async function orgMain(): Promise<number> {
       指引三层降级（local 过监狱）· ping echo 往返 min/avg/max · plan 部署
       计划四式（git/rsync/容器/run 队列远程化+回滚，纯函数保底车道）
   org mcp servers · tools [name] · call <server> <tool> [json] ·
-       resources [name] · read <server> <uri> · prompts [name] · self-test
-      MCP 客户端桥（v0.5.19 · #122/C12 协议翻译）：org 作为 MCP 客户端，
-      按 <ws>/mcp-servers.json 档案 spawn 外部 server（stdio 换行分帧
-      JSON-RPC），initialize 握手 + 能力协商（tools/resources/prompts 三
+       resources [name] · read <server> <uri> · prompts [name] · sessions ·
+       self-test（操作加 --reuse 走池化长连接车道）
+      MCP 客户端桥（v0.5.19 · #122/C12 协议翻译 + v0.5.20 会话池）：org 作为
+      MCP 客户端，按 <ws>/mcp-servers.json 档案 spawn 外部 server（stdio 换行
+      分帧 JSON-RPC），initialize 握手 + 能力协商（tools/resources/prompts 三
       面，缺席诚实 unsupported）+ 分页跟进；call 是执行车道（工具环走
       process_spawn 门 + 审批在环）；env 秘密键只收 $env:VAR 引用（值
-      永不入档案）；会话粒度 = 每操作一会话（长连接复用是路线图）
+      永不入档案）；--reuse = 池化长连接（命中零 spawn 零握手 · 档案漂移/
+      空闲超 TTL/中途死亡自动换血单次重试；sessions 看池 --close 收池）
+  org devtools probe · console [--url U] [--duration ms] · network
+       [--url U] [--filter s] · interact <action> <sel> [--value v] ·
+       eval <表达式> · close · self-test
+      浏览器 DevTools（v0.5.20 · #116 console 面板/网络面板/DOM 交互 ——
+      常驻会话型引擎）：双车道 CDP 主（端点发现链 --cdp → ORG_CDP_URL →
+      agent-browser 守护进程 → 127.0.0.1:9222；console 四源 consoleAPICalled
+      /exceptionThrown/Log.entryAdded + 网络生命周期配对 status/mime/size/
+      duration + Runtime.evaluate 交互脚本）+ agent-browser CLI 降级
+      （console/errors/network requests 文本行解析 + click/fill 直通）；
+      双缺席诚实指引（probe exit 0 是观测面）
 
 仓库布局：hsl/ = HSL 源码；toolchain/dhv-ts = 内嵌解释器（vendored）；
           demo-run/ = 本地构建目录（git 忽略）；dist/ = 编译产物（入库）
