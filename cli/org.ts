@@ -81,6 +81,10 @@ import {
   probeMobile, mobileDevices, mobileLogcat, mobileForward, mobileApkInfo, mobileDebugPlan, mobileSelfTest,
   MOBILE_PLAN_PLATFORMS, MOBILE_SYMPTOMS, LOGCAT_LINES_DEFAULT, LOGCAT_LINES_MAX, LOGCAT_LEVELS,
 } from "../lib/mobile.ts"; // v0.5.18 移动端调试统一模块（#117 —— 与 iacscan #147 的扫描面互补）
+import {
+  probeMcpRuntimes, loadMcpServers, saveMcpServers, MCP_SERVERS_FILE, MCP_SERVERS_GUIDANCE, mcpSelfTest,
+  mcpListTools, mcpCallTool, mcpListResources, mcpReadResource, mcpListPrompts,
+} from "../lib/mcp.ts"; // v0.5.19 MCP 客户端桥（#122 / C12 —— 协议翻译半面：登记 → 真握手真调用）
 import { listApprovals, decideApproval, clearGranted } from "../lib/approvals.ts";
 import type { ReviewCandidate } from "../lib/engine.ts";
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14）
@@ -3703,6 +3707,173 @@ async function cmdRemote(a: Args): Promise<number> {
   return 2;
 }
 
+// ---- org mcp：MCP 客户端桥（v0.5.19 · #122 / C12）--------------------------------
+
+/**
+ * org mcp servers|tools|call|resources|read|prompts|self-test —— MCP 客户端桥统一入口。
+ * 会话粒度 = 每操作一会话（spawn → initialize → 操作 → close）；档案缺席/坏档/
+ * server 不在档 → 诚实拒绝 + 指引（exit 1）；探测全景缺席是结果不是失败（exit 0）。
+ */
+async function cmdMcp(a: Args): Promise<number> {
+  const positional = a.rest.filter((r) => !r.startsWith("--"));
+  const verb = positional[0] ?? "help";
+  const ws = defaultWorkspace(a);
+
+  // ---- 档案 + 运行时探测面（不 spawn 任何 server）----
+  if (verb === "servers") {
+    const runtimes = probeMcpRuntimes();
+    const hit = runtimes.filter((r) => r.available);
+    console.log(`🔌 MCP server 档案 + 宿主运行时探测：`);
+    const f = loadMcpServers(ws);
+    if (f.kind === "absent") {
+      console.log(`  档案：未创建（<ws>/${MCP_SERVERS_FILE}）—— 一切会话操作拒绝（不猜默认）`);
+      console.log(`  ${MCP_SERVERS_GUIDANCE}`);
+    } else if (f.kind === "invalid-json" || f.kind === "not-array") {
+      console.log(`  档案：✗ 不可用 —— ${f.reason}`);
+      return 1;
+    } else {
+      console.log(`  档案：${f.entries.length} 个过检条目${f.validations.some((v) => !v.ok) ? `（${f.validations.filter((v) => !v.ok).length} 条未过检被滤）` : ""}`);
+      for (const v of f.validations) {
+        const e = f.entries.find((x) => x.name === v.name);
+        console.log(`  ${v.ok ? (e?.disabled ? "⏸" : "✓") : "✗"} ${v.name.padEnd(20)} ${e ? `${e.command} ${(e.args ?? []).join(" ").slice(0, 40)}${e.disabled ? "（已停用）" : ""}` : v.reason}`);
+      }
+    }
+    console.log(`\n  宿主运行时（server spawn 前提）：`);
+    for (const r of runtimes) console.log(`  ${r.available ? "✓" : "✗"} ${r.name.padEnd(10)} ${r.path ?? "缺席"}`);
+    if (hit.length === 0) console.log(`\n  （全部缺席 —— 装好任一宿主（bun/node/python3）即可登记 server）`);
+    return 0;
+  }
+
+  // ---- 工具清单（initialize 握手 + tools/list + 分页跟进）----
+  if (verb === "tools") {
+    const name = positional[1];
+    const reports = await mcpListTools(ws, name);
+    let anyOk = false;
+    for (const r of reports) {
+      if (r.ok) {
+        anyOk = true;
+        console.log(`✓ ${r.server} —— ${r.tools.length} 个工具（${r.serverInfo?.serverName} ${r.serverInfo?.serverVersion} · 协议 ${r.serverInfo?.protocolVersion}）`);
+        for (const t of r.tools) {
+          console.log(`  🔧 ${t.name.padEnd(24)} ${(t.description ?? "").slice(0, 52)}`);
+        }
+      } else {
+        console.log(`✗ ${r.server} —— ${r.reason}`);
+      }
+    }
+    if (!anyOk) {
+      if (reports.every((r) => r.kind === "no-config" || r.kind === "invalid-config")) console.log(`  ${MCP_SERVERS_GUIDANCE}`);
+      return 1;
+    }
+    return 0;
+  }
+
+  // ---- 工具调用（执行车道 —— 由你对 server 与工具内容负责）----
+  if (verb === "call") {
+    const server = positional[1];
+    const tool = positional[2];
+    const argsRaw = positional[3] ?? "{}";
+    if (!server || !tool) {
+      console.error(`用法：org mcp call <server> <tool> ['{"参数":"值"}'] [--workspace DIR]`);
+      console.error(`  例：org mcp call fx echo '{"message":"你好"}' —— 执行车道，与工具环 mcp_call_tool 同源`);
+      return 2;
+    }
+    let args: Record<string, unknown> | undefined;
+    try {
+      const parsed: unknown = JSON.parse(argsRaw);
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) args = parsed as Record<string, unknown>;
+      else if (argsRaw.trim() !== "{}" && argsRaw.trim() !== "") {
+        console.error(`✗ arguments 须为 JSON 对象（收到：${argsRaw.slice(0, 40)}）`);
+        return 2;
+      } else {
+        args = {};
+      }
+    } catch {
+      console.error(`✗ arguments 不是合法 JSON：${argsRaw.slice(0, 40)}`);
+      return 2;
+    }
+    const r = await mcpCallTool(ws, server, tool, args);
+    if (!r.ok) {
+      console.error(`✗ ${r.reason}`);
+      if (r.kind === "no-config") console.error(`  ${MCP_SERVERS_GUIDANCE}`);
+      return 1;
+    }
+    const info = r.serverInfo ? `（${r.serverInfo.serverName} ${r.serverInfo.serverVersion}）` : "";
+    console.log(`🔧 ${server}.${tool} ${info}${r.isError ? " —— 工具层失败（isError）" : ""}`);
+    if (r.content) {
+      console.log(`  内容：${r.content.textBlocks} 文本块 · ${r.content.imageBlocks} 图片块 · ${r.content.resourceBlocks} 资源块${r.content.truncated ? "（已截断）" : ""}`);
+      if (r.content.text) console.log(r.content.text.split("\n").map((l) => `  | ${l}`).join("\n"));
+    }
+    if (r.structuredContent !== undefined) console.log(`  structuredContent：${JSON.stringify(r.structuredContent).slice(0, 200)}`);
+    return r.isError === true ? 1 : 0; // 协议层成功但工具层失败 → exit 1（诚实呈现双层语义）
+  }
+
+  // ---- 资源清单 / 读取 ----
+  if (verb === "resources") {
+    const name = positional[1];
+    const reports = await mcpListResources(ws, name);
+    let anyOk = false;
+    for (const r of reports) {
+      if (r.ok) {
+        anyOk = true;
+        console.log(`✓ ${r.server} —— ${r.resources.length} 个资源`);
+        for (const res of r.resources) console.log(`  📄 ${res.uri.padEnd(36)} ${res.name ?? ""}${res.mimeType ? `（${res.mimeType}）` : ""}`);
+      } else {
+        console.log(`✗ ${r.server} —— ${r.reason}`);
+      }
+    }
+    return anyOk ? 0 : 1;
+  }
+  if (verb === "read") {
+    const server = positional[1];
+    const uri = positional[2];
+    if (!server || !uri) {
+      console.error(`用法：org mcp read <server> <uri>（如 org mcp read fx org://readme）`);
+      return 2;
+    }
+    const r = await mcpReadResource(ws, server, uri);
+    if (!r.ok) {
+      console.error(`✗ ${r.reason}`);
+      return 1;
+    }
+    for (const c of r.contents) {
+      console.log(`📄 ${c.uri}${c.mimeType ? `（${c.mimeType}）` : ""}`);
+      if (c.text) console.log(c.text.split("\n").map((l) => `  | ${l}`).join("\n"));
+    }
+    return 0;
+  }
+
+  // ---- 提示词清单 ----
+  if (verb === "prompts") {
+    const name = positional[1];
+    const reports = await mcpListPrompts(ws, name);
+    let anyOk = false;
+    for (const r of reports) {
+      if (r.ok) {
+        anyOk = true;
+        console.log(`✓ ${r.server} —— ${r.prompts.length} 个提示词`);
+        for (const p of r.prompts) console.log(`  💬 ${p.name.padEnd(20)} ${(p.description ?? "").slice(0, 52)}`);
+      } else {
+        console.log(`✗ ${r.server} —— ${r.reason}`);
+      }
+    }
+    return anyOk ? 0 : 1;
+  }
+
+  // ---- 协议层自检（纯内存，无 server 也能锁形状）----
+  if (verb === "self-test" || verb === "selftest") {
+    const t = mcpSelfTest();
+    console.log("🧪 MCP 协议层自检（换行分帧 · 构造器 · 档案校验 · env 引用解析 · 内容归一 —— 纯内存）");
+    for (const c of t.checks) console.log(`  ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? `（${c.detail}）` : ""}`);
+    console.log(`\n  ${t.passed}/${t.total} 通过`);
+    return t.ok ? 0 : 1;
+  }
+
+  console.error(`未知子命令：${verb}`);
+  console.error(`用法：org mcp servers · tools [name] · call <server> <tool> [json] · resources [name] · read <server> <uri>`);
+  console.error(`      org mcp prompts [name] · self-test（#122/C12 MCP 客户端桥统一入口）`);
+  return 2;
+}
+
 // ---- org memory：专家长期记忆（v0.5.3） ----------------------------------------
 
 async function cmdMemory(a: Args): Promise<number> {
@@ -3891,6 +4062,8 @@ export async function orgMain(): Promise<number> {
     case "mobile": return cmdMobile(a);
     // v0.5.18 远程 Agent 簇（capabilities #133 —— 会话/部署/计划层）
     case "remote": return cmdRemote(a);
+    // v0.5.19 MCP 客户端桥（capabilities #122 / C12 —— 协议翻译半面）
+    case "mcp": return cmdMcp(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -4087,6 +4260,14 @@ export async function orgMain(): Promise<number> {
       执行（命令白名单默认只读，非白名单须 --allow-full）· sync rsync→scp→
       指引三层降级（local 过监狱）· ping echo 往返 min/avg/max · plan 部署
       计划四式（git/rsync/容器/run 队列远程化+回滚，纯函数保底车道）
+  org mcp servers · tools [name] · call <server> <tool> [json] ·
+       resources [name] · read <server> <uri> · prompts [name] · self-test
+      MCP 客户端桥（v0.5.19 · #122/C12 协议翻译）：org 作为 MCP 客户端，
+      按 <ws>/mcp-servers.json 档案 spawn 外部 server（stdio 换行分帧
+      JSON-RPC），initialize 握手 + 能力协商（tools/resources/prompts 三
+      面，缺席诚实 unsupported）+ 分页跟进；call 是执行车道（工具环走
+      process_spawn 门 + 审批在环）；env 秘密键只收 $env:VAR 引用（值
+      永不入档案）；会话粒度 = 每操作一会话（长连接复用是路线图）
 
 仓库布局：hsl/ = HSL 源码；toolchain/dhv-ts = 内嵌解释器（vendored）；
           demo-run/ = 本地构建目录（git 忽略）；dist/ = 编译产物（入库）

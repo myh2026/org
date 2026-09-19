@@ -1,5 +1,32 @@
 # CHANGELOG
 
+## v0.5.19（2026-09-19）—— MCP 客户端桥（#122 / C12：专家矩阵 25/25 满贯）
+
+org 作为 MCP **客户端**：按 <ws>/mcp-servers.json 档案 spawn 外部 MCP server
+（stdio 换行分帧 JSON-RPC），initialize 握手 + 能力协商（tools/resources/
+prompts 三面独立，缺席诚实 unsupported）+ tools/list 分页跟进 + tools/call
+（isError 双层语义）+ resources list/read + prompts/list —— #122 主表 🟡→✅
+（✅119/150）+ 专家表 C12 🟡→✅（**25/25 满贯**）。
+
+- **lib/mcp.ts**（约 950 行）：换行分帧器（跨 chunk 半行缓冲 + 坏行拒收计
+  数 + 内嵌换行构造性拒绝）· McpClient 生命周期（server→client 请求自动响
+  应：ping→{} / sampling→-32601 诚实最小；早夭/EPIPE 竞态窗容忍 + pending
+  统一诚实拒绝）· 档案层单一规则源校验（name 唯一/command 非空/args 全字符
+  串/cwd 过 pathjail 监狱/**秘密键字面值拒绝 —— 只收 $env:VAR 引用，spawn
+  时从父环境解析，缺席拒绝，值永不入档**）· 内容归一（text 拼接/image·
+  resource 计数/16KB 帽）· 协议自检 19 项（纯内存）
+- **CLI** `org mcp servers|tools|call|resources|read|prompts|self-test` 七
+  子命令（档案缺席/坏档/server 不在档 → 诚实拒绝 + 指引）
+- **工具环** +3：mcp_servers/mcp_tools（只读协议操作，ReadOnly 可用）+
+  mcp_call_tool（执行车道：process_spawn 门 + 审批在环；档案门在 lib 内部
+  先判 —— 双层治理）；capability/gate 映射 + 例外清单 + result_summary 三条
+- **Web** GET /api/govex/mcp 只读五动作（servers/tools/resources/read/
+  prompts/selftest）+ 🔌 治理面板 Tab（call 不在 Web 只读面 —— remote 口径）
+- **tests/mcp.test.ts 51 例**（fixture server 真 spawn 实弹：握手/版本协商/
+  分页/能力缺席/人话日志拒收/早夭 stderr 尾巴/请求超时/-32601/-32602/门序
+  证明/三端冒烟/e2e 双层治理/秘密策略矩阵）
+
+测试 1154 → **1205**（mcp 51）。主表 ✅119/150 · 🟡31 · ⬜0；专家 25/25。
 ## v0.5.18.2（2026-09-19）—— CI 追修：macOS openrsync 版本行形态
 
 run 35408498464 残余红（mac cross-platform 仅 1 用例 ×2 段）：macOS 12+ 自带
