@@ -44,11 +44,30 @@ export interface RunResult {
   stderr: string;
 }
 
+// ---- 测试环境隔离（B-25，v0.5.20.2） ----------------------------------------
+// 铁律：机制测试必须确定性、零外联。实测踩坑（2026-09-19）：开发者本机配了
+// ~/.org/config.json（default_lane=deepseek 真实车道）后，audio e2e 的 scripted
+// 剧本车道被用户配置劫持 —— 团队/直连车道真实外联（单用例 195s、烧真实配额、
+// 断言非确定性假红）；CI 全绿是因为 CI runner 恰好没有用户配置 —— 「环境恰好
+// 干净」的偶然前提（与零外联开关 v0.4.17 同一课）。
+// 修法：所有子进程驱动器注入隔离层 —— ORG_CONFIG 指向不存在的路径（=
+// 「未配置」缺省态，config.ts 读不到就全部走缺省），同时清空真实车道残留
+// 的网关三件套。调用方传的 env 在其后展开，可按需覆盖（真实车道用例自带
+// mock 网关，不受影响）。
+function isolatedEnv(): Record<string, string> {
+  return {
+    ORG_CONFIG: path.join(TEST_RUN, "isolated-user-config-absent.json"),
+    DHV_LLM_GATEWAY: "",
+    DHV_LLM_API_KEY: "",
+    DHV_LLM_MODEL: "",
+  };
+}
+
 /** 直接驱动解释器（等价 org run 的底层调用）。 */
 export function runDhv(args: string[], env: Record<string, string> = {}): RunResult {
   const proc = Bun.spawnSync([process.execPath, DHV, ...args], {
     cwd: ROOT,
-    env: { ...process.env, DHV_TS: shPath(DHV), ...env },
+    env: { ...process.env, DHV_TS: shPath(DHV), ...isolatedEnv(), ...env },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -64,7 +83,7 @@ export function runDhv(args: string[], env: Record<string, string> = {}): RunRes
 export function runOrg(args: string[], env: Record<string, string> = {}): RunResult {
   const proc = Bun.spawnSync([process.execPath, CLI, ...args], {
     cwd: ROOT,
-    env: { ...process.env, DHV_TS: shPath(DHV), ...env },
+    env: { ...process.env, DHV_TS: shPath(DHV), ...isolatedEnv(), ...env },
     stdout: "pipe",
     stderr: "pipe",
   });
