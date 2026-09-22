@@ -247,6 +247,7 @@ export fn tools_prompt(mode: ToolMode) -> String {
     out.push_str("- lsp_servers {} — probe known external language servers (typescript-language-server/pylsp/gopls/rust-analyzer/clangd…) via which; absence is an honest degrade to the built-in lane, not a failure.\n");
     out.push_str("- debug_breakpoints {\"file\":\"src/app.ts\"} — breakpoint suggestions for a source file: function/graph entry lines (symbol-level confidence) + if/else branch, loop-head and pre-return lines (heuristic confidence), each with a reason. HSL/TS/TSX/PY only.\n");
     out.push_str("- debug_plan {\"file\":\"src/app.ts\"} — a debug plan: ordered steps (attach → entry breakpoints → branch/loop → stack inspection) + protocol-ready DAP message sequence (initialize/setBreakpoints/threads/stackTrace). Real debug-adapter attach is roadmap (honest boundary).\n");
+    out.push_str("- stack_analyze {\"text\":\"<crash output>\"} or {\"file\":\"crash.log\"} — automatic stack-trace analysis (#107): four-language frame parsing (TS/JS · Python · Rust panic · HSL) → symbolication (enclosing symbol per frame) → external classification (node_modules/runtime/stdlib) → root-cause hints (cause + 3-step checklist, severity-graded). Honest boundary: heuristic pattern library for frequent crash families, no dataflow analysis.\n");
     // v0.5.17 云生态簇（#67/#68/#72/#74 —— 只读三件：探测/模板/注册表，零审批门槛）
     out.push_str("- cloud_probe {} — one-shot cloud ecosystem probe (docker CLI+daemon / ssh / kubectl+cluster / terraform / 10 cloud CLIs). Absence is an honest degrade with install hints + template-lane pointers, never a silent failure.\n");
     out.push_str("- cloud_dockerfile {\"project_type\":\"node\"|\"bun\"|\"python\"|\"rust\"} — production-grade multi-stage Dockerfile template (non-root USER + HEALTHCHECK + pinned tags). The degrade-lane deliverable when docker itself is absent.\n");
@@ -518,6 +519,7 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         && name != String::from("lsp_definition") && name != String::from("lsp_references")
         && name != String::from("lsp_hover") && name != String::from("lsp_servers")
         && name != String::from("debug_breakpoints") && name != String::from("debug_plan")
+        && name != String::from("stack_analyze")
         && name != String::from("cloud_probe") && name != String::from("cloud_dockerfile")
         && name != String::from("cloud_clis")
         && name != String::from("mobile_devices") && name != String::from("mobile_logcat")
@@ -605,6 +607,7 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "lsp_servers" => tool_lsp_servers(args.clone()).await,
         "debug_breakpoints" => tool_debug_breakpoints(args.clone()).await,
         "debug_plan" => tool_debug_plan(args.clone()).await,
+        "stack_analyze" => tool_stack_analyze(args.clone()).await,
         // v0.5.17 云生态簇（native 块动态 import lib/cloud.ts —— 与 CLI/Web 同源）
         "cloud_probe" => tool_cloud_probe(args.clone()),
         "cloud_dockerfile" => tool_cloud_dockerfile(args.clone()),
@@ -650,7 +653,7 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "deps_probe" => tool_deps_probe(args.clone()),
         "deps_install" => tool_deps_install(args.clone()),
         "retest_plan" => tool_retest_plan(args.clone()),
-        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/iac_parse/iac_plan/iac_graph/iac_generate/mobile_devices/mobile_logcat/mobile_plan/mcp_servers/mcp_tools/mcp_call_tool/devtools_probe/devtools_console/devtools_network/devtools_interact/mcp_sessions/shell_run/agent_spawn/audio_compose/audit_export/review_suggest/issue_list/issue_get/issue_create/issue_comment/issue_close/pr_list/pr_view/pr_create/sast_scan/deps_probe/deps_install/retest_plan/spawn_decide）", name)),
+        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/stack_analyze/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/iac_parse/iac_plan/iac_graph/iac_generate/mobile_devices/mobile_logcat/mobile_plan/mcp_servers/mcp_tools/mcp_call_tool/devtools_probe/devtools_console/devtools_network/devtools_interact/mcp_sessions/shell_run/agent_spawn/audio_compose/audit_export/review_suggest/issue_list/issue_get/issue_create/issue_comment/issue_close/pr_list/pr_view/pr_create/sast_scan/deps_probe/deps_install/retest_plan/spawn_decide）", name)),
     };
     emit_tool(String::from("tool_result"), result_summary(result.clone()));
     result
@@ -1631,6 +1634,54 @@ async fn tool_debug_plan(args: String) -> String {
             });
         } catch (e) {
             return JSON.stringify({ tool: "debug_plan", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+/// v0.5.23 堆栈自动分析（#107）：lib/stacktrace.ts analyzeStackTrace 同源。
+/// args.text 直接粘贴 / args.file 工作区内日志（file 过 pathjail —— 越界即拒）；
+/// 四语言帧解析 → 符号化 → 外部分类 → 根因提示（只读工具，ReadOnly 可用）。
+async fn tool_stack_analyze(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const text = typeof a.text === "string" ? a.text : "";
+            const file = String(a.file || a.path || "");
+            if (!text && !file) return JSON.stringify({ tool: "stack_analyze", ok: false, error: "args.text（崩溃输出粘贴）与 args.file（工作区内日志文件）至少其一" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "stack_analyze", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const fsMod = await import("node:fs");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            let payload = text;
+            if (!payload && file) {
+                // jail 铁律：与 debug_breakpoints 同一条 pathjail 真源
+                const jail = await import(root + "/lib/pathjail.ts");
+                const abs = pathMod.isAbsolute(file) ? file.replace(/\\/g, "/") : pathMod.resolve(ws, file);
+                if (!jail.inWorkspace(ws, abs)) return JSON.stringify({ tool: "stack_analyze", ok: false, error: "路径越界（须在工作区内）：" + file });
+                try {
+                    payload = fsMod.readFileSync(abs, "utf8");
+                } catch (e) {
+                    return JSON.stringify({ tool: "stack_analyze", ok: false, error: "日志文件不可读：" + file + "（" + String(e && e.message || e) + "）" });
+                }
+            }
+            const stacktrace = await import(root + "/lib/stacktrace.ts");
+            const r = stacktrace.analyzeStackTrace(ws, payload);
+            return JSON.stringify({
+                tool: "stack_analyze", ok: r.ok, ...(r.reason ? { reason: r.reason } : {}),
+                language: r.language, detected_by: r.detectedBy,
+                stats: r.stats, ...(r.truncated ? { truncated: true } : {}),
+                innermost_app_frame: r.innermostAppFrame,
+                frames: r.frames.slice(0, 30).map(function (f) {
+                    return { fn: f.fn, file: f.file, line: f.line, col: f.col, language: f.language, external: f.external, exists: f.exists, snippet: f.snippet, enclosing: f.enclosing };
+                }),
+                hints: r.hints.map(function (h) {
+                    return { id: h.id, title: h.title, severity: h.severity, cause: h.cause, checklist: h.checklist, frames: h.frames };
+                }),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "stack_analyze", ok: false, error: String(e && e.message || e) });
         }
     }
 }
@@ -3564,6 +3615,13 @@ fn result_summary(result: String) -> String {
                 if (tool === "lsp_servers") return tool + " ok 可用 " + String((o.servers || []).filter(function (s) { return s.available; }).length) + "/" + String((o.servers || []).length);
                 if (tool === "debug_breakpoints") return tool + " ok 建议" + String((o.suggestions || []).length) + "处" + (o.language ? " " + String(o.language) : "") + ((o.suggestions && o.suggestions[0]) ? " top=" + String(o.suggestions[0].line) + "(" + String(o.suggestions[0].kind) + ")" : "") + (o.reason ? "（" + String(o.reason).slice(0, 60) + "）" : "");
                 if (tool === "debug_plan") return tool + " ok " + String(o.suggestions ?? 0) + "断点 · " + String((o.steps || []).length) + "步 · DAP消息" + String((o.dap_messages || o.dapMessages || []).length) + "条";
+                // v0.5.23 堆栈自动分析的观测摘要（journal 人读面）
+                if (tool === "stack_analyze") {
+                    const st = o.stats || {};
+                    const inner = o.innermost_app_frame;
+                    const top = (o.frames || [])[inner === 0 || inner ? inner : 0] || (o.frames || [])[0];
+                    return tool + (o.ok ? " ok" : " " + String(o.reason || "拒绝").slice(0, 70)) + " " + String(o.language ?? "?") + " " + String(st.total ?? "?") + "帧=" + String(st.app ?? "?") + "用户+" + String(st.external ?? "?") + "外部 符号化" + String(st.symbolicated ?? 0) + (top ? " top=" + String(top.fn) + " " + String(top.file) + ":" + String(top.line) : "") + " 提示" + String((o.hints || []).length) + "条" + ((o.hints || [])[0] ? "[" + String(o.hints[0].id) + "]" : "");
+                }
                 // v0.5.17 云生态簇的观测摘要（journal 人读面）
                 if (tool === "cloud_probe") {
                     const s = o.summary || {};

@@ -167,6 +167,7 @@ import { cloudProbeAll, probeDocker, probeSsh, probeK8s, probeTerraform, probeCl
          dockerRun, dockerBuild, dockerfileFor, composeFor, dockerPlan,
          sshRun, scpUpload, sshConfigTemplate, sshPlan, k8sRun, k8sManifestFor, terraformPlan } from "../lib/cloud.ts"; // v0.5.17 云生态统一模块（#67/#68/#72/#74）
 import { suggestBreakpoints, debugPlan, dapSelfTest } from "../lib/debug.ts"; // v0.5.17 断点/调试建议（#108）
+import { analyzeStackTrace, stackSelfTest } from "../lib/stacktrace.ts"; // v0.5.23 堆栈自动分析（#107）
 import { probeMobile, mobileDevices, mobileLogcat, mobileDebugPlan, mobileSelfTest, MOBILE_PLAN_PLATFORMS } from "../lib/mobile.ts"; // v0.5.18 移动端调试（#117）
 import { probeRemote, loadRemoteHosts, findRemoteHost, remotePing, remoteDeployPlan,
          REMOTE_HOSTS_FILE } from "../lib/remote.ts"; // v0.5.18 远程 Agent 簇（#133 —— 会话/部署/计划层，与 cloud_ssh 互补）
@@ -1509,11 +1510,36 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
                 roadmap: "真 debug adapter attach（node --inspect / debugpy / lldb-dap）是路线图 —— 本计划交付协议就绪的消息序列与步骤说明",
               });
             }
+            if (action === "stack") {
+              // v0.5.23 堆栈自动分析（#107）：GET 读工作区内日志文件（file 过 pathjail）；粘贴文本走 POST。
+              const file = String(url.searchParams.get("file") ?? "").trim();
+              if (!file) return json({ ok: false, error: "file 必填（工作区相对路径；粘贴崩溃文本请走 POST action=stack）" }, 400);
+              const jailed = resolveJailedFile(rws, file);
+              if (!jailed.ok) return json({ ok: false, error: jailed.reason }, 400);
+              let text = "";
+              try {
+                text = fs.readFileSync(jailed.abs!, "utf8");
+              } catch (e) {
+                return json({ ok: false, error: `日志文件不可读：${file}（${(e as Error).message}）` }, 400);
+              }
+              const r = analyzeStackTrace(rws, text);
+              return json({
+                ok: r.ok, ...(r.reason ? { reason: r.reason } : {}),
+                language: r.language, detected_by: r.detectedBy, stats: r.stats,
+                ...(r.truncated ? { truncated: true } : {}),
+                innermost_app_frame: r.innermostAppFrame,
+                frames: r.frames.slice(0, 30), hints: r.hints,
+              });
+            }
+            if (action === "stack-selftest" || action === "stackselftest") {
+              const r = stackSelfTest();
+              return json({ ok: r.ok, passed: r.passed, total: r.total, checks: r.checks });
+            }
             if (action === "dap-selftest" || action === "selftest" || action === "dap") {
               const r = dapSelfTest();
               return json({ ok: r.ok, passed: r.passed, total: r.total, checks: r.checks });
             }
-            return json({ ok: false, error: "action 须为 suggest / plan / dap-selftest" }, 400);
+            return json({ ok: false, error: "action 须为 suggest / plan / stack / stack-selftest / dap-selftest" }, 400);
           } catch (e) {
             return json({ ok: false, error: (e as Error).message }, 400);
           }
@@ -2110,6 +2136,31 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
               return json({ ok: true, repo: target.repo, pr: r.data }); // lib 已并好 meta+diff（8KB 截断/降级 diff_note）
             }
             return json({ ok: false, error: `未知 action：${action || "（空）"}（list/get/pr_list/pr_view —— 只读四动作）` }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
+        // v0.5.23 堆栈自动分析 POST 车道（#107）：{action:"stack", text:"<崩溃输出>"} ——
+        // 粘贴文本分析（与 GET file 车道、CLI --text、工具环 args.text 四面同源
+        // lib/stacktrace.ts）。只读分析无写面，Web = 用户亲自粘贴亲自看。
+        if (route === "POST /api/govex/debug") {
+          const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+          const action = String(body.action ?? "").trim();
+          const rws = readWorkspaceOf(ws);
+          try {
+            if (action === "stack") {
+              const text = typeof body.text === "string" ? body.text : "";
+              if (!text.trim()) return json({ ok: false, error: "text 必填（崩溃输出全文 —— Traceback / at 帧 / panicked 均可）" }, 400);
+              const r = analyzeStackTrace(rws, text);
+              return json({
+                ok: r.ok, ...(r.reason ? { reason: r.reason } : {}),
+                language: r.language, detected_by: r.detectedBy, stats: r.stats,
+                ...(r.truncated ? { truncated: true } : {}),
+                innermost_app_frame: r.innermostAppFrame,
+                frames: r.frames.slice(0, 30), hints: r.hints,
+              });
+            }
+            return json({ ok: false, error: `未知 action：${action || "（空）"}（stack —— 粘贴崩溃文本分析）` }, 400);
           } catch (e) {
             return json({ ok: false, error: (e as Error).message }, 400);
           }
@@ -2808,6 +2859,7 @@ export async function webMain(argv: string[]): Promise<number> {
   console.log(`  MCP 客户端桥  GET /api/govex/mcp（v0.5.19 #122/C12：servers 档案+宿主探测/tools 工具清单/resources 资源/read 读取/prompts 提示词 —— 只读五动作；call 执行车道走 CLI/工具环）`);
   console.log(`  IaC 深度   GET /api/govex/iac（v0.5.18 #44：HCL 解析/依赖图/人读 Plan/manifest 逆向生成 + probe 五面探测；与 iacscan 扫描互补）`);
   console.log(`  工单系统   GET/POST /api/govex/tracker（v0.5.21 #86/#82：GitHub issue/PR REST 真集成 —— list/get/pr_list/pr_view 只读 + create/comment/close/reopen/pr_create 写动作；无 token 诚实指引）`);
+  console.log(`  堆栈分析   GET/POST /api/govex/debug（v0.5.23 #107：action=stack —— 四语言帧解析（TS/JS·PY·Rust·HSL）→ 符号化 → 外部分类 → 根因提示；GET file= 工作区日志 / POST text= 粘贴文本 + stack-selftest 自检）`);
   console.log(`  安全/依赖   GET /api/govex/sast · POST /api/govex/deps · GET /api/govex/retest（v0.5.22 #146/#65/#104：SAST 多引擎降级链 ruff→bandit→内置规则永远有产出；七工具探测 + 白名单安装车道；选择性重跑计划 + flaky 台账（只读））`);
   console.log(`  模型       ${p.model}（GUI 可切 scripted/deepseek，请求体可逐次覆盖）`);
   // v0.4.13：网关三件套可见性 —— 直连服务商（DeepSeek 等）的鉴权/模型/超时
@@ -3850,7 +3902,7 @@ function renderIndexHtml(): string {
   <button id="toolboxBtn" class="rchip" type="button" title="工具箱（v0.5.15）— 🗄 SQLite 查询 · 🔎 符号跳转 · 🛡 密钥扫描 · 📦 审计导出 · 📋 SBOM · 👥 评审推荐">
     <span class="rc-label">🧰 工具箱</span>
   </button>
-  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16+）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🐞 LSP/DAP 调试 · 🌿 merge/rebase · 👥 团队协作 · ☁ 云生态 · 📱 移动端调试 · ⚒ IaC深度 · 🛰 远程 Agent · 📋 工单（issue/PR）· 🛡 SAST · 📦 依赖 · 🔁 重跑">
+  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16+）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🐞 LSP/DAP 调试 · 🧵 堆栈分析 · 🌿 merge/rebase · 👥 团队协作 · ☁ 云生态 · 📱 移动端调试 · ⚒ IaC深度 · 🛰 远程 Agent · 📋 工单（issue/PR）· 🛡 SAST · 📦 依赖 · 🔁 重跑">
     <span class="rc-label">🛡 治理与扩展</span>
   </button>
   <span class="tstats" id="topStats"></span>
@@ -3990,7 +4042,7 @@ function renderIndexHtml(): string {
 <div id="govexScrim" aria-hidden="true"></div>
 <div id="govexPane" role="dialog" aria-modal="true" aria-labelledby="gxTitle">
   <div class="schhead">
-    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git · 👥 协作 · ☁ 云生态 · 📱 移动端 · ⚒ IaC深度 · 🛰 远程 · 📋 工单 · 🛡 SAST · 📦 依赖 · 🔁 重跑（v0.5.16+）</div>
+    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git · 👥 协作 · ☁ 云生态 · 📱 移动端 · ⚒ IaC深度 · 🛰 远程 · 📋 工单 · 🛡 SAST · 📦 依赖 · 🔁 重跑 · 🧵 堆栈分析（v0.5.16+）</div>
     <button class="schclose" type="button" onclick="closeGovex()" title="关闭（Esc）" aria-label="关闭治理与扩展面板">✕</button>
     <div class="tbtabs" role="tablist">
       <button class="tbtab on" id="gxTabIac" type="button" role="tab" onclick="gxTab('iac')">🛡 IaC</button>
@@ -4109,6 +4161,19 @@ function renderIndexHtml(): string {
         <button type="button" onclick="gxDebugPlan()">📋 调试计划</button>
       </div>
       <div class="tbout" id="gxDbgOut"><div class="schempty">断点/调试建议（#108）：入口/分支/循环/return 前断点建议（符号级 &gt; 启发式级，每条带 reason）+ 调试计划（步骤 + DAP 协议就绪消息序列）。真 debug adapter attach 是路线图（诚实边界）。CLI 同款 org debug suggest/plan。</div></div>
+      <div class="tbbar">
+        <button type="button" onclick="gxStackSelfTest()">🧪 堆栈分析器自检</button>
+        <span class="tbmeta">四语言帧形状 + 外部分类 + 提示命中 + 帽纪律（纯内存）</span>
+      </div>
+      <div class="tbbar">
+        <textarea id="gxStackText" rows="6" placeholder="粘贴崩溃输出（#107 堆栈自动分析）——\nTypeError: Cannot read properties of undefined (reading 'x')\n    at compute (lib/app.ts:2:12)\n或 Traceback (most recent call last): / File '…', line N, in fn / thread 'main' panicked at …" aria-label="崩溃输出粘贴"></textarea>
+      </div>
+      <div class="tbbar">
+        <button type="button" onclick="gxStackAnalyze()">🧵 分析堆栈</button>
+        <input id="gxStackFile" type="text" placeholder="或日志文件（工作区相对）" autocomplete="off" aria-label="堆栈日志文件">
+        <button type="button" onclick="gxStackAnalyzeFile()">📂 分析文件</button>
+      </div>
+      <div class="tbout" id="gxStackOut"><div class="schempty">堆栈自动分析（#107 · v0.5.23）：四语言帧解析（TS/JS·PY·Rust·HSL）→ 符号化（包围符号 ◆）→ 外部分类（node_modules/runtime/stdlib）→ 根因提示（cause + 三步行动清单）。CLI 同款 org debug stack --text。诚实边界：高频崩溃族启发式模式库，无数据流分析。</div></div>
     </section>
 
     <section class="tbsec" id="gxSecGit" hidden>
@@ -6453,6 +6518,61 @@ function gxDebugPlan() {
     h += '<div class="tbmeta" style="margin-top:6px">DAP 消息序列（协议就绪）：</div>';
     for (const m of j.dap_messages || []) h += '<div class="tbrow"><code>seq=' + m.seq + " " + esc(m.command) + "</code></div>";
     if (j.roadmap) h += '<div class="tbmeta">⚠ ' + esc(j.roadmap) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+// v0.5.23 堆栈自动分析（#107）：粘贴文本（POST）/ 日志文件（GET file）双车道 + 自检。
+function gxStackRender(j, out) {
+  if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error || j.reason || "?") + "</div>"; return; }
+  const st = j.stats || {};
+  const langLabel = { ts: "TS/JS", py: "Python", rust: "Rust", hsl: "HSL", unknown: "未知" }[j.language] || "?";
+  let h = '<div class="tbsym">🧵 ' + esc(langLabel) + "（" + esc(j.detected_by || "?") + "）—— " + (st.total ?? "?") + " 帧 = " + (st.app ?? "?") + " 用户 + " + (st.external ?? "?") + " 外部 · 符号化 " + (st.symbolicated ?? 0) + " · 文件缺失 " + (st.filesMissing ?? 0) + (j.truncated ? "（截断）" : "") + "</div>";
+  h += '<div class="tbmeta" style="margin-top:4px">帧（崩溃点最内层在前）：</div>';
+  (j.frames || []).forEach(function (f, i) {
+    const tag = f.external ? "ext" : "app";
+    const enc = f.enclosing ? ' ◆' + esc(f.enclosing.kind) + " " + esc(f.enclosing.name) + "（定义:" + f.enclosing.defLine + "）" : "";
+    const ex = f.exists === false ? " ⚠文件缺失" : "";
+    h += '<div class="tbrow"><code>' + String(i).padStart(2) + "</code> [" + tag + "] " + esc(f.fn) + " — " + esc(f.file) + ":" + (f.line ?? "?") + ":" + (f.col ?? "?") + enc + ex + (f.snippet ? '<br><span class="tbmeta">│ ' + esc(f.snippet) + "</span>" : "") + "</div>";
+  });
+  if (j.innermost_app_frame !== null && j.innermost_app_frame !== undefined) {
+    const f = (j.frames || [])[j.innermost_app_frame];
+    if (f) h += '<div class="tbrow"><b>⤢ 最内层用户帧：#' + j.innermost_app_frame + " " + esc(f.fn) + " — " + esc(f.file) + ":" + f.line + "</b></div>";
+  }
+  if (!(j.hints || []).length) {
+    h += '<div class="tbmeta" style="margin-top:6px">（无已知根因模式命中 —— 诚实面：模式库是高频崩溃族启发式）</div>';
+  } else {
+    h += '<div class="tbmeta" style="margin-top:6px">💡 根因提示（' + j.hints.length + " 条）：</div>";
+    for (const hh of j.hints || []) {
+      h += '<div class="tbrow">[' + esc(hh.severity) + "] <b>" + esc(hh.title) + "</b> (" + esc(hh.id) + ")" + ((hh.frames || []).length ? " · 关联帧 #" + hh.frames.join(" #") : "") + '<br><span class="tbmeta">因：' + esc(hh.cause) + "</span></div>";
+      (hh.checklist || []).forEach(function (c, ci) { h += '<div class="tbrow" style="padding-left:18px">' + (ci + 1) + ". " + esc(c) + "</div>"; });
+    }
+  }
+  out.innerHTML = h;
+}
+function gxStackAnalyze() {
+  const text = document.getElementById("gxStackText").value;
+  const out = document.getElementById("gxStackOut");
+  if (!text.trim()) { out.innerHTML = '<div class="schempty">先粘贴崩溃输出（TypeError / Traceback / panicked…）</div>'; return; }
+  out.innerHTML = '<div class="schempty">解析堆栈中…</div>';
+  fetch("/api/govex/debug", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "stack", text: text }) }).then(function (r) { return r.json(); }).then(function (j) {
+    gxStackRender(j, out);
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxStackAnalyzeFile() {
+  const file = document.getElementById("gxStackFile").value.trim();
+  const out = document.getElementById("gxStackOut");
+  if (!file) { out.innerHTML = '<div class="schempty">先输入日志文件（工作区相对路径）</div>'; return; }
+  out.innerHTML = '<div class="schempty">读取并解析日志中…</div>';
+  fetch("/api/govex/debug?action=stack&file=" + encodeURIComponent(file)).then(function (r) { return r.json(); }).then(function (j) {
+    gxStackRender(j, out);
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxStackSelfTest() {
+  const out = document.getElementById("gxStackOut");
+  out.innerHTML = '<div class="schempty">自检中…（纯内存）</div>';
+  fetch("/api/govex/debug?action=stack-selftest").then(function (r) { return r.json(); }).then(function (j) {
+    let h = '<div class="tbsym">🧪 ' + (j.ok ? "✓" : "✗") + " " + j.passed + "/" + j.total + " 通过</div>";
+    for (const c of j.checks || []) h += '<div class="tbrow">' + (c.ok ? "✓" : "✗") + " " + esc(c.name) + (c.detail ? ' <span class="tbmeta">' + esc(c.detail) + "</span>" : "") + "</div>";
     out.innerHTML = h;
   }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
 }

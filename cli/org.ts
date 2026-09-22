@@ -65,8 +65,9 @@ import { probeDocker, dockerRun, dockerBuild, dockerfileFor, DOCKERFILE_TYPES, c
          probeK8s, probeTerraform, k8sRun, k8sManifestFor, K8S_MANIFEST_KINDS, terraformPlan,
          probeCloudClis, cloudProvidersOverview, cloudProbeAll, DOCKER_SUBCOMMANDS, K8S_SUBCOMMANDS,
          type CloudRunResult } from "../lib/cloud.ts"; // v0.5.17 云生态统一模块（#67/#68/#72/#74）
-import { lspDefinition, lspReferences, lspHover, detectLspServers, protocolSelfTest } from "../lib/lsp.ts"; // v0.5.17 LSP/DAP 协议集成（#26）
+import { lspDefinition, lspReferences, lspHover, detectLspServers, protocolSelfTest, resolveJailedFile } from "../lib/lsp.ts"; // v0.5.17 LSP/DAP 协议集成（#26）
 import { suggestBreakpoints, debugPlan, dapSelfTest } from "../lib/debug.ts"; // v0.5.17 断点/调试建议（#108）
+import { analyzeStackTrace, stackSelfTest } from "../lib/stacktrace.ts"; // v0.5.23 堆栈自动分析（#107）
 import { latestSession } from "../lib/sessions.ts"; // v0.5.17：collab bridge 缺省会话（只读复用会话账本协议）
 import {
   probeRemote, loadRemoteHosts, saveRemoteHosts, findRemoteHost, REMOTE_HOSTS_FILE, REMOTE_HOSTS_GUIDANCE,
@@ -3369,11 +3370,80 @@ async function cmdLsp(a: Args): Promise<number> {
   return 2;
 }
 
-/** org debug [suggest|plan] <file> | dap —— 断点/调试建议（#108）。 */
+/** org debug [suggest|plan] <file> | stack [--text|file] | dap —— 断点/调试建议 + 堆栈分析（#108/#107）。 */
 async function cmdDebug(a: Args): Promise<number> {
   const positional = rawPositionals(a);
   const verb = positional[0] ?? "help";
   const ws = defaultWorkspace(a);
+  if (verb === "stack") {
+    // v0.5.23 堆栈自动分析（#107）：--text 粘贴 / 位置参数指向日志文件 / --self-test
+    // 旗标从 a.rest 提取（parseArgs 只认全局旗标；未知 token 全落 rest —— 値形态兼容）
+    let json = false;
+    let selfTest = false;
+    let text = "";
+    const files: string[] = [];
+    for (let i = 1; i < a.rest.length; i++) { // rest[0] = "stack"
+      const t = a.rest[i]!;
+      if (t === "--json") json = true;
+      else if (t === "--self-test" || t === "--selftest") selfTest = true;
+      else if (t === "--text") text = a.rest[++i] ?? "";
+      else if (t.startsWith("--text=")) text = t.slice("--text=".length);
+      else if (t.startsWith("--")) { /* 未知旗标跳过（值形态在 parseArgs 已吞或后续显式解析） */ }
+      else files.push(t);
+    }
+    if (selfTest) {
+      const r = stackSelfTest();
+      console.log("🧪 堆栈分析器自检（四语言帧形状 + 外部分类 + 提示命中 + 帽纪律）");
+      for (const c of r.checks) console.log(`  ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? `（${c.detail}）` : ""}`);
+      console.log(`\n  ${r.passed}/${r.total} 通过`);
+      return r.ok ? 0 : 1;
+    }
+    let fromFile = "";
+    if (!text && files.length > 0) fromFile = files[0]!;
+    if (!text && !fromFile) {
+      console.error("用法：org debug stack --text \"<崩溃输出>\" | <日志文件> [--workspace DIR] [--json] [--self-test]");
+      console.error("  四语言帧解析（TS/JS·PY·Rust·HSL）→ 符号化 → 外部分类 → 根因提示（cause + 三步清单）");
+      return 2;
+    }
+    if (fromFile) {
+      const jailed = resolveJailedFile(ws, fromFile);
+      if (!jailed.ok) { console.error(`✗ ${jailed.reason}`); return 1; }
+      try {
+        text = fs.readFileSync(jailed.abs!, "utf8");
+      } catch (e) {
+        console.error(`✗ 日志文件不可读：${fromFile}（${(e as Error).message}）`);
+        return 1;
+      }
+    }
+    const r = analyzeStackTrace(ws, text);
+    if (json) {
+      console.log(JSON.stringify(r, null, 2));
+      return r.ok ? 0 : 1;
+    }
+    if (!r.ok) { console.error(`✗ ${r.reason}`); return 1; }
+    const langLabel = { ts: "TS/JS", py: "Python", rust: "Rust", hsl: "HSL", unknown: "未知" }[r.language]!;
+    console.log(`🧵 堆栈分析（${langLabel} · ${r.detectedBy}）—— ${r.stats.total} 帧 = ${r.stats.app} 用户 + ${r.stats.external} 外部 · 符号化 ${r.stats.symbolicated} · 文件缺失 ${r.stats.filesMissing}${r.truncated ? "（截断至 60）" : ""}`);
+    console.log("  帧（→ 崩溃点最内层在前）：");
+    r.frames.forEach((f, i) => {
+      const tag = f.external ? "ext" : r.appFrames.includes(i) ? "app" : "  ";
+      const enc = f.enclosing ? ` ◆${f.enclosing.kind} ${f.enclosing.name}（定义:${f.enclosing.defLine}）` : "";
+      const ex = f.exists === false ? " ⚠文件缺失" : "";
+      console.log(`  ${String(i).padStart(2)} [${tag}] ${f.fn} — ${f.file}:${f.line ?? "?"}:${f.col ?? "?"}${enc}${ex}`);
+      if (f.snippet) console.log(`        │ ${f.snippet}`);
+    });
+    if (r.innermostAppFrame !== null) console.log(`\n  ⤢ 最内层用户帧：#${r.innermostAppFrame} ${r.frames[r.innermostAppFrame]!.fn} — ${r.frames[r.innermostAppFrame]!.file}:${r.frames[r.innermostAppFrame]!.line}`);
+    if (r.hints.length === 0) {
+      console.log("\n  （无已知根因模式命中 —— 诚实面：模式库是高频崩溃族启发式，见文件头诚实边界）");
+    } else {
+      console.log(`\n  💡 根因提示（${r.hints.length} 条 · 按库序）：`);
+      for (const h of r.hints) {
+        console.log(`  [${h.severity}] ${h.title} (${h.id})${h.frames.length > 0 ? ` · 关联帧 #${h.frames.join(" #")}` : ""}`);
+        console.log(`      因：${h.cause}`);
+        h.checklist.forEach((c, ci) => console.log(`      ${ci + 1}. ${c}`));
+      }
+    }
+    return 0;
+  }
   if (verb === "suggest" || verb === "plan") {
     const file = positional[1];
     if (!file) {
@@ -3408,8 +3478,8 @@ async function cmdDebug(a: Args): Promise<number> {
     console.log(`\n  ${r.passed}/${r.total} 通过`);
     return r.ok ? 0 : 1;
   }
-  console.error("用法：org debug suggest <文件> | plan <文件> | dap [--self-test]（breakpoints 是 debug 的别名）");
-  console.error("  断点建议器（符号索引 + 源码行扫描）+ 调试计划（步骤说明 + DAP 协议就绪消息序列）");
+  console.error("用法：org debug suggest <文件> | plan <文件> | stack (--text \"崩溃输出\" | 日志文件) | dap [--self-test]（breakpoints 是 debug 的别名）");
+  console.error("  断点建议器 + 调试计划 + 堆栈自动分析（四语言解析 → 符号化 → 根因提示）");
   return 2;
 }
 
@@ -4866,10 +4936,13 @@ export async function orgMain(): Promise<number> {
       共用 · 粘包/半包/CJK 字节精确）+ 内置符号索引车道（无外部 server
       时的主车道）+ spawn 车道（initialize→initialized→shutdown→exit）；
       servers 探测外部语言服务器（缺席诚实降级）· protocol 协议层自检
-  org debug [suggest|plan] <文件> | dap
+  org debug [suggest|plan] <文件> | stack --text "崩溃输出" | dap
       断点/调试建议（v0.5.17 · #108）：入口/分支/循环/return 前断点建议
       （符号级 > 启发式级，每条带 reason）+ 调试计划（步骤 + DAP 协议
       就绪消息序列）；真 debug adapter attach 是路线图（诚实边界）
+      堆栈自动分析（v0.5.23 · #107）：四语言帧解析（TS/JS·PY·Rust·HSL）
+      → 符号化（包围符号 ◆）→ 外部分类（node_modules/runtime/stdlib）
+      → 根因提示（cause + 三步行动清单，模式库启发式如实分级）
   org collab [whoami|user|threads|feed|post|comment|users|summary|bridge]
       团队协作（v0.5.17 · #87）：append-only JSONL 团队线程 + 回复树 +
       @mention 自动抽取 + 会话账本桥（单用户账本 → 团队可见，只镜像不

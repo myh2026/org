@@ -1,5 +1,51 @@
 # CHANGELOG
 
+## v0.5.23（2026-09-22）—— 堆栈自动分析（#107 🟡→✅：✅127/150）
+
+「粘贴一段崩溃输出 → 拿回结构化诊断」：粘贴/日志文件 → 四语言帧解析 →
+符号化 → 外部分类 → 根因提示（cause + 三步行动清单）。#107 的 🟡 半面
+（「HSL_DEBUG stack 透传；自动分析未做」）补全为完整分析器。
+
+- **lib/stacktrace.ts**（新模块，约 700 行）：
+  - **帧解析四语言**：TS/JS `at fn (file:line:col)` 三形态（含 async）·
+    PY `File "…", line N, in fn` · Rust `panicked at` 主位帧（panic! 补第 0
+    帧）+ backtrace `at` 行 · HSL `at file.hsl:l:c` 泛形；重复帧去重（递归
+    栈常见）。
+  - **帧富化**：外部分类（node_modules/node:internal/bun:/site-packages/
+    ~/.cargo/… 21 特征 → external:true，保留上下文不入 appFrames）· 工作区
+    文件存在性（exists —— 栈指向已删文件诚实暴露）· 源码行原文（snippet，
+    越界路径不读盘 —— jail 铁律）· **包围符号**（同文件最近「函数类作用域」
+    fn/graph/class/impl —— 实测教训：`const v = …` 局部变量会误报包围，
+    非作用域符号不作候选）。
+  - **根因提示库 18 基因四生态**：JS（null-deref / call-non-fn / undefined-ref）·
+    fs（ENOENT / EACCES）· net（ECONNREFUSED/ETIMEDOUT）· SyntaxError ·
+    PY（KeyError / IndexError / ModuleNotFoundError / NoneType / RecursionError）·
+    Rust（unwrap 落空 —— 反引号形态实测修正 / index / overflow）· HSL
+    （S-19 未知方法 / S 族类型不匹配）；每条 cause + 3 步行动清单 +
+    severity 分级（high/medium/low 如实）+ 关联帧（帧 raw 命中 → 无命中
+    回落最内层用户帧）。
+  - **帽纪律**：帧 60 截断（truncated 诚实标注）· 输入 64KB 上限 · 重复帧
+    去重；空输入 / 无帧文本 → ok:false + 诚实 reason（不臆造帧）。
+  - `stackSelfTest()` 纯内存自检 9 项（与 dapSelfTest 同款协议）。
+- **CLI**：`org debug stack --text "<崩溃输出>" | <日志文件> [--json]
+  [--self-test]`（--text= 等号形态兼容）；帧表渲染 [app/ext] 标签 +
+  ◆包围符号 + ⚠文件缺失 + 源码行 + 💡提示（severity + checklist 三步）。
+- **工具环** +1：`stack_analyze`（text/file 双形态；file 过 pathjail 越界
+  即拒；只读例外清单 —— ReadOnly 模式可用）+ result_summary 观测摘要
+  （语言/帧数=用户+外部/符号化/top 帧/提示 id）。
+- **Web 🧵 堆栈分析面板**（🛡 治理与扩展 · 🐞 LSP/DAP Tab 内）：粘贴
+  textarea（POST /api/govex/debug action=stack）+ 日志文件条（GET
+  ?action=stack&file=）+ 自检按钮（stack-selftest）+ 帧表/提示渲染；
+  GET/POST/自检四车道与 CLI/工具环同源 lib/stacktrace.ts（单一实现三端
+  消费）。
+- **tests/stacktrace.test.ts 28 例**：纯函数 22（四语言帧族 + 外部分类 +
+  符号化 + 提示库四生态家族 + 帽/去重/诚实边界/jail）+ stackSelfTest 1 +
+  CLI 5（--text/文件/--json/--self-test/用法与越界）+ Web 1（GET+POST+
+  自检+错误传播+面板要素+整页脚本与本簇 4 函数独立可解析守卫）+ 工具环
+  e2e 3（text 形态可观测 + file 形态 + jail/参数校验）。
+- 主表 **✅127/150 · 🟡23 · ⬜0**（#107 🟡→✅）；测试 1363 → **1391**；
+  package.json 0.5.22 → 0.5.23。
+
 ## v0.5.22（2026-09-22）—— 工单系统 + 能力批 B + 派生决策器 + 语义地板（✅126/150）
 
 跨 v0.5.20.2 → v0.5.22 五批合流（漂移治理 → 真实车道 bugfix 四连 → GitHub 工单
