@@ -264,6 +264,8 @@
 | E24 成本限额/多模型 | ✅ | 预算水位 + 21 车道 + key 池轮换 |
 | E25 评测/配置管理 | ✅ | 评分卡归因 + org config v3 |
 
+> v0.5.22 派生决策器（#129 多 Agent 协作深化 ——「该不该派」显式化）：lib/spawn-decision.ts 单一实现三端消费 —— decideSpawn 纯函数四态决策（**deny** 深度/预算红线（拒绝即终态）> **self** 亲力亲为（琐碎任务 <4 词元零多步信号 · 可替代只读工具 fs_read/fs_list/db_query/semantic_search —— 杀鸡不用牛刀）> **reuse** 池化命中（相似度 ≥ 地板零成本）> **spawn** 真派生（多步信号/规模/无自答路径）），信号归因（词元数/多步信号/工具替代/池相似度）+ 人读理由全程可解释。接线：agent_spawn 内嵌（self 默认机械拦截 + args.force=true 归还模型显式判断权，deny 红线不可 force）+ spawn_decision 事件上总线（可观测）+ 工具环 spawn_decide（只读——模型派生前先问）+ CLI `org spawn-decide --goal …`（四态演示）+ Web GET /api/govex/spawn-decide；tests/spawndecide 17 例（四态定标/内嵌拦截 e2e/force 覆盖 e2e/CLI/Web）。主 Agent 与子智能体递归同构：每一层派生前都过同一决策器（用户要求「他们要自己去决定什么时候该派」的机械落地）。
+
 **统计（v0.5.22 能力批 B 后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 126 · 🟡 24 · ⬜ 0；专家 25 项 → ✅ 25 · 🟡 0 · ⬜ 0。（v0.5.20.2：#88 🟡→✅ collab+RBAC 合围实态；vendored 0.2.66→0.2.68。v0.5.21：#86+#82 双 🟡→✅ GitHub REST 真集成 + B-23/24/25 三 bugfix + vendored 0.2.69/0.2.70。v0.5.22：#146 SAST + #65 依赖管理 + #104 选择性重跑 三 🟡→✅ —— SAST 多引擎降级链 ruff→bandit→内置规则永远有产出 · 七工具探测+白名单安装车道 · flaky 台账+三选择器。）
 
 > v0.5.19 MCP 客户端桥（#122 主表 🟡→✅ + 专家表 C12 🟡→✅ —— **专家矩阵 25/25 满贯**）：

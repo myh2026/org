@@ -309,6 +309,7 @@ export fn tools_prompt(mode: ToolMode) -> String {
     out.push_str("- issue_get {\"repo\":\"owner/repo\",\"number\":51} — read one issue with body (read-only).\n");
     out.push_str("- pr_list {\"repo\":\"owner/repo\",\"state\":\"open\"} — list pull requests (read-only).\n");
     out.push_str("- pr_view {\"repo\":\"owner/repo\",\"number\":12} — PR detail with truncated diff (read-only).\n");
+    out.push_str("- spawn_decide {\"goal\":\"…\"} — ask BEFORE agent_spawn: returns decision (spawn/self/reuse/deny) + reason + signals. self = do it yourself with read tools (cheaper); reuse = spawn pool hit; deny = governance. If you still judge spawning necessary after a self verdict, pass force:true to agent_spawn.\n");
     // v0.5.22 能力批 B（#146 SAST + #65 依赖 + #104 重跑 —— 只读三件，零审批门槛）
     out.push_str("- sast_scan {\"targets\":[\"src/**\"]?} — SAST static security scan over the workspace (multi-engine degrade chain: ruff --select S → bandit → built-in regex rules — always produces output; gitleaks secrets cross-cut lane when present; py/ts both covered). Read-only.\n");
     out.push_str("- deps_probe {} — dependency toolchain probe (uv/pip/poetry/bun/npm/pnpm/cargo: which + version + install hints; plus workspace manifest auto-detect package.json / pyproject.toml / Cargo.toml). Read-only.\n");
@@ -542,7 +543,10 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         // v0.5.22：能力批 B 只读三件（sast_scan 扫描只读零写；deps_probe 探测
         // 零副作用；retest_plan 只生成计划不执行 —— 真跑走 CLI org retest run）
         && name != String::from("sast_scan") && name != String::from("deps_probe")
-        && name != String::from("retest_plan") {
+        && name != String::from("retest_plan")
+        // v0.5.22：派生决策器只读（纯函数评估零副作用；deny/self/reuse/spawn
+        // 四态可解释 —— 与 agent_spawn 内嵌决策同源）
+        && name != String::from("spawn_decide") {
         let approved = gate_write(policy, gate_cap, name.clone(), args.clone()).await;
         if approved == String::from("denied") {
             emit_tool(String::from("tool_denied"), format!("{} {}", name, "capability denied"));
@@ -639,12 +643,14 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "pr_list" => tool_pr_list(args.clone()),
         "pr_view" => tool_pr_view(args.clone()),
         "pr_create" => tool_pr_create(args.clone()),
+        // v0.5.22 派生决策器（只读 —— 模型派生前先问「该不该派」）
+        "spawn_decide" => tool_spawn_decide(args.clone()),
         // v0.5.22 能力批 B（#146 SAST + #65 依赖管理 + #104 选择性重跑）
         "sast_scan" => tool_sast_scan(args.clone()),
         "deps_probe" => tool_deps_probe(args.clone()),
         "deps_install" => tool_deps_install(args.clone()),
         "retest_plan" => tool_retest_plan(args.clone()),
-        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/iac_parse/iac_plan/iac_graph/iac_generate/mobile_devices/mobile_logcat/mobile_plan/mcp_servers/mcp_tools/mcp_call_tool/devtools_probe/devtools_console/devtools_network/devtools_interact/mcp_sessions/shell_run/agent_spawn/audio_compose/audit_export/review_suggest/issue_list/issue_get/issue_create/issue_comment/issue_close/pr_list/pr_view/pr_create/sast_scan/deps_probe/deps_install/retest_plan）", name)),
+        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/iac_parse/iac_plan/iac_graph/iac_generate/mobile_devices/mobile_logcat/mobile_plan/mcp_servers/mcp_tools/mcp_call_tool/devtools_probe/devtools_console/devtools_network/devtools_interact/mcp_sessions/shell_run/agent_spawn/audio_compose/audit_export/review_suggest/issue_list/issue_get/issue_create/issue_comment/issue_close/pr_list/pr_view/pr_create/sast_scan/deps_probe/deps_install/retest_plan/spawn_decide）", name)),
     };
     emit_tool(String::from("tool_result"), result_summary(result.clone()));
     result
@@ -2508,6 +2514,41 @@ fn tool_mcp_sessions(args: String) -> String {
 
 
 // ----------------------------------------------------------------------------
+// v0.5.22 派生决策器工具（spawn_decide 只读）：模型派生前先问「该不该派」——
+// 四态决策（deny/self/reuse/spawn）+ 信号归因 + 理由，与 agent_spawn 内嵌
+// 决策同源（lib/spawn-decision.ts 单一实现）。
+// ----------------------------------------------------------------------------
+
+fn tool_spawn_decide(args: String) -> String {
+    native typescript {
+        try {
+            const a = JSON.parse(args);
+            const goal = String(a.goal || "");
+            if (!goal) return JSON.stringify({ tool: "spawn_decide", ok: false, error: "args.goal 必填（要评估的任务描述）" });
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "spawn_decide", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const sd = await import(root + "/lib/spawn-decision.ts");
+            const depth = Number($host.env.get("ORG_SPAWN_DEPTH") || "0") || 0;
+            const maxD = Number($host.env.get("ORG_SPAWN_MAX") || "2");
+            const budgetRaw = String($host.env.get("ORG_SPAWN_BUDGET") || "").trim().toLowerCase();
+            const budgetOff = budgetRaw === "off" || budgetRaw === "unlimited" || budgetRaw === "-1";
+            const budget = budgetOff ? -1 : (budgetRaw === "" ? 100 : Math.floor(Number(budgetRaw)));
+            const decayRaw = Number($host.env.get("ORG_SPAWN_DECAY"));
+            const decay = Math.min(1, Math.max(0.01, Number.isFinite(decayRaw) && decayRaw > 0 ? decayRaw : 0.5));
+            let poolGoals = [];
+            try {
+                const pj = JSON.parse($host.fs.read("spawn/pool.json"));
+                if (pj && Array.isArray(pj.records)) poolGoals = pj.records.filter((r) => r && r.ok === true).map((r) => ({ goal: String(r.goal || ""), id: String(r.id || "") }));
+            } catch (e) { /* 池缺席 */ }
+            const dec = sd.decideSpawn({ goal, depth, maxDepth: maxD, budget, decay, poolGoals });
+            return JSON.stringify({ tool: "spawn_decide", ok: true, decision: dec.decision, reason: dec.reason, signals: dec.signals, ...(dec.suggestedTool ? { suggested_tool: dec.suggestedTool } : {}), ...(dec.childBudget !== undefined ? { child_budget: dec.childBudget } : {}) });
+        } catch (e) {
+            return JSON.stringify({ tool: "spawn_decide", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
 // v0.5.21 工单系统（#86 Issue/工单集成 + #82 PR/MR —— GitHub REST 真集成）
 // lib/tracker.ts 单一实现三端消费；issue_list/issue_get/pr_list/pr_view 只读，
 // issue_create/issue_comment/issue_close/pr_create 写动作
@@ -3150,6 +3191,45 @@ async fn tool_agent_spawn(args: String) -> String {
                 let hy = 0; for (const t of ty) if (sx.has(t)) hy++;
                 return Math.max(hx / tx.length, hy / ty.length);
             };
+            // ---- v0.5.22 派生决策器（"该不该派"显式化：self 机械拦截 + 可观测） ----
+            // 四态 deny（深度/预算门已处理）> self（亲力亲为）> reuse（池）> spawn。
+            // self 态默认拦截并给出替代工具建议；args.force=true 尊重模型显式
+            // 判断放行（deny 不可 force —— 治理红线）。决策落 spawn_decision 事件。
+            const decRoot = root; // 上面已解析
+            let spawnDecide = null;
+            try {
+                spawnDecide = await import(decRoot + "/lib/spawn-decision.ts");
+            } catch (e) { /* 决策器缺席：降级为无决策（老行为），派生不受阻 */ }
+            if (spawnDecide) {
+                let poolGoals = [];
+                try {
+                    const pj = JSON.parse($host.fs.read(POOL_PATH));
+                    if (pj && Array.isArray(pj.records)) {
+                        poolGoals = pj.records.filter((r) => r && r.ok === true).map((r) => ({ goal: String(r.goal || ""), id: String(r.id || "") }));
+                    }
+                } catch (e) { /* 池缺席：空池 */ }
+                const dec = spawnDecide.decideSpawn({
+                    goal: goal,
+                    depth: depth,
+                    maxDepth: maxD,
+                    budget: budgetOff ? -1 : budget,
+                    decay: decay,
+                    poolGoals: poolGoals,
+                });
+                try { $host.events.emit("journal", { name: "spawn_decision", detail: String(dec.decision) + " " + String(dec.reason) }); } catch (e) { /* 事件面降级不阻断决策 */ }
+                if (dec.decision === "self" && a.force !== true) {
+                    return JSON.stringify({
+                        tool: "agent_spawn", ok: false, decision: "self", denied: true,
+                        reason: dec.reason, suggested_tool: dec.suggestedTool || null,
+                        signals: dec.signals,
+                        note: "决策器：此任务亲力亲为更优。直接调 " + (dec.suggestedTool || "只读工具") + " 或自行完成；确需派生传 args.force=true（深度/预算红线仍不可越过）。",
+                    });
+                }
+                if (dec.decision === "self" && a.force === true) {
+                    try { $host.events.emit("journal", { name: "spawn_decision", detail: "force_overridden self —— 模型显式判断需要派生（治理红线之外的判断权归还模型）" }); } catch (e) { /* 同上 */ }
+                }
+            }
+
             if (!forceFresh) {
                 const pool = loadPool();
                 let best = null, bestScore = 0;

@@ -120,6 +120,7 @@ import {
   resolveTrackerTarget, issueList, issueGet, issueCreate, issueComment, issueSetState,
   prList, prView, prCreate, trackerGuidance, maskToken,
 } from "../lib/tracker.ts"; // v0.5.21 工单系统（#86 Issue 集成 + #82 PR/MR）
+import { decideSpawn, tokenizeGoal, goalOverlap } from "../lib/spawn-decision.ts"; // v0.5.22 派生决策器（该不该派显式化）
 import { scanSast, probeSastEngines, SAST_RULES, sastGuidance } from "../lib/sast.ts"; // v0.5.22 SAST（#146）
 import { probeDepsTools, parseDepsManifest, depsInstall, depsGuidance } from "../lib/deps.ts"; // v0.5.22 依赖管理面（#65）
 import {
@@ -2788,6 +2789,44 @@ async function cmdRename(a: Args): Promise<number> {
 // 端点：ORG_GH_API env > org config set gh_api > api.github.com（GHE 兼容）。
 // 写动作（create/comment/close/pr create）在工具环走审批；CLI 是用户亲自
 // 执行（与 org config set 同治理档）。
+
+// ---- v0.5.22 派生决策器（spawn-decide）：「该不该派」显式化 --------------------
+// 四态 deny（深度/预算红线）> self（亲力亲为：琐碎/可替代工具）> reuse（池化
+// 命中）> spawn（多步信号/复杂度）。与 agent_spawn 内嵌决策同源
+// （lib/spawn-decision.ts 单一实现三端消费 —— CLI 演示/调试面）。
+async function cmdSpawnDecide(a: Args): Promise<number> {
+  const goal = restFlag(a, "goal") ?? a.rest.slice(1).filter((t) => !t.startsWith("--")).join(" ") ?? "";
+  if (!goal.trim()) {
+    console.error("用法：org spawn-decide --goal \"要评估的任务描述\" [--depth N] [--max N] [--budget N]");
+    console.error("  输出四态决策（spawn/self/reuse/deny）+ 信号归因 + 理由（只读演示，不执行派生）");
+    return 2;
+  }
+  const ws = a.workspace;
+  const poolPath = path.join(ws, "spawn/pool.json");
+  let poolGoals: { goal: string; id: string }[] = [];
+  try {
+    const pool = JSON.parse(fs.readFileSync(poolPath, "utf-8")) as { records?: { ok?: boolean; goal?: string; id?: string }[] };
+    poolGoals = (pool.records ?? []).filter((r) => r.ok === true).map((r) => ({ goal: String(r.goal ?? ""), id: String(r.id ?? "") }));
+  } catch {
+    // 池缺席：空池（诚实降级）
+  }
+  const dec = decideSpawn({
+    goal,
+    depth: restFlag(a, "depth") ? Number(restFlag(a, "depth")) : 0,
+    maxDepth: restFlag(a, "max") ? Number(restFlag(a, "max")) : 2,
+    budget: restFlag(a, "budget") ? Number(restFlag(a, "budget")) : 100,
+    decay: 0.5,
+    poolGoals,
+  });
+  const mark = dec.decision === "spawn" ? "🚀" : dec.decision === "reuse" ? "♻️" : dec.decision === "self" ? "🤚" : "⛔";
+  console.log(`${mark} 决策：${dec.decision.toUpperCase()}`);
+  console.log(`  理由：${dec.reason}`);
+  if (dec.suggestedTool) console.log(`  建议工具：${dec.suggestedTool}`);
+  if (dec.childBudget !== undefined) console.log(`  子预算：${dec.childBudget === -1 ? "off（治理关闭）" : dec.childBudget + " 份"}`);
+  console.log(`  信号归因：词元 ${dec.signals.tokenCount} · 多步 [${dec.signals.multiStepSignals.join("·") || "无"}] · 工具替代 ${dec.signals.toolSubstitute ?? "无"} · 池相似度 ${dec.signals.poolBestSimilarity}`);
+  return 0;
+}
+
 async function cmdIssue(a: Args): Promise<number> {
   const verb = a.rest[0] ?? "";
   const VALUE_FLAGS = new Set(["repo", "state", "limit", "title", "body", "labels"]);
@@ -4650,6 +4689,8 @@ export async function orgMain(): Promise<number> {
     // v0.5.21 工单系统（capabilities #86 Issue/工单集成 + #82 PR/MR —— GitHub 真集成）
     case "issue": case "issues": return cmdIssue(a);
     case "pr": case "prs": case "pull": return cmdPr(a);
+    // v0.5.22 派生决策器（「该不该派」显式化 —— 与 agent_spawn 内嵌决策同源）
+    case "spawn-decide": case "spawndecide": return cmdSpawnDecide(a);
     // v0.5.22 能力批 B（#146 SAST + #65 依赖管理 + #104 选择性重跑）
     case "sast": return cmdSast(a);
     case "deps": case "dep": return cmdDeps(a);

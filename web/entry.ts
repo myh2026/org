@@ -183,6 +183,7 @@ import {
 import { scanSast, probeSastEngines, SAST_RULES } from "../lib/sast.ts"; // v0.5.22 SAST（#146 —— Web 是第三端）
 import { probeDepsTools, parseDepsManifest, depsInstall } from "../lib/deps.ts"; // v0.5.22 依赖管理面（#65 —— Web 是第三端）
 import { retestPlan, flakySummary, discoverTestFiles } from "../lib/retest.ts"; // v0.5.22 选择性重跑 / flaky 台账（#104 —— Web 是第三端）
+import { decideSpawn } from "../lib/spawn-decision.ts"; // v0.5.22 派生决策器（「该不该派」显式化 —— Web 是第三端）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
 
@@ -2231,6 +2232,34 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
           } catch (e) {
             return json({ ok: false, error: (e as Error).message }, 400);
           }
+        }
+        // ---- v0.5.22 派生决策器（GET /api/govex/spawn-decide —— 只读四态决策） ----
+        // 参数：goal（必填）· depth/max/budget/decay（可选治理参数，缺省与
+        // agent_spawn 同源：0/2/100/0.5）。工作区池参与 reuse 判定。
+        if (route === "GET /api/govex/spawn-decide") {
+            const goal = String(url.searchParams.get("goal") || "").trim();
+            if (!goal) return json({ ok: false, error: "goal 必填（要评估的任务描述）" }, 400);
+            const wsRel = readWorkspaceOf(ws);
+            let poolGoals: { goal: string; id: string }[] = [];
+            try {
+                const pool = JSON.parse(fs.readFileSync(path.join(wsRel, "spawn/pool.json"), "utf-8")) as { records?: { ok?: boolean; goal?: string; id?: string }[] };
+                poolGoals = (pool.records ?? []).filter((r) => r.ok === true).map((r) => ({ goal: String(r.goal ?? ""), id: String(r.id ?? "") }));
+            } catch { /* 池缺席：空池（诚实降级） */ }
+            const num = (k: string, dflt: number) => {
+                const raw = url.searchParams.get(k);
+                if (raw === null || raw.trim() === "") return dflt; // 缺席走缺省（Number(null)=0 会误伤 max）
+                const v = Number(raw);
+                return Number.isFinite(v) && v >= 0 ? v : dflt;
+            };
+            const dec = decideSpawn({
+                goal,
+                depth: num("depth", 0),
+                maxDepth: num("max", 2),
+                budget: num("budget", 100),
+                decay: 0.5,
+                poolGoals,
+            });
+            return json({ ok: true, decision: dec.decision, reason: dec.reason, signals: dec.signals, ...(dec.suggestedTool ? { suggested_tool: dec.suggestedTool } : {}), ...(dec.childBudget !== undefined ? { child_budget: dec.childBudget } : {}) });
         }
         if (route === "GET /api/govex/retest") {
           const rws = readWorkspaceOf(ws);
