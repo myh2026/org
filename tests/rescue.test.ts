@@ -93,6 +93,28 @@ describe("v0.5.10 R2 救援专家评分", () => {
     expect(rescueExpertOf("quantum braiding simulation", ws)).toBeNull();
   });
 
+  // ---- B-26（v0.5.22）：长任务尺度三处回归 -----------------------------------
+  // 实测踩坑（org task submit · model=deepseek）：「写诗+作曲+汇总」42 词元
+  // 长任务被 STOCK 公告流水线答非所问（189s · model_calls=0 · 零作品）。
+  // 三处修复的回归锚：stockAffinity 命中护持规模边界 + 救援地板 √(12/N) 自适应。
+
+  test("B-26 长任务不再被 hit≥2 护持误抬（40+ 词元命中两个通用动词 → 域外）", () => {
+    // 修复前：hit=2（保存/生成/汇总）触发 max 护持 → 0.05 被抬到 0.15 →
+    // 恰好不小于地板 → 长驱直入 STOCK 流水线
+    const t = "写一首关于量子计算的五言绝句并保存为 poem.md，然后用 audio_compose 创作一段 30 秒的量子主题 ambient 音乐，最后生成 summary.md 汇总两个作品";
+    expect(stockAffinityOf(t, STOCK)).toBeLessThan(0.15);
+  });
+
+  test("B-26 长任务救援命中（地板 √(12/N) 自适应 → composer）", () => {
+    // 修复前：bard direct 0.104 < 0.15 漏判 → 零消耗降级拒可服务任务
+    const ws = makeWorkspace("rescue-b26-long");
+    const pick = rescueExpertOf("写一首关于量子计算的五言绝句并保存为 poem.md，然后用 audio_compose 创作一段 30 秒的量子主题 ambient 音乐，最后生成 summary.md 汇总两个作品", ws);
+    expect(pick).not.toBeNull();
+    expect(["composer", "bard"]).toContain(pick!.expert);
+    // 短任务地板不变（0.15 原行为 —— 12 词元内不缩放）
+    expect(rescueExpertOf("quantum braiding simulation", ws)).toBeNull();
+  });
+
   test("无 direct: 轨道的专家不可救援（防 FIXTURE_EXHAUSTED）", () => {
     const ws = makeWorkspace("rescue-pick-notrack");
     // 注册一个 description 高度相关但 fixture 无 direct: 轨道的专家
