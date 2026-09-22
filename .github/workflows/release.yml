@@ -24,6 +24,15 @@ jobs:
       - name: HSL 工具链就位（vendored 优先）
         run: bun scripts/setup-hsl.ts
 
+      # B-28：sast.test.ts 断言 ruff 在场（CI 契约：凡跑 bun test 的 job 均装
+      # ruff）—— release verify 与 ci verify 同套门槛却漏装，v0.5.22 tag 发布
+      # 因此假红（binaries/publish 连锁 skip）。与 ci.yml 步骤同源。
+      - name: 安装 uv + ruff（python 工具链）
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          ~/.local/bin/uv tool install ruff
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: 发布前校验（check + test + tui:smoke + demo 冒烟）
         run: |
           bun cli/org.ts check

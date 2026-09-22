@@ -1,5 +1,83 @@
 # CHANGELOG
 
+## v0.5.22（2026-09-22）—— 工单系统 + 能力批 B + 派生决策器 + 语义地板（✅126/150）
+
+跨 v0.5.20.2 → v0.5.22 五批合流（漂移治理 → 真实车道 bugfix 四连 → GitHub 工单
+三端 → SAST/依赖/重试三能力 → 「该不该派」决策器 → 任务队列语义地板），
+外加发布基建追修 B-27/B-28（v0.5.22 tag 首发即红的根因）。
+
+**漂移治理（v0.5.20.2 · 6c6ff2d）**
+- vendored dhv-ts 0.2.66→0.2.68 同步（漂移守卫 check-vendored-fresh exit 1→0，
+  解 org #20/#21 CI 必红）；S-19 负例口径升级（probe10-negative 升级为拦截对照面）；
+  #88 行文修正（collab+RBAC 合围实态，主表 120/30→121/29）；B-20~22 台账补录；
+  双 main 分叉收束（dist 冲突恒取远端新侧）。
+
+**真实车道 bugfix 四连（全部实测驱动）**
+- **B-23（f4d9d5f）工具环解析器第 4 形态**：deepseek 原生 DSML XML 工具调用
+  （模型吐 `<｜｜DSML｜｜ invoke>` 标签被当纯文本、零工具执行）—— 修复后
+  真实车道 music.wav 23.54s 渲染成功。
+- **B-24（99386cf）推理型模型预算适配**：vendored dhv-ts v0.2.69 同步（观测记忆
+  llmReasoningFloor + 空补全升档重试 cap 32768）+ org 侧 gateway.test.ts +3 例；
+  deepseek-flash 真实车道复验成功（修复前 empty completion 硬错误）。
+- **B-25（df7d0cb）测试环境隔离铁律**：helpers 注入 ORG_CONFIG 隔离层 + 清空真实
+  车道三件套 —— audio e2e 4 fail（195s 外联）→ 29 pass（6.55s 确定性），
+  用户真实 ~/.org/config.json 不再劫持 scripted 测试。
+- **B-26（73991b2 + 449a3c7）任务队列语义地板三处**（实测长任务被 STOCK 流水线
+  答非所问 71s/189s model_calls=0）：地板条件扩全模型 · hit≥2 护持加 ≤12 词元
+  边界（0.15→0.042）· 救援地板 √(12/N) 自适应 —— 端到端复验 135.4s deepseek
+  真实执行 music.wav 落盘；rescue 15→17 例。
+
+**工单系统（v0.5.21 · c8b7aba + v0.5.21.1 · a407c80；#86+#82 🟡→✅）**
+- **lib/tracker.ts**（新模块）：GitHub REST v3 真集成（token 模式，gh CLI 不依赖）；
+  鉴权链 env(ORG_GH_TOKEN) > config.gh_token > GH_TOKEN/GITHUB_TOKEN；API base
+  ORG_GH_API > config.gh_api > api.github.com（GHE 兼容）；八动作
+  （issue list/get/create/comment/close/reopen + pr list/view/create）；token 脱敏
+  回显；AbortController 15s；仓库形严格校验防 path 注入。
+- 三端消费：CLI `org issue <八动作>` / `org pr <四动作>` · 工具环 8 工具（写动作
+  走 file_write 门 + 审批在环）· Web 📋 工单面板（第 16 Tab，GET/POST
+  /api/govex/tracker 只读四 + 写五式）。
+- v0.5.21.1 同批：vendored dhv-ts 0.2.70 同步（上游 HSL ML 语料批次——感知器+
+  KNN 数字识别四路径对拍 + f64 const 字面量 emit bug 修复）。
+- tests/tracker.test.ts 20 例（mock 网关实录 + 无 token 诚实降级 + 面板要素 +
+  12 前端函数可解析守卫）。
+
+**能力批 B（v0.5.22 · 5390ec4；三 🟡→✅，主表 ✅126/150）**
+- **#146 SAST**：lib/sast.ts 四引擎降级链（ruff → bandit → semgrep（零外联：
+  在场未配 ORG_SEMGREP_CONFIG 不接通）→ gitleaks → 内置规则（密钥值形状 +
+  eval 注入））；CLI `org sast scan` + 工具环 + Web。
+- **#65 依赖管理**：七工具探测（uv/pip/npm/bun/cargo/apt/brew）+ 白名单安装
+  （安装动作走审批在环）；CLI `org deps install/probe`。
+- **#104 选择性重跑**：flaky 台账（tests/.retest-ledger.json）+ 三选择器
+  （--file glob / --name 子串 / --failed-only 台账最新失败集）；CLI `org retest`。
+- package.json 版本欠账补齐 0.5.20→0.5.22；tests/sast 16 + deps 16 + retest 13。
+
+**派生决策器（v0.5.22 · a202765；#129 深化）**
+- lib/spawn-decision.ts 四态决策（deny > self > reuse > spawn）+ 信号归因
+  （预算水位/深度衰减/池化命中/权限边界/僵死回收）；agent_spawn 内嵌
+  （self 机械拦截 + force:true 覆盖权）+ `org spawn decide` CLI + spawn_decide
+  工具 + Web /api/govex/spawn/decide 三端；spawn_decision 事件入账本；
+  tests/spawndecide 17 例。
+
+**发布基建追修（B-27/B-28 · v0.5.22 tag 首发即红根因）**
+- **B-27 config env 注入泄漏**：envNameOf 未映射键（gh_token/gh_api/
+  desktop_notify/notify_webhook_*）落入 `process.env[undefined]` —— 实测
+  config.gh_token 被写进 env["undefined"]、多未映射键互相污染（先写者胜）。
+  修复：gh_token→ORG_GH_TOKEN、gh_api→ORG_GH_API 接入 env 注入（tracker 鉴权
+  链 env 一侧对齐）；纯 config 键返回空串由 applyConfigToEnv 跳过。
+  同批修 tests/config.test.ts 键计数漂移（12→14：v0.5.21.1 加 gh_token/gh_api
+  未同步断言 —— CI 三连红的直接根因）。
+- **B-28 release verify 漏装 ruff**：sast.test.ts 断言 ruff 在场（CI 契约：凡跑
+  bun test 的 job 均装 ruff），release.yml verify 与 ci.yml 同套门槛却漏装 ——
+  v0.5.22 tag 发布假红（binaries/publish 连锁 skip）。修复：release verify 补
+  uv + ruff 安装步（与 ci.yml 同源）。
+- CHANGELOG 欠账补齐：v0.5.21/21.1/22 段落（本节）—— 此前 tag 对应段落缺失，
+  release notes 只能落到兜底文案。
+
+- 主表 **✅126/150 · 🟡24 · ⬜0**（本轮 +6：#88/#86/#82/#146/#65/#104）；
+  测试 1266 → **1363**（本地全量实测 358.8s 零失败）；真实车道验证：写诗（七言
+  绝句）/ 古典音乐 WAV（deepseek-chat 23.54s + deepseek-flash 25.98s）/ 长程
+  任务三步链（B-26 修复 135.4s 端到端）。
+
 ## v0.5.20（2026-09-19）—— 浏览器 DevTools 常驻会话 + MCP 会话池（#116：✅120/150）
 
 #116 的剩余半面（console 面板/网络面板/DOM 交互 —— v0.5.16 标注「需要常驻

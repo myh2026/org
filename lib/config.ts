@@ -416,6 +416,14 @@ export function envNameOf(key: ConfigKey): string {
     case "api_keys": return "ORG_LLM_KEY_POOL";
     case "fallbacks": return "ORG_LLM_FALLBACKS";
     case "budget_requests": return "ORG_LLM_BUDGET_REQUESTS";
+    // v0.5.21.2（B-27）：工单两键接入 env 注入（tracker.ts 鉴权链 env > config 的 env 一侧）
+    case "gh_token": return "ORG_GH_TOKEN";
+    case "gh_api": return "ORG_GH_API";
+    // desktop_notify / notify_webhook_url / notify_webhook_events 是纯 config 键
+    //（notify 模块直读 config，无 env 等价物）→ 返回 "" 由 applyConfigToEnv 跳过。
+    // v0.5.21.2 前未映射键落入 process.env[undefined]（实测泄漏：config.gh_token
+    // 被写进 env["undefined"]，多未映射键互相污染）。
+    default: return "";
   }
 }
 
@@ -428,16 +436,17 @@ export function applyConfigToEnv(file?: string): number {
   const cfg = loadConfig(file);
   let n = 0;
   for (const k of CONFIG_KEYS) {
+    // B-27 守卫：无 env 等价物的纯 config 键跳过（防 process.env[undefined] 泄漏）
+    const envName = envNameOf(k);
+    if (!envName) continue;
     if (k === "api_keys" || k === "fallbacks") {
       if (cfg[k].length === 0) continue;
-      const envName = envNameOf(k);
       if ((process.env[envName] ?? "").trim().length > 0) continue;
       process.env[envName] = cfg[k].join(",");
       n++;
       continue;
     }
     if (cfg[k].length === 0) continue;
-    const envName = envNameOf(k);
     if ((process.env[envName] ?? "").trim().length > 0) continue;
     process.env[envName] = cfg[k];
     n++;

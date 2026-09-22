@@ -24,7 +24,7 @@ import {
 const ENV_KEYS = [
   "DHV_LLM_GATEWAY", "DHV_LLM_API_KEY", "DHV_LLM_MODEL",
   "DHV_LLM_THINKING", "DHV_LLM_TIMEOUT_MS", "ORG_DEFAULT_MODEL",
-  "ORG_CONFIG", "ORG_RUNTIME",
+  "ORG_CONFIG", "ORG_RUNTIME", "ORG_GH_TOKEN", "ORG_GH_API",
 ];
 
 let tmpDir = "";
@@ -184,7 +184,27 @@ describe("config：生效归因与脱敏", () => {
     expect(envNameOf("thinking")).toBe("DHV_LLM_THINKING");
     expect(envNameOf("timeout_ms")).toBe("DHV_LLM_TIMEOUT_MS");
     expect(envNameOf("default_lane")).toBe("ORG_DEFAULT_MODEL");
-    expect(CONFIG_KEYS.length).toBe(12); // v0.5.1 +api_keys/fallbacks/budget_requests · v0.5.2 +desktop_notify · v0.5.5 +notify_webhook_url/events
+    // v0.5.21.2（B-27）：工单两键接入 env 注入（tracker 鉴权链 env 一侧）
+    expect(envNameOf("gh_token")).toBe("ORG_GH_TOKEN");
+    expect(envNameOf("gh_api")).toBe("ORG_GH_API");
+    // 纯 config 键无 env 等价物 → 空串（applyConfigToEnv 跳过，不写 env[undefined]）
+    expect(envNameOf("desktop_notify")).toBe("");
+    expect(envNameOf("notify_webhook_url")).toBe("");
+    expect(envNameOf("notify_webhook_events")).toBe("");
+    expect(CONFIG_KEYS.length).toBe(14); // v0.5.1 +api_keys/fallbacks/budget_requests · v0.5.2 +desktop_notify · v0.5.5 +notify_webhook_url/events · v0.5.21.1 +gh_token/gh_api
+  });
+  test("B-27 回归：未映射键不泄漏 env[undefined]，工单两键正确注入", () => {
+    // 工单两键写盘 → 注入对应 env；纯 config 键（desktop_notify/webhook）不产生 env 副作用
+    setConfigValue("gh_token", "gho_b27probe");
+    setConfigValue("gh_api", "https://ghe.example.com/api/v3");
+    setConfigValue("desktop_notify", "on");
+    delete process.env.ORG_GH_TOKEN;
+    delete process.env.ORG_GH_API;
+    const n = applyConfigToEnv();
+    expect(process.env.ORG_GH_TOKEN).toBe("gho_b27probe");
+    expect(process.env.ORG_GH_API).toBe("https://ghe.example.com/api/v3");
+    expect((process.env as Record<string, string | undefined>)["undefined"]).toBeUndefined(); // B-27 前：gh_token 被写进 env["undefined"]
+    expect(n).toBe(2);
   });
   test("api_key 脱敏只露首尾", () => {
     expect(maskSecret("sk-848e25504f854db4")).toBe("sk-…4db4");
