@@ -176,6 +176,10 @@ import { probeMcpRuntimes, loadMcpServers, MCP_SERVERS_FILE, MCP_SERVERS_GUIDANC
          mcpSessionStats } from "../lib/mcp.ts"; // v0.5.19 MCP 客户端桥（#122/C12）+ v0.5.20 会话池观测
 import { devtoolsProbe, devtoolsConsole, devtoolsNetwork, devtoolsSelfTest } from "../lib/devtools.ts"; // v0.5.20 浏览器 DevTools（#116 console/网络面板 —— CDP 常驻会话，只读面）
 import { iacParseFile, iacGraph, iacPlan, iacGenerate, probeIac, iacValidate } from "../lib/iac.ts"; // v0.5.18 IaC 深度实现层（#44）
+import {
+  resolveTrackerTarget, issueList, issueGet, issueCreate, issueComment, issueSetState,
+  prList, prView, prCreate, trackerGuidance, maskToken,
+} from "../lib/tracker.ts"; // v0.5.21 工单系统（#86 Issue 集成 + #82 PR/MR —— GitHub REST 真集成，Web 是第三端）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
 
@@ -2031,6 +2035,131 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
             return json({ ok: false, error: (e as Error).message }, 400);
           }
         }
+        // v0.5.21 📋 工单系统（#86 Issue/工单集成 + #82 PR/MR）Web 面（第三端）：
+        //   GET  ?action=list|get|pr_list|pr_view&repo=owner/repo&state=…&limit=…&number=…
+        //        （只读四动作；缺省 action=list）
+        //   POST {action:create|comment|close|reopen|pr_create, repo, title/body/labels/
+        //        number/head/base…}（写动作五式）
+        // 与 CLI org issue/pr · 工具环 issue_*/pr_* 同源 lib/tracker.ts（单一实现
+        // 三端消费：鉴权解析/repo 形状校验/15s 超时/错误可诊断化全部在 lib，Web 只
+        // 做路由分发与响应形状映射）。写动作 = 用户亲自操作（与 govex 执行车道同
+        // 哲学：无审批在环）；写目标是 GitHub 而非本地盘，故不设 dist/demo 快照
+        // 守卫。无 token → 诚实 JSON 错误（带 trackerGuidance 配置指引，与 CLI 同
+        // 文案）；上游 GitHub 失败 → HTTP 200 + ok:false + gh_status（cloud 执行
+        // 车道 renderRun 同规：请求送达，失败在数据面）。
+        if (route === "GET /api/govex/tracker") {
+          const action = String(url.searchParams.get("action") ?? "list").trim();
+          const repo = String(url.searchParams.get("repo") ?? "").trim();
+          const { target, error } = resolveTrackerTarget(repo);
+          if (!target) return json({ ok: false, error, guidance: trackerGuidance() }, 400);
+          const stateParam = String(url.searchParams.get("state") ?? "").trim();
+          const limitParam = String(url.searchParams.get("limit") ?? "").trim();
+          const opts: { state?: string; limit?: number } = {
+            ...(stateParam ? { state: stateParam } : {}),
+            ...(limitParam ? { limit: Number(limitParam) } : {}),
+          };
+          // 统一失败形状：lib 本地校验（status=0，如 title 必填）→ 400；
+          // 上游 GitHub 4xx/5xx → 200 + gh_status（服务端 message 已在 error 里）
+          const fail = (r: { ok: boolean; status: number; error?: string }): Response =>
+            json({ ok: false, error: r.error ?? "GitHub API 调用失败", gh_status: r.status }, r.status === 0 ? 400 : 200);
+          try {
+            if (action === "list" || action === "issue_list") {
+              const r = await issueList(target, opts);
+              if (!r.ok) return fail(r);
+              return json({
+                ok: true, repo: target.repo, state: opts.state ?? "open", count: r.data!.length,
+                issues: r.data, token: maskToken(target.token),
+              });
+            }
+            if (action === "get") {
+              const num = Math.floor(Number(url.searchParams.get("number")));
+              if (!Number.isInteger(num) || num <= 0) return json({ ok: false, error: "number 必填（issue 编号，正整数）" }, 400);
+              const r = await issueGet(target, num);
+              if (!r.ok) return fail(r);
+              const d = r.data as Record<string, unknown>;
+              return json({
+                ok: true, repo: target.repo,
+                issue: {
+                  number: d.number, title: d.title, state: d.state,
+                  user: (d.user as { login?: string } | undefined)?.login ?? "",
+                  comments: d.comments, created_at: d.created_at, url: d.html_url,
+                  labels: Array.isArray(d.labels)
+                    ? (d.labels as ({ name?: string } | string)[]).map((l) => (typeof l === "string" ? l : String(l?.name ?? "")))
+                    : [],
+                  body: String(d.body ?? "").slice(0, 20000), // 超长正文截断（渲染层再截 4000）
+                },
+              });
+            }
+            if (action === "pr_list") {
+              const r = await prList(target, opts);
+              if (!r.ok) return fail(r);
+              return json({
+                ok: true, repo: target.repo, state: opts.state ?? "open", count: r.data!.length,
+                prs: r.data, token: maskToken(target.token),
+              });
+            }
+            if (action === "pr_view") {
+              const num = Math.floor(Number(url.searchParams.get("number")));
+              if (!Number.isInteger(num) || num <= 0) return json({ ok: false, error: "number 必填（PR 编号，正整数）" }, 400);
+              const r = await prView(target, num);
+              if (!r.ok) return fail(r);
+              return json({ ok: true, repo: target.repo, pr: r.data }); // lib 已并好 meta+diff（8KB 截断/降级 diff_note）
+            }
+            return json({ ok: false, error: `未知 action：${action || "（空）"}（list/get/pr_list/pr_view —— 只读四动作）` }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
+        if (route === "POST /api/govex/tracker") {
+          const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+          const action = String(body.action ?? "").trim();
+          const repo = String(body.repo ?? "").trim();
+          const { target, error } = resolveTrackerTarget(repo);
+          if (!target) return json({ ok: false, error, guidance: trackerGuidance() }, 400);
+          const fail = (r: { ok: boolean; status: number; error?: string }): Response =>
+            json({ ok: false, error: r.error ?? "GitHub API 调用失败", gh_status: r.status }, r.status === 0 ? 400 : 200);
+          const number = Math.floor(Number(body.number));
+          const labels = Array.isArray(body.labels)
+            ? (body.labels as unknown[]).map(String).map((s) => s.trim()).filter((s) => s.length > 0)
+            : [];
+          try {
+            if (action === "create") {
+              const r = await issueCreate(target, {
+                title: String(body.title ?? ""),
+                ...(body.body ? { body: String(body.body) } : {}),
+                ...(labels.length > 0 ? { labels } : {}),
+              });
+              if (!r.ok) return fail(r);
+              return json({ ok: true, repo: target.repo, issue: r.data });
+            }
+            if (action === "comment") {
+              if (!Number.isInteger(number) || number <= 0) return json({ ok: false, error: "number 必填（issue 编号，正整数）" }, 400);
+              const r = await issueComment(target, number, String(body.body ?? ""));
+              if (!r.ok) return fail(r);
+              const c = r.data as Record<string, unknown>;
+              return json({ ok: true, repo: target.repo, number, url: String(c.html_url ?? "") });
+            }
+            if (action === "close" || action === "reopen") {
+              if (!Number.isInteger(number) || number <= 0) return json({ ok: false, error: "number 必填（issue 编号，正整数）" }, 400);
+              const r = await issueSetState(target, number, action === "close" ? "closed" : "open");
+              if (!r.ok) return fail(r);
+              return json({ ok: true, repo: target.repo, issue: r.data });
+            }
+            if (action === "pr_create") {
+              const r = await prCreate(target, {
+                title: String(body.title ?? ""),
+                head: String(body.head ?? ""),
+                base: String(body.base ?? ""),
+                ...(body.body ? { body: String(body.body) } : {}),
+              });
+              if (!r.ok) return fail(r);
+              return json({ ok: true, repo: target.repo, pr: r.data });
+            }
+            return json({ ok: false, error: `未知 action：${action || "（空）"}（create/comment/close/reopen/pr_create —— 写动作五式）` }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
         if (route === "GET /api/spawns") {
         // v0.5.11：派生池（agent_spawn 池化重档的观测面）。
           // 数据源三层：① <ws>/spawn/pool.json 登记（v0.5.11 起每次派生回写）；
@@ -2552,6 +2681,7 @@ export async function webMain(argv: string[]): Promise<number> {
   console.log(`  远程 Agent  GET /api/govex/remote（v0.5.18 #133：probe 四工具探测/hosts 主机档案/plan 部署计划四式/ping 心跳 —— 只读四动作）`);
   console.log(`  MCP 客户端桥  GET /api/govex/mcp（v0.5.19 #122/C12：servers 档案+宿主探测/tools 工具清单/resources 资源/read 读取/prompts 提示词 —— 只读五动作；call 执行车道走 CLI/工具环）`);
   console.log(`  IaC 深度   GET /api/govex/iac（v0.5.18 #44：HCL 解析/依赖图/人读 Plan/manifest 逆向生成 + probe 五面探测；与 iacscan 扫描互补）`);
+  console.log(`  工单系统   GET/POST /api/govex/tracker（v0.5.21 #86/#82：GitHub issue/PR REST 真集成 —— list/get/pr_list/pr_view 只读 + create/comment/close/reopen/pr_create 写动作；无 token 诚实指引）`);
   console.log(`  模型       ${p.model}（GUI 可切 scripted/deepseek，请求体可逐次覆盖）`);
   // v0.4.13：网关三件套可见性 —— 直连服务商（DeepSeek 等）的鉴权/模型/超时
   // 经环境变量注入（spawn 车道继承 process.env），横幅回显防「配了没生效」。
@@ -3593,7 +3723,7 @@ function renderIndexHtml(): string {
   <button id="toolboxBtn" class="rchip" type="button" title="工具箱（v0.5.15）— 🗄 SQLite 查询 · 🔎 符号跳转 · 🛡 密钥扫描 · 📦 审计导出 · 📋 SBOM · 👥 评审推荐">
     <span class="rc-label">🧰 工具箱</span>
   </button>
-  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16+）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🐞 LSP/DAP 调试 · 🌿 merge/rebase · 👥 团队协作 · ☁ 云生态 · 📱 移动端调试 · ⚒ IaC深度 · 🛰 远程 Agent">
+  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16+）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🐞 LSP/DAP 调试 · 🌿 merge/rebase · 👥 团队协作 · ☁ 云生态 · 📱 移动端调试 · ⚒ IaC深度 · 🛰 远程 Agent · 📋 工单（issue/PR）">
     <span class="rc-label">🛡 治理与扩展</span>
   </button>
   <span class="tstats" id="topStats"></span>
@@ -3733,7 +3863,7 @@ function renderIndexHtml(): string {
 <div id="govexScrim" aria-hidden="true"></div>
 <div id="govexPane" role="dialog" aria-modal="true" aria-labelledby="gxTitle">
   <div class="schhead">
-    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git · 👥 协作 · ☁ 云生态 · 📱 移动端 · ⚒ IaC深度 · 🛰 远程（v0.5.16+）</div>
+    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git · 👥 协作 · ☁ 云生态 · 📱 移动端 · ⚒ IaC深度 · 🛰 远程 · 📋 工单（v0.5.16+）</div>
     <button class="schclose" type="button" onclick="closeGovex()" title="关闭（Esc）" aria-label="关闭治理与扩展面板">✕</button>
     <div class="tbtabs" role="tablist">
       <button class="tbtab on" id="gxTabIac" type="button" role="tab" onclick="gxTab('iac')">🛡 IaC</button>
@@ -3751,6 +3881,7 @@ function renderIndexHtml(): string {
       <button class="tbtab" id="gxTabIacx" type="button" role="tab" onclick="gxTab('iacx')">⚒ IaC深度</button>
       <button class="tbtab" id="gxTabRemote" type="button" role="tab" onclick="gxTab('remote')">🛰 远程 Agent</button>
       <button class="tbtab" id="gxTabMcp" type="button" role="tab" onclick="gxTab('mcp')">🔌 MCP 桥</button>
+      <button class="tbtab" id="gxTabTrk" type="button" role="tab" onclick="gxTab('trk')">📋 工单</button>
     </div>
   </div>
 
@@ -4013,9 +4144,44 @@ function renderIndexHtml(): string {
       </div>
       <div class="tbout" id="gxMcpReadOut" style="max-height:320px"><div class="schempty">资源读取：server 须在 mcp-servers.json 档案（不猜默认）· URI 由 server 声明（resources 清单可查）· 只读协议操作。CLI 同款 org mcp read。</div></div>
     </section>
+
+    <section class="tbsec" id="gxSecTrk" hidden>
+      <div class="tbbar">
+        <input id="gxTrkRepo" type="text" placeholder="owner/repo（如 myh2026/org）" autocomplete="off" aria-label="仓库（owner/repo）" style="max-width:220px">
+        <select id="gxTrkState" aria-label="状态过滤" style="max-width:96px">
+          <option value="open">open</option><option value="closed">closed</option><option value="all">all</option>
+        </select>
+        <input id="gxTrkLimit" type="text" placeholder="条数" autocomplete="off" aria-label="条数（1-100）" style="max-width:70px">
+        <button type="button" onclick="gxTrkIssues()">📋 issue 清单</button>
+        <button type="button" onclick="gxTrkPrs()">🔀 PR 清单</button>
+        <span class="tbmeta" id="gxTrkMeta"></span>
+      </div>
+      <div class="tbbar">
+        <input id="gxTrkNum" type="text" placeholder="# 编号" autocomplete="off" aria-label="issue/PR 编号" style="max-width:80px">
+        <button type="button" onclick="gxTrkGet()">🔍 issue 详情</button>
+        <button type="button" onclick="gxTrkPrView()">🔀 PR 详情（diff）</button>
+      </div>
+      <div class="tbbar">
+        <input id="gxTrkComment" type="text" placeholder="评论正文（挂到上方 # 编号）" autocomplete="off" aria-label="评论正文">
+        <button type="button" onclick="gxTrkComment()">💬 评论</button>
+        <button type="button" onclick="gxTrkClose()">🔒 关闭 #</button>
+      </div>
+      <div class="tbbar">
+        <input id="gxTrkTitle" type="text" placeholder="标题（创建 issue / PR 共用，必填 ≤256）" autocomplete="off" aria-label="标题">
+        <input id="gxTrkBody" type="text" placeholder="正文（创建 issue / PR 共用，可选）" autocomplete="off" aria-label="正文">
+        <button type="button" onclick="gxTrkCreate()">➕ 创建 issue</button>
+      </div>
+      <div class="tbbar">
+        <input id="gxTrkLabels" type="text" placeholder="标签（逗号分隔，可选）" autocomplete="off" aria-label="issue 标签" style="max-width:170px">
+        <input id="gxTrkHead" type="text" placeholder="PR head 源分支" autocomplete="off" aria-label="PR 源分支" style="max-width:150px">
+        <input id="gxTrkBase" type="text" placeholder="base 目标分支" autocomplete="off" aria-label="PR 目标分支" style="max-width:140px">
+        <button type="button" onclick="gxTrkPrCreate()">➕ 创建 PR</button>
+      </div>
+      <div class="tbout" id="gxTrkOut"><div class="schempty">📋 工单系统（#86/#82）：GitHub Issue/PR REST 真集成 · 鉴权 ORG_GH_TOKEN / org config set gh_token / GH_TOKEN（ORG_GH_API 可指 GitHub Enterprise）· 无 token 诚实拒绝 + 配置指引 · 15s 超时保护。CLI 同款 org issue / org pr；工具环 issue_* / pr_*。写动作 = 面板亲自操作（无审批在环）。</div></div>
+    </section>
   </div>
 
-  <div class="spwfoot">治理与扩展面板与 CLI / 工具环同源（lib/dbdiag · gitmerge · rbac · iacscan · plugins · openapi · browser · completion · rename · lsp · debug · collab · cloud · iac 单一实现三端消费）—— v0.5.16 「每个功能都有对应操作页面」的延续。</div>
+  <div class="spwfoot">治理与扩展面板与 CLI / 工具环同源（lib/dbdiag · gitmerge · rbac · iacscan · plugins · openapi · browser · completion · rename · lsp · debug · collab · cloud · iac · tracker 单一实现三端消费）—— v0.5.16 「每个功能都有对应操作页面」的延续。</div>
 </div>
 <div id="voiceScrim" aria-hidden="true"></div>
 <div id="voicePane" role="dialog" aria-modal="true" aria-labelledby="voTitle">
@@ -5845,7 +6011,7 @@ function gxMcpSelftest() {
     out.innerHTML = h;
   }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
 }
-var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Lsp", "lsp"], ["Git", "git"], ["Collab", "collab"], ["Cloud", "cloud"], ["Mobile", "mobile"], ["Iacx", "iacx"], ["Remote", "remote"], ["Mcp", "mcp"]];
+var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Lsp", "lsp"], ["Git", "git"], ["Collab", "collab"], ["Cloud", "cloud"], ["Mobile", "mobile"], ["Iacx", "iacx"], ["Remote", "remote"], ["Mcp", "mcp"], ["Trk", "trk"]];
 function gxTab(sec) {
   for (const [k, id] of GX_TABS) {
     document.getElementById("gxTab" + k).classList.toggle("on", id === sec);
@@ -6247,6 +6413,159 @@ function gxCollabBridge() {
     if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
     out.innerHTML = '<div class="tbsym">🌉 已镜像 ' + esc(j.expert) + "/" + esc(j.session) + " → 线程 " + esc(j.threadId) + "：" + j.mirrored + "/" + j.turns + " 轮（" + j.skipped + " 轮已镜像跳过 · 原账本字节不变）</div>";
     gxCollabFeed(j.threadId);
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+
+// ---- 📋 工单面板（v0.5.21：#86/#82 —— GitHub Issue/PR REST 真集成，与 CLI org issue/pr · 工具环 issue_*/pr_* 同源） ----
+function gxTrkRepoGet() {
+  return document.getElementById("gxTrkRepo").value.trim();
+}
+function gxTrkErr(out, j) {
+  let h = '<div class="schempty">✗ ' + esc(j.error || "失败") + "</div>";
+  if (j.guidance) h += '<div class="tbrow tbmeta">' + esc(j.guidance).replace(/\\n/g, "<br>") + "</div>";
+  if (j.gh_status) h += '<div class="tbrow tbmeta">上游 GitHub HTTP ' + j.gh_status + "</div>";
+  out.innerHTML = h;
+}
+function gxTrkIssues() {
+  const out = document.getElementById("gxTrkOut"), meta = document.getElementById("gxTrkMeta");
+  if (!gxTrkRepoGet()) { out.innerHTML = '<div class="schempty">先输入 owner/repo（如 myh2026/org）</div>'; return; }
+  out.innerHTML = '<div class="schempty">拉取中…（GitHub REST v3 · 15s 超时保护）</div>';
+  const q = "repo=" + encodeURIComponent(gxTrkRepoGet()) +
+    "&state=" + encodeURIComponent(document.getElementById("gxTrkState").value) +
+    "&limit=" + encodeURIComponent(document.getElementById("gxTrkLimit").value.trim() || "20");
+  fetch("/api/govex/tracker?action=list&" + q).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { gxTrkErr(out, j); return; }
+    meta.textContent = j.repo + " · " + j.state + " · " + j.count + " 条 · token " + j.token;
+    let h = '<div class="tbsym">📋 ' + esc(j.repo) + ' 的 issue（' + esc(j.state) + " · " + j.count + " 条）</div>";
+    if (!j.count) h += '<div class="schempty">（空 —— 换个状态过滤，或下方表单直接创建）</div>';
+    for (const i of j.issues || []) {
+      h += '<div class="tbsym"><b>#' + i.number + "</b> " + (i.state === "open" ? "⚪" : "🔒") + " " + esc(i.title) +
+        ((i.labels || []).length ? ' <span class="tbmeta">[' + esc(i.labels.join(",")) + "]</span>" : "") +
+        ' <button type="button" onclick="gxTrkView(' + i.number + ')">详情</button>' +
+        '<br><span class="tbmeta">' + esc(i.user) + " · " + i.comments + " 评论 · " + String(i.created_at || "").slice(0, 10) + "</span></div>";
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxTrkView(num) {
+  document.getElementById("gxTrkNum").value = String(num);
+  gxTrkGet();
+}
+function gxTrkGet() {
+  const out = document.getElementById("gxTrkOut");
+  const numRaw = document.getElementById("gxTrkNum").value.trim();
+  const num = Math.floor(Number(numRaw));
+  if (!gxTrkRepoGet() || !numRaw || !Number.isFinite(num)) { out.innerHTML = '<div class="schempty">先填 owner/repo 与 # 编号</div>'; return; }
+  out.innerHTML = '<div class="schempty">读取中…</div>';
+  fetch("/api/govex/tracker?action=get&repo=" + encodeURIComponent(gxTrkRepoGet()) + "&number=" + num).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { gxTrkErr(out, j); return; }
+    const i = j.issue || {};
+    let h = '<div class="tbsym"><b>#' + i.number + "</b> " + (i.state === "open" ? "⚪" : "🔒") + " " + esc(i.title) +
+      ' <button type="button" onclick="gxTrkIssues()">← 返回清单</button></div>';
+    h += '<div class="tbmeta">' + esc(i.user) + " · " + i.comments + " 评论 · " + String(i.created_at || "").slice(0, 19) + " · " + esc(i.url) + "</div>";
+    if ((i.labels || []).length) h += '<div class="tbmeta">标签：' + esc(i.labels.join(" · ")) + "</div>";
+    h += '<div class="tbrow" style="white-space:pre-wrap">' + esc(String(i.body || "").slice(0, 4000) || "（无正文）") + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxTrkPrs() {
+  const out = document.getElementById("gxTrkOut"), meta = document.getElementById("gxTrkMeta");
+  if (!gxTrkRepoGet()) { out.innerHTML = '<div class="schempty">先输入 owner/repo（如 myh2026/org）</div>'; return; }
+  out.innerHTML = '<div class="schempty">拉取中…（GitHub REST v3 · 15s 超时保护）</div>';
+  const q = "repo=" + encodeURIComponent(gxTrkRepoGet()) +
+    "&state=" + encodeURIComponent(document.getElementById("gxTrkState").value) +
+    "&limit=" + encodeURIComponent(document.getElementById("gxTrkLimit").value.trim() || "20");
+  fetch("/api/govex/tracker?action=pr_list&" + q).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { gxTrkErr(out, j); return; }
+    meta.textContent = j.repo + " · " + j.state + " · " + j.count + " 条 · token " + j.token;
+    let h = '<div class="tbsym">🔀 ' + esc(j.repo) + ' 的 PR（' + esc(j.state) + " · " + j.count + " 条）</div>";
+    if (!j.count) h += '<div class="schempty">（空 —— 换个状态过滤）</div>';
+    for (const p of j.prs || []) {
+      h += '<div class="tbsym"><b>#' + p.number + "</b> " + (p.draft ? "✏️ " : "") + esc(p.title) +
+        ' <button type="button" onclick="gxTrkPrDetail(' + p.number + ')">详情</button>' +
+        '<br><span class="tbmeta">' + esc(p.head) + " → " + esc(p.base) + " · " + esc(p.user) + " · " + String(p.created_at || "").slice(0, 10) + "</span></div>";
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxTrkPrDetail(num) {
+  document.getElementById("gxTrkNum").value = String(num);
+  gxTrkPrView();
+}
+function gxTrkPrView() {
+  const out = document.getElementById("gxTrkOut");
+  const numRaw = document.getElementById("gxTrkNum").value.trim();
+  const num = Math.floor(Number(numRaw));
+  if (!gxTrkRepoGet() || !numRaw || !Number.isFinite(num)) { out.innerHTML = '<div class="schempty">先填 owner/repo 与 # 编号</div>'; return; }
+  out.innerHTML = '<div class="schempty">读取中…（meta + diff 双车道）</div>';
+  fetch("/api/govex/tracker?action=pr_view&repo=" + encodeURIComponent(gxTrkRepoGet()) + "&number=" + num).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { gxTrkErr(out, j); return; }
+    const p = j.pr || {};
+    let h = '<div class="tbsym"><b>PR #' + p.number + "</b> " + esc(p.title) + " [" + esc(p.state) + (p.draft ? " · draft" : "") + '] <button type="button" onclick="gxTrkPrs()">← 返回清单</button></div>';
+    h += '<div class="tbmeta">' + esc(p.head) + " → " + esc(p.base) + " · " + esc(p.user) + " · +" + p.additions + "/-" + p.deletions + " · " + p.changed_files + " 文件 · " + esc(p.url) + "</div>";
+    if (p.body) h += '<div class="tbrow" style="white-space:pre-wrap">' + esc(String(p.body).slice(0, 2000)) + "</div>";
+    h += '<div class="tbout" style="max-height:320px;margin-top:6px"><span style="white-space:pre-wrap">' + esc(String(p.diff || p.diff_note || "")) + "</span></div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxTrkCreate() {
+  const out = document.getElementById("gxTrkOut");
+  const repo = gxTrkRepoGet();
+  const title = document.getElementById("gxTrkTitle").value.trim();
+  if (!repo || !title) { out.innerHTML = '<div class="schempty">先填 owner/repo 与标题</div>'; return; }
+  out.innerHTML = '<div class="schempty">创建中…（写动作：GitHub 真集成）</div>';
+  const b = { action: "create", repo: repo, title: title };
+  const body = document.getElementById("gxTrkBody").value.trim();
+  if (body) b.body = body;
+  const labels = document.getElementById("gxTrkLabels").value.trim();
+  if (labels) b.labels = labels.split(/[,，]/).map(function (s) { return s.trim(); }).filter(function (s) { return s.length > 0; });
+  gxPost("/api/govex/tracker", b).then(function (j) {
+    if (!j.ok) { gxTrkErr(out, j); return; }
+    document.getElementById("gxTrkTitle").value = "";
+    document.getElementById("gxTrkBody").value = "";
+    out.innerHTML = '<div class="tbsym">✓ 已创建 issue #' + j.issue.number + "：" + esc(j.issue.title) +
+      '<br><span class="tbmeta">' + esc(j.issue.url) + "</span></div>";
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxTrkComment() {
+  const out = document.getElementById("gxTrkOut");
+  const repo = gxTrkRepoGet();
+  const numRaw = document.getElementById("gxTrkNum").value.trim();
+  const text = document.getElementById("gxTrkComment").value.trim();
+  const num = Math.floor(Number(numRaw));
+  if (!repo || !numRaw || !Number.isFinite(num) || !text) { out.innerHTML = '<div class="schempty">先填 owner/repo、# 编号与评论正文</div>'; return; }
+  gxPost("/api/govex/tracker", { action: "comment", repo: repo, number: num, body: text }).then(function (j) {
+    if (!j.ok) { gxTrkErr(out, j); return; }
+    document.getElementById("gxTrkComment").value = "";
+    out.innerHTML = '<div class="tbsym">✓ 已评论 issue #' + j.number + (j.url ? '（<span class="tbmeta">' + esc(j.url) + "</span>）" : "") + "</div>";
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxTrkClose() {
+  const out = document.getElementById("gxTrkOut");
+  const repo = gxTrkRepoGet();
+  const numRaw = document.getElementById("gxTrkNum").value.trim();
+  const num = Math.floor(Number(numRaw));
+  if (!repo || !numRaw || !Number.isFinite(num)) { out.innerHTML = '<div class="schempty">先填 owner/repo 与 # 编号</div>'; return; }
+  gxPost("/api/govex/tracker", { action: "close", repo: repo, number: num }).then(function (j) {
+    if (!j.ok) { gxTrkErr(out, j); return; }
+    out.innerHTML = '<div class="tbsym">✓ issue #' + j.issue.number + " → " + esc(j.issue.state) + " <button type=\\"button\\" onclick=\\"gxTrkIssues()\\">刷新清单</button></div>";
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxTrkPrCreate() {
+  const out = document.getElementById("gxTrkOut");
+  const repo = gxTrkRepoGet();
+  const title = document.getElementById("gxTrkTitle").value.trim();
+  const head = document.getElementById("gxTrkHead").value.trim();
+  const base = document.getElementById("gxTrkBase").value.trim();
+  if (!repo || !title || !head || !base) { out.innerHTML = '<div class="schempty">先填 owner/repo、标题、head 源分支与 base 目标分支</div>'; return; }
+  out.innerHTML = '<div class="schempty">创建 PR 中…（写动作：GitHub 真集成）</div>';
+  const b = { action: "pr_create", repo: repo, title: title, head: head, base: base };
+  const body = document.getElementById("gxTrkBody").value.trim();
+  if (body) b.body = body;
+  gxPost("/api/govex/tracker", b).then(function (j) {
+    if (!j.ok) { gxTrkErr(out, j); return; }
+    out.innerHTML = '<div class="tbsym">✓ 已创建 PR #' + j.pr.number + "：" + esc(j.pr.title) +
+      '<br><span class="tbmeta">' + esc(j.pr.head) + " → " + esc(j.pr.base) + " · " + esc(j.pr.url) + "</span></div>";
   }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
 }
 

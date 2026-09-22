@@ -14,10 +14,14 @@
 //   3. CLI 冒烟：无 token → 指引 + 退出码 2；坏 repo 形状 → 2
 //   4. 工具环 e2e（scripted 剧本）：issue_list 只读零审批全链（ORG_GH_API
 //      指向 mock 网关，工具 native 块真实 fetch）
+//   5. Web 📋 工单面板：/api/govex/tracker GET 只读四动作 + POST 写动作五式
+//      （startWebServer 进程内 —— env 直继本进程，mock 网关零外联）+
+//      无 token 诚实降级 + 面板区块在场 + 本簇 JS 独立可解析
 // ============================================================================
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
   resolveTrackerTarget, issueList, issueCreate, issueComment, issueSetState,
@@ -386,4 +390,139 @@ describe("tracker：工具环 e2e（issue_list 只读全链）", () => {
     expect(denied.length).toBe(1); // 写动作：只读模式拦截（mock 网关零外发）
     expect(requests.length).toBe(0);
   }, 120_000);
+});
+
+// ---- 5. Web 📋 工单面板（第三端：startWebServer 进程内 + mock 网关零外联） --------
+
+describe("tracker：Web 📋 工单面板（/api/govex/tracker）", () => {
+  test("GET 只读四动作 + 无 token 诚实降级 + POST 写动作五式贯通 + 错误传播", async () => {
+    const { startWebServer } = await import("../web/entry.ts");
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), "org-tracker-web-"));
+    const srv = startWebServer({ workspace: ws, port: 0, model: "scripted" });
+    const base = `http://127.0.0.1:${srv.port}`;
+    // B-25 隔离：Web 服务与本测试同进程，loadConfig 会读 ORG_CONFIG ——
+    // 指向缺席路径 = 「未配置」缺省态，用户真实 gh_token 不劫持无 token 用例
+    const savedConfig = process.env.ORG_CONFIG;
+    process.env.ORG_CONFIG = path.join(TEST_RUN, "isolated-user-config-absent.json");
+    try {
+      const getRaw = async (u: string): Promise<Response> => fetch(base + u);
+      const get = async (u: string): Promise<any> => (await (await fetch(base + u)).json()) as any;
+      const post = async (u: string, body: unknown): Promise<any> =>
+        (await (await fetch(base + u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json()) as any;
+
+      // ① 无 token：诚实 JSON 错误（与 CLI 同文案三指引）+ 400
+      const r0 = await getRaw("/api/govex/tracker?action=list&repo=acme/widget");
+      expect(r0.status).toBe(400);
+      const j0 = (await r0.json()) as { ok: boolean; error: string; guidance?: string };
+      expect(j0.ok).toBe(false);
+      expect(j0.error).toContain("ORG_GH_TOKEN");
+      expect(j0.error).toContain("org config set gh_token");
+      expect(String(j0.guidance)).toContain("gh_token");
+
+      // ② 接线 mock 网关（Web 服务继承本进程 env —— ORG_GH_API 指向 mock）
+      process.env.ORG_GH_TOKEN = "ghp_web_test_123456";
+      process.env.ORG_GH_API = ghUrl();
+
+      const list = await get("/api/govex/tracker?action=list&repo=acme/widget&state=open&limit=10");
+      expect(list.ok).toBe(true);
+      expect(list.count).toBe(2);
+      expect(list.issues[0].labels).toEqual(["bug", "ci"]); // 摘要映射（labels 扁平化）
+      expect(list.token).toBe("ghp_…3456"); // 脱敏回显（防「配了没生效」）
+      // 上游请求形状实录：Bearer 鉴权 + 状态/条数透传
+      expect(requests[0].auth).toBe("Bearer ghp_web_test_123456");
+      expect(requests[0].path).toContain("state=open");
+      expect(requests[0].path).toContain("per_page=10");
+
+      const one = await get("/api/govex/tracker?action=get&repo=acme/widget&number=51");
+      expect(one.ok).toBe(true);
+      expect(one.issue.number).toBe(51);
+      expect(one.issue.body).toContain("正文");
+
+      const prs = await get("/api/govex/tracker?action=pr_list&repo=acme/widget");
+      expect(prs.ok).toBe(true);
+      expect(prs.prs[0].head).toBe("feat/tracker");
+      const pv = await get("/api/govex/tracker?action=pr_view&repo=acme/widget&number=12");
+      expect(pv.ok).toBe(true);
+      expect(pv.pr.additions).toBe(100);
+      expect(String(pv.pr.diff)).toContain("+hello");
+
+      // ③ POST 写动作贯通（Web = 用户亲自操作，无审批在环，直接执行）
+      const create = await post("/api/govex/tracker", { action: "create", repo: "acme/widget", title: "Web 面板建单", body: "面板贯通", labels: ["web"] });
+      expect(create.ok).toBe(true);
+      expect(create.issue.number).toBe(52);
+      const cb = requests[requests.length - 1].body as Record<string, unknown>;
+      expect(cb.title).toBe("Web 面板建单");
+      expect(cb.labels).toEqual(["web"]);
+
+      const comment = await post("/api/govex/tracker", { action: "comment", repo: "acme/widget", number: 51, body: "面板评论" });
+      expect(comment.ok).toBe(true);
+      expect(comment.number).toBe(51);
+      expect(comment.url).toContain("issuecomment-9001");
+      const close = await post("/api/govex/tracker", { action: "close", repo: "acme/widget", number: 51 });
+      expect(close.ok).toBe(true);
+      expect(close.issue.state).toBe("closed");
+      const prCreate = await post("/api/govex/tracker", { action: "pr_create", repo: "acme/widget", title: "feat: web panel", head: "feat/web", base: "main" });
+      expect(prCreate.ok).toBe(true);
+      expect(prCreate.pr.number).toBe(13);
+      expect(prCreate.pr.head).toBe("feat/web");
+
+      // ④ 错误传播：上游 401 → 200 + ok:false + gh_status（cloud renderRun 同规：
+      //    请求送达，失败在数据面）；本地校验 → 400；未知 action → 400
+      const bad = await getRaw("/api/govex/tracker?action=list&repo=acme/protected");
+      expect(bad.status).toBe(200);
+      const bj = (await bad.json()) as { ok: boolean; error: string; gh_status: number };
+      expect(bj.ok).toBe(false);
+      expect(bj.gh_status).toBe(401);
+      expect(bj.error).toContain("Bad credentials");
+
+      const noNum = await getRaw("/api/govex/tracker?action=get&repo=acme/widget");
+      expect(noNum.status).toBe(400);
+      expect((await noNum.json()).error).toContain("number 必填");
+      const badTitle = await post("/api/govex/tracker", { action: "create", repo: "acme/widget", title: "  " });
+      expect(badTitle.ok).toBe(false);
+      expect(badTitle.error).toContain("title 必填");
+      const badRepo = await getRaw("/api/govex/tracker?action=list&repo=a/b/c");
+      expect(badRepo.status).toBe(400);
+      expect((await badRepo.json()).error).toContain("repo 形状非法");
+      const unk = await getRaw("/api/govex/tracker?action=nope&repo=acme/widget");
+      expect(unk.status).toBe(400);
+      expect((await unk.json()).error).toContain("未知 action");
+      const unkPost = await post("/api/govex/tracker", { action: "nope", repo: "acme/widget" });
+      expect(unkPost.ok).toBe(false);
+      expect(String(unkPost.error)).toContain("未知 action");
+    } finally {
+      if (savedConfig === undefined) delete process.env.ORG_CONFIG;
+      else process.env.ORG_CONFIG = savedConfig;
+      srv.stop(true);
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  test("面板：📋 工单 Tab 区块在场（gxSecTrk/端点引用/按钮接线）+ 本簇 JS 独立可解析", async () => {
+    const { startWebServer } = await import("../web/entry.ts");
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), "org-tracker-web-html-"));
+    const srv = startWebServer({ workspace: ws, port: 0, model: "scripted" });
+    try {
+      const html = await (await fetch(`http://127.0.0.1:${srv.port}/`)).text();
+      expect(html).toContain('id="gxSecTrk"');
+      expect(html).toContain('id="gxTabTrk"');
+      expect(html).toContain('"/api/govex/tracker"');
+      expect(html).toContain("gxTrkIssues()");
+      expect(html).toContain("gxTrkPrCreate()");
+      expect(html).toContain("gxTrkComment()");
+      // 本簇 JS 函数逐个独立可解析（collab.test.ts 同款守卫 —— 模板字面量
+      // 转义层级；按函数名精确切块，不与并行簇互相连坐）
+      const script = html.match(/<script>([\s\S]*?)<\/script>/)![1]!;
+      for (const fn of ["gxTrkRepoGet", "gxTrkErr", "gxTrkIssues", "gxTrkView", "gxTrkGet", "gxTrkPrs", "gxTrkPrDetail", "gxTrkPrView", "gxTrkCreate", "gxTrkComment", "gxTrkClose", "gxTrkPrCreate"]) {
+        const i = script.indexOf(`function ${fn}(`);
+        expect(i).toBeGreaterThanOrEqual(0); // 函数在场
+        const j = script.indexOf("\nfunction ", i + 1);
+        const chunk = script.slice(i, j < 0 ? undefined : j);
+        expect(() => new Function(chunk)).not.toThrow();
+      }
+    } finally {
+      srv.stop(true);
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
