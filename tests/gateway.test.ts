@@ -111,6 +111,109 @@ describe("v0.4.13 网关直连三件套（DHV_LLM_API_KEY / DHV_LLM_MODEL / DHV_
     expect(out).toBe("pong:default");
   });
 
+  // ---- B-24（v0.2.69）：推理型模型预算适配 ----------------------------------
+  // 2026-09-19 org 真实车道实测（deepseek-flash）：工具环长思考任务
+  // completion_tokens=8191 全是 reasoning_tokens、content 空 —— 流被长度
+  // 截断，empty completion 硬错误。v0.2.69 观测记忆 + 升档重试修复。
+
+  test("B-24 升档重试：推理耗尽型空补全（finish_reason=length）→ 按观测需求升档重试一次 → 成功", async () => {
+    // mock 网关：第 1 次返回空 content + length 截断 + reasoning 吃满 8191；
+    // 第 2 次起返回正常 content。断言：恰好 2 次请求、第 2 次 max_tokens
+    // 升档到 8191×2+4096 = 20478（未触 cap 32768）、最终拿到正文。
+    let calls = 0;
+    seen = [];
+    server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const body = (await req.json()) as Record<string, unknown>;
+        calls += 1;
+        seen.push({ auth: req.headers.get("authorization"), model: body.model, body });
+        if (calls === 1) {
+          return Response.json({
+            choices: [{ finish_reason: "length", message: { content: "" } }],
+            usage: { prompt_tokens: 291, completion_tokens: 8191, total_tokens: 8482, completion_tokens_details: { reasoning_tokens: 8191 } },
+          });
+        }
+        return Response.json({
+          choices: [{ finish_reason: "stop", message: { content: `ok:${body.max_tokens}` } }],
+        });
+      },
+    });
+    process.env.DHV_LLM_GATEWAY = gatewayUrl();
+    delete process.env.DHV_LLM_API_KEY;
+    process.env.DHV_LLM_MODEL = "deepseek-flash";
+    delete process.env.DHV_LLM_TIMEOUT_MS;
+
+    const out = await complete(makeHost());
+    expect(calls).toBe(2); // 恰好重试一次（非预算型不会多发）
+    expect(out).toBe("ok:20478"); // 升档后预算贯通到网关（8191×2+4096，未触 cap 32768）
+    expect(seen[0].body.max_tokens).toBe(32); // 首次按原请求
+    expect(seen[1].body.max_tokens).toBe(20478); // 重试按观测需求升档（8191×2+4096）
+  }, 120_000);
+
+  test("B-24 观测记忆：首次升档成功后，同 Host 后续请求预算下限保持抬升", async () => {
+    // 同一 Host 第二次 complete：不再重试（预算已抬），单次直达且
+    // max_tokens = 8191×2+4096 = 20478（未触 cap 32768，记忆峰值生效）。
+    let calls = 0;
+    seen = [];
+    server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const body = (await req.json()) as Record<string, unknown>;
+        calls += 1;
+        seen.push({ auth: null, model: body.model, body });
+        if (calls === 1) {
+          return Response.json({
+            choices: [{ finish_reason: "length", message: { content: "" } }],
+            usage: { completion_tokens: 8191, completion_tokens_details: { reasoning_tokens: 8191 } },
+          });
+        }
+        return Response.json({ choices: [{ finish_reason: "stop", message: { content: "ok" } }] });
+      },
+    });
+    process.env.DHV_LLM_GATEWAY = gatewayUrl();
+    delete process.env.DHV_LLM_API_KEY;
+    delete process.env.DHV_LLM_MODEL;
+
+    const host = makeHost();
+    const llm = host.api.llm as { complete: (r: unknown) => Promise<string> };
+    const first = await llm.complete({ messages: [{ role: "user", content: "q1" }], temperature: 0.1, maxTokens: 32 });
+    expect(first).toBe("ok");
+    const callsAfterFirst = calls;
+    const second = await llm.complete({ messages: [{ role: "user", content: "q2" }], temperature: 0.1, maxTokens: 32 });
+    expect(second).toBe("ok");
+    expect(calls).toBe(callsAfterFirst + 1); // 第二次零重试（记忆已抬升预算）
+    expect(seen[seen.length - 1].body.max_tokens).toBe(20478);
+  }, 120_000);
+
+  test("B-24 诚实边界：非预算型空补全（无 reasoning 观测、非 length）不重试，原样抛可诊断错误", async () => {
+    let calls = 0;
+    server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        calls += 1;
+        return Response.json({
+          choices: [{ finish_reason: "content_filter", message: { content: "" } }],
+          usage: { completion_tokens: 3 },
+        });
+      },
+    });
+    process.env.DHV_LLM_GATEWAY = gatewayUrl();
+    delete process.env.DHV_LLM_API_KEY;
+    delete process.env.DHV_LLM_MODEL;
+
+    let err: unknown = null;
+    try {
+      await complete(makeHost());
+    } catch (e) {
+      err = e;
+    }
+    expect(err).not.toBeNull();
+    expect(calls).toBe(1); // 非预算型：零重试（不为无关错误浪费配额）
+    expect(String((err as Error).message)).toContain("empty completion");
+    expect(String((err as Error).message)).toContain("content_filter");
+  }, 120_000);
+
   test("超时保护：DHV_LLM_TIMEOUT_MS=1 对慢网关（300ms）及时中止并传播错误", async () => {
     startMockGateway(300);
     process.env.DHV_LLM_GATEWAY = gatewayUrl();
