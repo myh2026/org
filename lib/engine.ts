@@ -1220,7 +1220,13 @@ export function stockAffinityOf(task: string, fixturePath: string): number {
     const ct = new Set(tokenize(inDomain));
     let hit = 0;
     for (const t of tt) if (ct.has(t)) hit++;
-    if (hit >= 2) return Math.max(hit / tt.length, SEMANTIC_FLOOR);
+    // v0.5.22（B-26 续）：命中数护持加规模边界 —— 仅短任务（≤12 词元）适用
+    // max 抬升。实测踩坑：40 词元的域外长任务（写诗+作曲+汇总）碰巧命中
+    // 「保存/生成/汇总」两个通用动词 → hit≥2 触发护持 → 0.05 被抬到 0.15
+    // → 恰好不小于地板 → 长驱直入 STOCK 流水线（答非所问 189s 零模型调用）。
+    // 长任务按真实重合率判定（2/40 = 0.05 < 0.15 → 域外 ✓）；B-19 的短任务
+    // 域内场景（「公告解析」2 词全命中）行为不变。
+    if (hit >= 2 && tt.length <= 12) return Math.max(hit / tt.length, SEMANTIC_FLOOR);
     return hit / tt.length;
   } catch {
     return 1;
@@ -1240,6 +1246,15 @@ export interface RescuePick {
  *  该专家不可救援。 */
 export function rescueExpertOf(task: string, ws: string): RescuePick | null {
   let best: RescuePick | null = null;
+  // v0.5.22（B-26 续）：救援地板尺度自适应 —— tokenOverlap 是比率口径，
+  // 长任务（词元多）重合率天然被稀释（实测 42 词元的「写诗+作曲+汇总」任务
+  // bard direct 轨道重合 0.104 < 0.15 → 救援漏判 → 零消耗降级把可服务任务
+  // 拒之门外）。地板按 √(12/N) 缩放（短任务 ≤12 词元原行为不变；下限
+  // 0.05 防超长任务地板趋零误放）。
+  const taskTokenCount = [...new Set(tokenize(task))].length;
+  const rescueFloor = taskTokenCount > 12
+    ? Math.max(0.05, SEMANTIC_FLOOR * Math.sqrt(12 / taskTokenCount))
+    : SEMANTIC_FLOOR;
   for (const m of loadRegistryIndex(ws)) {
     const rec = m as Record<string, unknown>;
     const name = String(rec["name"] ?? "");
@@ -1260,7 +1275,7 @@ export function rescueExpertOf(task: string, ws: string): RescuePick | null {
     } catch {
       continue; // 剧本不可读 → 不可救援
     }
-    if (score >= SEMANTIC_FLOOR && (!best || score > best.score)) {
+    if (score >= rescueFloor && (!best || score > best.score)) {
       best = { expert: name, score, manifestScore, fixture };
     }
   }
@@ -1573,12 +1588,19 @@ export function startRun(opts: RunOptions): RunHandle {
       // scripted 与未知名零影响（幂等，测试环境零外联不变）。
       await prepareLlmEnv(opts.model, opts.workspace);
       fs.mkdirSync(outDir, { recursive: true });
-      // v0.5.10：scripted 团队车道域外任务语义地板（B-19）。仅 scripted +
-      // 团队 entry + 未显式指定 fixture 时介入；真实 LLM 车道动态分解天然
-      // 域感知。预检通过改写 opts（entry/expert/fixture）实现跨车道救援 ——
-      // 下游（args 组装 / env / finish 的 readDirectTurns）全部自动正确。
+      // v0.5.10：scripted 团队车道域外任务语义地板（B-19）。团队 entry +
+      // 未显式指定 fixture 时介入；预检通过改写 opts（entry/expert/fixture）
+      // 实现跨车道救援 —— 下游（args 组装 / env / finish 的 readDirectTurns）
+      // 全部自动正确。
+      // v0.5.22（B-26）：地板条件从「仅 scripted」扩展到全模型 —— 实测
+      // （org task submit · model=deepseek）真实车道下团队回路同样消费
+      // STOCK 剧本（fixture 缺省兜底），模型根本不在环（71s 跑完 parse/
+      // summarize 流水线 · model_calls=0 · 域外任务答非所问）——「真实
+      // LLM 动态分解天然域感知」的前提（模型被调用）不成立。B-19/B-22
+      // 之后任务队列是第三个复发入口：同一缺陷在平行车道入口逐一复发
+      // （B-22 教训），地板必须长在共享闸门上。域内任务零影响（原流水线）。
       let rescued = false;
-      if (opts.entry === "org" && opts.model === "scripted" && !opts.fixture) {
+      if (opts.entry === "org" && !opts.fixture) {
         const stockScore = stockAffinityOf(opts.task, STOCK_FIXTURE);
         if (stockScore < SEMANTIC_FLOOR) {
           const pick = rescueExpertOf(opts.task, opts.workspace);
