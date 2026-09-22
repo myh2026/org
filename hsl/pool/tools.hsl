@@ -366,6 +366,49 @@ export fn parse_tool_calls(raw: String) -> Vec<ToolCall> {
             const re2 = /(?:<｜｜DSML｜｜|<\/｜｜DSML｜｜)[^>]*>\s*(\{[\s\S]*?\})\s*(?:<\/｜｜DSML｜｜|$)/g;
             while ((m = re2.exec(text)) !== null) pushCall(m[1]);
         }
+        // 4) 完整 DSML XML 形态（2026-09-19 deepseek-chat 实测）：
+        //    <｜｜DSML｜｜ calls>
+        //      <｜｜DSML｜｜ invoke name="audio_compose">
+        //        <｜｜DSML｜｜ parameter name="timbre" string="true">strings</｜｜DSML｜｜ parameter>
+        //        <｜｜DSML｜｜ parameter name="tempo" string="false">84</｜｜DSML｜｜ parameter>
+        //      </｜｜DSML｜｜ invoke>
+        //    </｜｜DSML｜｜ calls>
+        //    模型无视提示词注入的 <tool> 协议、直接吐服务端原生 DSML 时，
+        //    工具调用被当纯文本展示（用户看到标记原文、零工具执行）。
+        //    竖线宽容：全角 ｜（U+FF5C）与半角 | 都收（历史输出两形态都见过）。
+        if (calls.length === 0) {
+            const BAR = "[\\uFF5C|]";
+            const invokeRe = new RegExp(
+                `<${BAR}${BAR}DSML${BAR}${BAR}\\s*invoke\\s+name="([^"]+)"\\s*>([\\s\\S]*?)<\\/${BAR}${BAR}DSML${BAR}${BAR}\\s*invoke>`,
+                "g",
+            );
+            while ((m = invokeRe.exec(text)) !== null) {
+                const toolName = String(m[1] || "").trim();
+                if (!toolName) continue;
+                const body = String(m[2] || "");
+                const args = {};
+                const paramRe = new RegExp(
+                    `<${BAR}${BAR}DSML${BAR}${BAR}\\s*parameter\\s+name="([^"]+)"[^>]*>([\\s\\S]*?)<\\/${BAR}${BAR}DSML${BAR}${BAR}\\s*parameter>`,
+                    "g",
+                );
+                let pm;
+                while ((pm = paramRe.exec(body)) !== null) {
+                    const key = String(pm[1] || "").trim();
+                    if (!key) continue;
+                    let val = String(pm[2] ?? "").trim();
+                    // 值域宽容：布尔 / 数值 / JSON（对象、数组、字符串带引号）按
+                    // JSON 语义尝试，失败保持字符串（与 DSML string 属性无关 ——
+                    // 实测 string="false" 的 84 应为数值）。
+                    if (val === "true" || val === "false") val = val === "true";
+                    else if (/^-?\d+(?:\.\d+)?$/.test(val)) val = Number(val);
+                    else if (val.startsWith("{") || val.startsWith("[") || val.startsWith('"')) {
+                        try { val = JSON.parse(val); } catch (e) { /* 保持字符串 */ }
+                    }
+                    args[key] = val;
+                }
+                calls.push($host.make("ToolCall", { name: toolName, args_json: JSON.stringify(args) }));
+            }
+        }
         return calls;
     };
     out

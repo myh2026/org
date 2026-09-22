@@ -53,6 +53,71 @@ function makeFixture(tracks: Record<string, string[]>): string {
 // ---- 1-4. 工具环 e2e -----------------------------------------------------------
 
 describe("tools：agent 工具环（scripted 剧本驱动 e2e）", () => {
+  test("DSML 第 4 形态：deepseek 原生 <｜｜DSML｜｜ invoke> XML 工具调用被解析执行（B-23）", async () => {
+    // 2026-09-19 实测（deepseek-chat 真实车道）：模型无视提示词注入的 <tool>
+    // 协议，直接吐服务端原生 DSML XML 形态（invoke/parameter 标签 + 全角竖线），
+    // 工具调用被当纯文本展示、零工具执行。解析器补第 4 形态后本用例锁定。
+    const fixture = makeFixture({
+      "direct:notice-parser": [
+        '我来读文件。\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="fs_read">\n<｜｜DSML｜｜ parameter name="path" string="true">raw/notices.txt</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>',
+        "最终答案：公告分块规则是「=== NOTICE」。",
+      ],
+    });
+    const dir = makeOut("tools-dsml");
+    const r = runDhv([
+      "run", DIRECT,
+      "--workspace", WS,
+      "--task", "(direct) 公告怎么分块？",
+      "--model", "scripted",
+      "--fixture", fixture,
+      "--out", dir,
+      "--allow", "bun,node,ls,cat,grep,diff,git",
+    ], { ORG_ASK_EXPERT: "notice-parser", ORG_ASK_SESSION: "tools-dsml", ORG_ASK_QUESTION: "公告怎么分块？", ORG_TOOLS: "1" });
+    expect(r.ok).toBe(true);
+    const events = eventsOf(dir);
+    const toolCalls = events.filter((e) => e.name === "journal" && (e.data as { name?: string })?.name === "tool_call");
+    expect(toolCalls.length).toBe(1);
+    expect(JSON.stringify(toolCalls[0])).toContain("fs_read");
+    // 工具真实执行（不是把 DSML 标记当文本回显）
+    const toolResults = events.filter((e) => e.name === "journal" && (e.data as { name?: string })?.name === "tool_result");
+    expect(toolResults.length).toBe(1);
+    expect(JSON.stringify(toolResults[0])).toContain("ok");
+    // 最终答案落账本（工具环走通两轮）
+    const ledger = fs.readFileSync(path.join(WS, "runtime/sessions/notice-parser/tools-dsml.jsonl"), "utf-8");
+    expect(ledger).toContain("最终答案");
+    expect(ledger).not.toContain("DSML");
+  }, 120_000);
+
+  test("DSML 第 4 形态：数值参数语义（string=\"false\" → 数值，B-23）", async () => {
+    // 同一解析器路径的参数类型锁定：audio_compose 的 tempo 在 DSML 里标
+    // string="false"，应解析为数值 84 而非字符串 "84"（实测形态）。
+    const fixture = makeFixture({
+      "direct:notice-parser": [
+        '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="audio_compose">\n<｜｜DSML｜｜ parameter name="timbre" string="true">strings</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name="chords" string="true">D3:canon:arp</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name="tempo" string="false">84</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>',
+        "最终答案：已渲染。",
+      ],
+    });
+    const dir = makeOut("tools-dsml-num");
+    const r = runDhv([
+      "run", DIRECT,
+      "--workspace", WS,
+      "--task", "(direct) 作曲",
+      "--model", "scripted",
+      "--fixture", fixture,
+      "--out", dir,
+      "--allow", "bun,node,ls,cat,grep,diff,git",
+    ], { ORG_ASK_EXPERT: "notice-parser", ORG_ASK_SESSION: "tools-dsml-num", ORG_ASK_QUESTION: "作曲", ORG_TOOLS: "write" });
+    expect(r.ok).toBe(true);
+    const events = eventsOf(dir);
+    const toolCalls = events.filter((e) => e.name === "journal" && (e.data as { name?: string })?.name === "tool_call");
+    expect(toolCalls.length).toBe(1);
+    // args 摘要里 tempo 是数值 84（无引号），timbre 是字符串（带引号）
+    const callJson = JSON.stringify(toolCalls[0]);
+    expect(callJson).toContain("audio_compose");
+    expect(callJson).toMatch(/tempo[":= ]+84/);
+    expect(callJson).not.toMatch(/tempo[":= ]+"84"/);
+  }, 120_000);
+
   test("读工具全链：<tool> 调用 → 真实读文件 → 结果回灌 → 最终答案 + 事件", async () => {
     const fixture = makeFixture({
       "direct:notice-parser": [
