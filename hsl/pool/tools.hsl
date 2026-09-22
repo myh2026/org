@@ -301,11 +301,18 @@ export fn tools_prompt(mode: ToolMode) -> String {
         out.push_str("- issue_comment {\"repo\":\"owner/repo\",\"number\":N,\"body\":\"…\"} — comment on an issue (write, may require approval).\n");
         out.push_str("- issue_close {\"repo\":\"owner/repo\",\"number\":N,\"state\":\"closed\"|\"open\"} — close/reopen an issue (write, may require approval).\n");
         out.push_str("- pr_create {\"repo\":\"owner/repo\",\"title\":\"…\",\"head\":\"feat/x\",\"base\":\"main\",\"body\":\"…\"?} — open a pull request (write, may require approval).\n");
+        // v0.5.22 依赖安装车道（#65 —— 外部子进程执行：process_spawn 门 + 审批在环；
+        // 白名单拒绝发生在门与 spawn 之前，lib/deps.ts 内部先判）
+        out.push_str("- deps_install {\"file\":\"package.json\"?,\"packages\":[\"zod\"]} — install packages via the whitelisted lane (bun add / npm install / pnpm add / uv pip install / pip install / poetry add / cargo add — closed subcommand table; package-name whitelist regex + manifest path jail + 120s timeout; engine absent → honest manual command, never a fake success). May require approval.\n");
     }
     out.push_str("- issue_list {\"repo\":\"owner/repo\",\"state\":\"open\",\"limit\":20} — list GitHub issues (read-only). Auth: ORG_GH_TOKEN or org config set gh_token.\n");
     out.push_str("- issue_get {\"repo\":\"owner/repo\",\"number\":51} — read one issue with body (read-only).\n");
     out.push_str("- pr_list {\"repo\":\"owner/repo\",\"state\":\"open\"} — list pull requests (read-only).\n");
     out.push_str("- pr_view {\"repo\":\"owner/repo\",\"number\":12} — PR detail with truncated diff (read-only).\n");
+    // v0.5.22 能力批 B（#146 SAST + #65 依赖 + #104 重跑 —— 只读三件，零审批门槛）
+    out.push_str("- sast_scan {\"targets\":[\"src/**\"]?} — SAST static security scan over the workspace (multi-engine degrade chain: ruff --select S → bandit → built-in regex rules — always produces output; gitleaks secrets cross-cut lane when present; py/ts both covered). Read-only.\n");
+    out.push_str("- deps_probe {} — dependency toolchain probe (uv/pip/poetry/bun/npm/pnpm/cargo: which + version + install hints; plus workspace manifest auto-detect package.json / pyproject.toml / Cargo.toml). Read-only.\n");
+    out.push_str("- retest_plan {\"file\":\"*.test.ts\"?,\"name\":\"substr\"?,\"failed_only\":true?} — selective re-run PLAN (discovers tests/*.test.ts; selectors --file glob/substring, --name → bun test -t, --failed-only from the flaky ledger latest run; flaky = 2 consecutive fails in runtime/flaky.jsonl). Generates `bun test <files> --timeout 120000 [-t pattern]` — read-only, NEVER executes.\n");
     out.push_str("After a tool call you will receive a <tool_result> message; use it and continue. When you have the final answer, reply WITHOUT any <tool> tags.\n");
     out
 }
@@ -475,6 +482,10 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         // v0.5.21：工单写动作（远端 issue/PR 变更 —— file_write 门 + 审批在环，
         // 与本地文件同级治理；issue_close 含 reopen 语义）
         "issue_create" | "issue_comment" | "issue_close" | "pr_create" => String::from("file_write"),
+        // v0.5.22：依赖安装是外部子进程执行车道（spawn 包管理器 —— process_spawn
+        // 门 + 审批在环；白名单/包名校验/监狱拒绝发生在门与 spawn 之前，
+        // lib/deps.ts 内部先判）；sast_scan/deps_probe/retest_plan 是只读工具（例外清单）
+        "deps_install" => String::from("process_spawn"),
         // v0.5.20：DevTools DOM 交互是外部浏览器动作车道（agent-browser 子进程
         // 或 CDP 连接 —— process_spawn 门 + 审批在环；probe/console/network 是
         // 只读采集面（例外清单）
@@ -527,7 +538,11 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         // v0.5.21：工单只读四件（issue_list/issue_get + pr_list/pr_view —— 纯查询
         // 远端仓库零本地写副作用；写动作 create/comment/close 走 file_write 门）
         && name != String::from("issue_list") && name != String::from("issue_get")
-        && name != String::from("pr_list") && name != String::from("pr_view") {
+        && name != String::from("pr_list") && name != String::from("pr_view")
+        // v0.5.22：能力批 B 只读三件（sast_scan 扫描只读零写；deps_probe 探测
+        // 零副作用；retest_plan 只生成计划不执行 —— 真跑走 CLI org retest run）
+        && name != String::from("sast_scan") && name != String::from("deps_probe")
+        && name != String::from("retest_plan") {
         let approved = gate_write(policy, gate_cap, name.clone(), args.clone()).await;
         if approved == String::from("denied") {
             emit_tool(String::from("tool_denied"), format!("{} {}", name, "capability denied"));
@@ -624,7 +639,12 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "pr_list" => tool_pr_list(args.clone()),
         "pr_view" => tool_pr_view(args.clone()),
         "pr_create" => tool_pr_create(args.clone()),
-        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/iac_parse/iac_plan/iac_graph/iac_generate/mobile_devices/mobile_logcat/mobile_plan/mcp_servers/mcp_tools/mcp_call_tool/devtools_probe/devtools_console/devtools_network/devtools_interact/mcp_sessions/shell_run/agent_spawn/audio_compose/audit_export/review_suggest）", name)),
+        // v0.5.22 能力批 B（#146 SAST + #65 依赖管理 + #104 选择性重跑）
+        "sast_scan" => tool_sast_scan(args.clone()),
+        "deps_probe" => tool_deps_probe(args.clone()),
+        "deps_install" => tool_deps_install(args.clone()),
+        "retest_plan" => tool_retest_plan(args.clone()),
+        _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/iac_parse/iac_plan/iac_graph/iac_generate/mobile_devices/mobile_logcat/mobile_plan/mcp_servers/mcp_tools/mcp_call_tool/devtools_probe/devtools_console/devtools_network/devtools_interact/mcp_sessions/shell_run/agent_spawn/audio_compose/audit_export/review_suggest/issue_list/issue_get/issue_create/issue_comment/issue_close/pr_list/pr_view/pr_create/sast_scan/deps_probe/deps_install/retest_plan）", name)),
     };
     emit_tool(String::from("tool_result"), result_summary(result.clone()));
     result
@@ -2642,6 +2662,121 @@ fn tool_pr_create(args: String) -> String {
     }
 }
 
+// ----------------------------------------------------------------------------
+// v0.5.22 能力批 B（#146 SAST + #65 依赖管理 + #104 选择性重跑）
+// lib/sast.ts / lib/deps.ts / lib/retest.ts 单一实现三端消费（与 CLI/Web 同源）；
+// sast_scan/deps_probe/retest_plan 只读（例外清单），deps_install 执行车道
+// （process_spawn 门 + 审批在环；白名单/包名校验/监狱拒绝先于 spawn）。
+// ----------------------------------------------------------------------------
+
+fn tool_sast_scan(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "sast_scan", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const sast = await import(root + "/lib/sast.ts");
+            const a = JSON.parse(args);
+            const targets = Array.isArray(a.targets) ? a.targets.map(String).filter(Boolean).slice(0, 32) : undefined;
+            const engine = a.engine === "builtin" ? "builtin" : "auto";
+            const r = targets && targets.length > 0 ? sast.scanSast(ws, { targets, engine }) : sast.scanSast(ws, { engine });
+            const order = { high: 0, medium: 1, low: 2 };
+            const findings = r.findings.slice().sort((x, y) => order[x.severity] - order[y.severity]);
+            return JSON.stringify({
+                tool: "sast_scan", ok: true, files: r.files, scanned: r.scanned, took_ms: r.tookMs,
+                lanes: r.lanes, high: r.summary.high, medium: r.summary.medium, low: r.summary.low,
+                truncated: r.truncated, unresolved: r.unresolved, refused: r.refused,
+                engines: { ruff: r.engines.ruff.available, bandit: r.engines.bandit.available, semgrep: r.engines.semgrep.available, gitleaks: r.engines.gitleaks.available },
+                findings: findings.slice(0, 60).map((f) => ({ rule: f.rule, file: f.file, line: f.line, severity: f.severity, engine: f.engine, message: String(f.message).slice(0, 160) })),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "sast_scan", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_deps_probe(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "deps_probe", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const fsMod = await import("node:fs");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const deps = await import(root + "/lib/deps.ts");
+            const tools = deps.probeDepsTools();
+            const manifest = ["package.json", "pyproject.toml", "Cargo.toml"].find((f) => fsMod.existsSync(pathMod.join(ws, f)));
+            const parsed = manifest ? deps.parseDepsManifest(ws, manifest) : null;
+            return JSON.stringify({
+                tool: "deps_probe", ok: true,
+                tools: tools.map((t) => ({ name: t.name, available: t.available, version: t.version, note: t.note ? String(t.note).slice(0, 120) : undefined })),
+                manifest: parsed && parsed.ok && parsed.manifest ? { file: parsed.manifest.file, kind: parsed.manifest.kind, deps: parsed.manifest.deps.length, name: parsed.manifest.name, version: parsed.manifest.version } : null,
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "deps_probe", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_deps_install(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "deps_install", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const deps = await import(root + "/lib/deps.ts");
+            const a = JSON.parse(args);
+            const packages = Array.isArray(a.packages) ? a.packages.map(String).filter(Boolean) : [];
+            const r = deps.depsInstall(ws, { file: a.file ? String(a.file) : undefined, packages });
+            if (r.mode === "denied") return JSON.stringify({ tool: "deps_install", ok: false, kind: "denied", error: r.error });
+            if (r.mode === "manual") return JSON.stringify({ tool: "deps_install", ok: true, mode: "manual", engine: r.engine, manual_command: r.manualCommand, note: "引擎缺席 —— 诚实降级为手动命令（执行后依赖入环境/清单）" });
+            return JSON.stringify({
+                tool: "deps_install", ok: r.ok, mode: r.mode, engine: r.engine, file: r.file,
+                argv: r.argv, exit_code: r.exitCode,
+                stdout: r.stdout ? String(r.stdout).slice(-1024) : undefined,
+                stderr: r.stderr ? String(r.stderr).slice(-512) : undefined,
+                error: r.error,
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "deps_install", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_retest_plan(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "retest_plan", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const pathMod = await import("node:path");
+            const wsRaw = String($host.config.workspace || ".").replace(/\\/g, "/");
+            const ws = pathMod.isAbsolute(wsRaw) ? wsRaw : pathMod.resolve(process.cwd(), wsRaw);
+            const retest = await import(root + "/lib/retest.ts");
+            const a = JSON.parse(args);
+            const p = retest.retestPlan(ws, {
+                file: a.file ? String(a.file) : undefined,
+                name: a.name ? String(a.name) : undefined,
+                failedOnly: a.failed_only === true || a.failedOnly === true,
+            });
+            if (!p.ok) return JSON.stringify({ tool: "retest_plan", ok: false, kind: "empty", error: p.error });
+            const flaky = retest.flakySummary(ws);
+            return JSON.stringify({
+                tool: "retest_plan", ok: true, files: p.files, name_pattern: p.namePattern,
+                failed_names: p.failedNames, command: p.command, flaky_count: p.flakyCount,
+                note: p.note, ledger_runs: flaky.runs, ledger_bad: flaky.bad,
+                flaky: flaky.entries.filter((e) => e.flaky).slice(0, 20).map((e) => ({ key: e.key, history: e.history.slice(-5) })),
+            });
+        } catch (e) {
+            return JSON.stringify({ tool: "retest_plan", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
 
 fn tool_semantic_search(args: String) -> String {
     native typescript {
@@ -3414,6 +3549,21 @@ fn result_summary(result: String) -> String {
                 if (tool === "mcp_call_tool") {
                     const c = o.content || {};
                     return tool + (o.ok ? " ok " + String(o.server) + "." + String(o.invoked ?? "?") + (o.is_error ? " 工具层失败(isError)" : " 文本" + String(c.text_blocks ?? "?") + "块") : " [" + String(o.kind || "?") + "] " + String(o.reason || o.error || "").split("\n")[0].slice(0, 90));
+                }
+                // v0.5.22 能力批 B 的观测摘要（journal 人读面）
+                if (tool === "sast_scan") {
+                    const eng = o.engines || {};
+                    return tool + (o.ok ? " ok " + String(o.scanned ?? "?") + "/" + String(o.files ?? "?") + "文件 high=" + String(o.high ?? "?") + " med=" + String(o.medium ?? "?") + " low=" + String(o.low ?? "?") + " 车道py=" + String((o.lanes || {}).py ?? "?") + "/密钥" + String((o.lanes || {}).secrets ?? "?") + "（ruff" + String(eng.ruff ? "✓" : "✗") + " bandit" + String(eng.bandit ? "✓" : "✗") + "）" + ((o.findings || [])[0] ? " top=" + String(o.findings[0].rule) + "@" + String(o.findings[0].file) + ":" + String(o.findings[0].line) : "") : " " + String(o.error || "").slice(0, 90));
+                }
+                if (tool === "deps_probe") {
+                    const av = (o.tools || []).filter(function (t) { return t.available; }).map(function (t) { return t.name; });
+                    return tool + " ok 在场=" + (av.length > 0 ? av.join("/") : "（全缺席）") + " 清单=" + String((o.manifest && o.manifest.file) || "无");
+                }
+                if (tool === "deps_install") {
+                    return tool + (o.mode === "manual" ? " ok 降级手动命令：" + String(o.manual_command || "").slice(0, 80) : o.ok ? " ok " + String(o.engine) + " " + String((o.argv || []).slice(1).join(" ")).slice(0, 80) : " [" + String(o.mode || "?") + "] " + String(o.error || "").split("\n")[0].slice(0, 90));
+                }
+                if (tool === "retest_plan") {
+                    return tool + (o.ok ? " ok " + String((o.files || []).length) + "文件 flaky=" + String(o.flaky_count ?? 0) + " 台账" + String(o.ledger_runs ?? 0) + "轮 → " + String(o.command || "").slice(0, 80) : " [empty] " + String(o.error || "").slice(0, 90));
                 }
                 return tool + " ok " + size + " chars";
             }

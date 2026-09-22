@@ -180,6 +180,9 @@ import {
   resolveTrackerTarget, issueList, issueGet, issueCreate, issueComment, issueSetState,
   prList, prView, prCreate, trackerGuidance, maskToken,
 } from "../lib/tracker.ts"; // v0.5.21 工单系统（#86 Issue 集成 + #82 PR/MR —— GitHub REST 真集成，Web 是第三端）
+import { scanSast, probeSastEngines, SAST_RULES } from "../lib/sast.ts"; // v0.5.22 SAST（#146 —— Web 是第三端）
+import { probeDepsTools, parseDepsManifest, depsInstall } from "../lib/deps.ts"; // v0.5.22 依赖管理面（#65 —— Web 是第三端）
+import { retestPlan, flakySummary, discoverTestFiles } from "../lib/retest.ts"; // v0.5.22 选择性重跑 / flaky 台账（#104 —— Web 是第三端）
 
 // ---- 会话目录扫描（防路径穿越：expert/session 名只允许字母数字连字符下划线） ----
 
@@ -2160,6 +2163,100 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
             return json({ ok: false, error: (e as Error).message }, 400);
           }
         }
+        // v0.5.22 能力批 B Web 面（第三端）：
+        //   GET  /api/govex/sast?targets=a.py,src/**&engine=auto|builtin（只读扫描）
+        //   POST /api/govex/deps {action:probe|list|add, file?, packages?}（add = 用户亲自操作，同 tracker POST 哲学）
+        //   GET  /api/govex/retest?action=plan|flaky&file=&name=&failed_only=1（只读：计划生成不执行 + 台账观测）
+        // 与 CLI org sast/deps/retest · 工具环 sast_scan/deps_probe/deps_install/retest_plan
+        // 同源 lib（单一实现三端消费）。
+        if (route === "GET /api/govex/sast") {
+          const rws = readWorkspaceOf(ws);
+          const engineParam = String(url.searchParams.get("engine") ?? "auto").trim().toLowerCase();
+          const engine = engineParam === "builtin" ? "builtin" : "auto";
+          const targetsParam = String(url.searchParams.get("targets") ?? "").trim();
+          const targets = targetsParam ? targetsParam.split(",").map((s) => s.trim()).filter(Boolean).slice(0, 32) : undefined;
+          const probe = probeSastEngines();
+          try {
+            const r = scanSast(rws, { targets, engine });
+            return json({
+              ok: true, took_ms: r.tookMs, files: r.files, scanned: r.scanned,
+              summary: r.summary, findings: r.findings.slice(0, 200), total_findings: r.findings.length,
+              lanes: r.lanes, notes: r.notes, unresolved: r.unresolved, refused: r.refused,
+              skipped: r.skipped, truncated: r.truncated, rules: SAST_RULES.length,
+              engines: {
+                ruff: probe.ruff.available, ruff_version: probe.ruff.version,
+                bandit: probe.bandit.available, semgrep: probe.semgrep.available,
+                gitleaks: probe.gitleaks.available,
+              },
+            });
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
+        if (route === "POST /api/govex/deps") {
+          const rws = readWorkspaceOf(ws);
+          const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+          const action = String(body.action ?? "probe").trim();
+          try {
+            if (action === "probe") {
+              const tools = probeDepsTools();
+              const manifest = ["package.json", "pyproject.toml", "Cargo.toml"].find((f) => fs.existsSync(path.join(rws, f)));
+              const parsed = manifest ? parseDepsManifest(rws, manifest) : null;
+              return json({
+                ok: true, tools,
+                manifest: parsed && parsed.ok && parsed.manifest
+                  ? { file: parsed.manifest.file, kind: parsed.manifest.kind, deps: parsed.manifest.deps.length, name: parsed.manifest.name, version: parsed.manifest.version }
+                  : null,
+              });
+            }
+            if (action === "list") {
+              const file = String(body.file ?? "").trim();
+              if (!file) return json({ ok: false, error: "file 必填（package.json / pyproject.toml / Cargo.toml，工作区相对）" }, 400);
+              const r = parseDepsManifest(rws, file);
+              if (!r.ok || !r.manifest) return json({ ok: false, error: r.error }, 400);
+              return json({ ok: true, manifest: r.manifest });
+            }
+            if (action === "add") {
+              // 写动作 = 面板用户亲自操作（与 tracker POST 同治理档：无审批在环；
+              // 白名单/包名校验/监狱拒绝在 lib 内部先于任何 spawn）
+              const packages = Array.isArray(body.packages) ? (body.packages as unknown[]).map(String).map((s) => s.trim()).filter(Boolean) : [];
+              const r = depsInstall(rws, {
+                file: body.file ? String(body.file) : undefined,
+                packages,
+              });
+              if (r.mode === "denied") return json({ ok: false, mode: r.mode, error: r.error }, 400);
+              return json({ ok: r.ok || r.mode === "manual", mode: r.mode, engine: r.engine, file: r.file, packages: r.packages, argv: r.argv, manual_command: r.manualCommand, exit_code: r.exitCode, stdout: r.stdout, stderr: r.stderr, error: r.error });
+            }
+            return json({ ok: false, error: `未知 action：${action || "（空）"}（probe/list/add）` }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
+        if (route === "GET /api/govex/retest") {
+          const rws = readWorkspaceOf(ws);
+          const action = String(url.searchParams.get("action") ?? "plan").trim();
+          try {
+            if (action === "plan") {
+              const fileParam = String(url.searchParams.get("file") ?? "").trim();
+              const nameParam = String(url.searchParams.get("name") ?? "").trim();
+              const failedOnly = url.searchParams.get("failed_only") === "1" || url.searchParams.get("failed_only") === "true";
+              const p = retestPlan(rws, { file: fileParam || undefined, name: nameParam || undefined, failedOnly });
+              if (!p.ok) return json({ ok: false, kind: "empty", error: p.error, discovered: discoverTestFiles(rws).length }, 400);
+              return json({ ok: true, files: p.files, name_pattern: p.namePattern, failed_names: p.failedNames, command: p.command, flaky_count: p.flakyCount, note: p.note });
+            }
+            if (action === "flaky") {
+              const s = flakySummary(rws);
+              return json({
+                ok: true, runs: s.runs, bad: s.bad, flaky_count: s.flakyCount,
+                discovered: discoverTestFiles(rws).length,
+                entries: s.entries.slice(0, 100).map((e) => ({ key: e.key, file: e.file, name: e.name, runs: e.runs, fails: e.fails, flaky: e.flaky, history: e.history.slice(-8) })),
+              });
+            }
+            return json({ ok: false, error: `未知 action：${action || "（空）"}（plan/flaky —— 只读两动作，真跑走 CLI org retest run）` }, 400);
+          } catch (e) {
+            return json({ ok: false, error: (e as Error).message }, 400);
+          }
+        }
         if (route === "GET /api/spawns") {
         // v0.5.11：派生池（agent_spawn 池化重档的观测面）。
           // 数据源三层：① <ws>/spawn/pool.json 登记（v0.5.11 起每次派生回写）；
@@ -2682,6 +2779,7 @@ export async function webMain(argv: string[]): Promise<number> {
   console.log(`  MCP 客户端桥  GET /api/govex/mcp（v0.5.19 #122/C12：servers 档案+宿主探测/tools 工具清单/resources 资源/read 读取/prompts 提示词 —— 只读五动作；call 执行车道走 CLI/工具环）`);
   console.log(`  IaC 深度   GET /api/govex/iac（v0.5.18 #44：HCL 解析/依赖图/人读 Plan/manifest 逆向生成 + probe 五面探测；与 iacscan 扫描互补）`);
   console.log(`  工单系统   GET/POST /api/govex/tracker（v0.5.21 #86/#82：GitHub issue/PR REST 真集成 —— list/get/pr_list/pr_view 只读 + create/comment/close/reopen/pr_create 写动作；无 token 诚实指引）`);
+  console.log(`  安全/依赖   GET /api/govex/sast · POST /api/govex/deps · GET /api/govex/retest（v0.5.22 #146/#65/#104：SAST 多引擎降级链 ruff→bandit→内置规则永远有产出；七工具探测 + 白名单安装车道；选择性重跑计划 + flaky 台账（只读））`);
   console.log(`  模型       ${p.model}（GUI 可切 scripted/deepseek，请求体可逐次覆盖）`);
   // v0.4.13：网关三件套可见性 —— 直连服务商（DeepSeek 等）的鉴权/模型/超时
   // 经环境变量注入（spawn 车道继承 process.env），横幅回显防「配了没生效」。
@@ -3723,7 +3821,7 @@ function renderIndexHtml(): string {
   <button id="toolboxBtn" class="rchip" type="button" title="工具箱（v0.5.15）— 🗄 SQLite 查询 · 🔎 符号跳转 · 🛡 密钥扫描 · 📦 审计导出 · 📋 SBOM · 👥 评审推荐">
     <span class="rc-label">🧰 工具箱</span>
   </button>
-  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16+）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🐞 LSP/DAP 调试 · 🌿 merge/rebase · 👥 团队协作 · ☁ 云生态 · 📱 移动端调试 · ⚒ IaC深度 · 🛰 远程 Agent · 📋 工单（issue/PR）">
+  <button id="govexBtn" class="rchip" type="button" title="治理与扩展（v0.5.16+）— 🛡 IaC 扫描 · 🧩 插件 · 🛂 RBAC · 🔌 OpenAPI · 🌐 浏览器快照 · 🩺 查询诊断 · ⌨ 补全/重命名 · 🐞 LSP/DAP 调试 · 🌿 merge/rebase · 👥 团队协作 · ☁ 云生态 · 📱 移动端调试 · ⚒ IaC深度 · 🛰 远程 Agent · 📋 工单（issue/PR）· 🛡 SAST · 📦 依赖 · 🔁 重跑">
     <span class="rc-label">🛡 治理与扩展</span>
   </button>
   <span class="tstats" id="topStats"></span>
@@ -3863,7 +3961,7 @@ function renderIndexHtml(): string {
 <div id="govexScrim" aria-hidden="true"></div>
 <div id="govexPane" role="dialog" aria-modal="true" aria-labelledby="gxTitle">
   <div class="schhead">
-    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git · 👥 协作 · ☁ 云生态 · 📱 移动端 · ⚒ IaC深度 · 🛰 远程 · 📋 工单（v0.5.16+）</div>
+    <div class="tt" id="gxTitle">🛡 治理与扩展 — IaC · 插件 · RBAC · OpenAPI · 浏览器 · 诊断 · 补全/重命名 · git · 👥 协作 · ☁ 云生态 · 📱 移动端 · ⚒ IaC深度 · 🛰 远程 · 📋 工单 · 🛡 SAST · 📦 依赖 · 🔁 重跑（v0.5.16+）</div>
     <button class="schclose" type="button" onclick="closeGovex()" title="关闭（Esc）" aria-label="关闭治理与扩展面板">✕</button>
     <div class="tbtabs" role="tablist">
       <button class="tbtab on" id="gxTabIac" type="button" role="tab" onclick="gxTab('iac')">🛡 IaC</button>
@@ -3882,6 +3980,9 @@ function renderIndexHtml(): string {
       <button class="tbtab" id="gxTabRemote" type="button" role="tab" onclick="gxTab('remote')">🛰 远程 Agent</button>
       <button class="tbtab" id="gxTabMcp" type="button" role="tab" onclick="gxTab('mcp')">🔌 MCP 桥</button>
       <button class="tbtab" id="gxTabTrk" type="button" role="tab" onclick="gxTab('trk')">📋 工单</button>
+      <button class="tbtab" id="gxTabSast" type="button" role="tab" onclick="gxTab('sast')">🛡 SAST</button>
+      <button class="tbtab" id="gxTabDeps" type="button" role="tab" onclick="gxTab('deps')">📦 依赖</button>
+      <button class="tbtab" id="gxTabRt" type="button" role="tab" onclick="gxTab('rt')">🔁 重跑</button>
     </div>
   </div>
 
@@ -4179,9 +4280,48 @@ function renderIndexHtml(): string {
       </div>
       <div class="tbout" id="gxTrkOut"><div class="schempty">📋 工单系统（#86/#82）：GitHub Issue/PR REST 真集成 · 鉴权 ORG_GH_TOKEN / org config set gh_token / GH_TOKEN（ORG_GH_API 可指 GitHub Enterprise）· 无 token 诚实拒绝 + 配置指引 · 15s 超时保护。CLI 同款 org issue / org pr；工具环 issue_* / pr_*。写动作 = 面板亲自操作（无审批在环）。</div></div>
     </section>
+
+    <section class="tbsec" id="gxSecSast" hidden>
+      <div class="tbbar">
+        <input id="gxSastTargets" type="text" placeholder="目标（逗号分隔，如 src/**,lib/*.ts；空 = 全工作区）" autocomplete="off" aria-label="扫描目标" style="max-width:340px">
+        <select id="gxSastEngine" aria-label="引擎车道" style="max-width:130px">
+          <option value="auto">auto（降级链）</option><option value="builtin">builtin（内置规则）</option>
+        </select>
+        <button type="button" onclick="gxSastRun()">🛡 扫描</button>
+        <span class="tbmeta" id="gxSastMeta"></span>
+      </div>
+      <div class="tbout" id="gxSastOut" style="max-height:380px"><div class="schempty">🛡 SAST（#146）：多引擎降级链 ruff --select S → bandit → 内置规则（密钥/eval 注入/SQL 拼接/shell 拼接/弱随机 —— 永远有产出）；gitleaks 密钥横切（在场时）；semgrep 增广需 ORG_SEMGREP_CONFIG。与 org scan（密钥）/ org iacscan（容器/IaC）互补。CLI 同款 org sast；工具环 sast_scan（只读）。</div></div>
+    </section>
+
+    <section class="tbsec" id="gxSecDeps" hidden>
+      <div class="tbbar">
+        <button type="button" onclick="gxDepsProbe()">📡 七工具探测</button>
+        <input id="gxDepsFile" type="text" placeholder="清单（如 package.json / pyproject.toml / Cargo.toml）" autocomplete="off" aria-label="清单文件" style="max-width:280px">
+        <button type="button" onclick="gxDepsList()">📋 解析清单</button>
+        <span class="tbmeta" id="gxDepsMeta"></span>
+      </div>
+      <div class="tbbar">
+        <input id="gxDepsPkgs" type="text" placeholder="包名（空格分隔，如 zod dayjs；支持 name@version）" autocomplete="off" aria-label="包名列表" style="max-width:300px">
+        <button type="button" onclick="gxDepsAdd()">➕ 安装（白名单车道）</button>
+        <span class="tbmeta">安装 = 面板亲自操作（与 CLI org deps add 同档）</span>
+      </div>
+      <div class="tbout" id="gxDepsOut" style="max-height:380px"><div class="schempty">📦 依赖管理面（#65）：七工具探测（uv/pip/poetry/bun/npm/pnpm/cargo）· 清单行级解析（package.json / pyproject.toml / Cargo.toml）· 白名单安装车道（bun add / npm install / uv pip install / cargo add —— 包名白名单 + 监狱 + 120s 超时；缺席降级手动命令）。CLI 同款 org deps；工具环 deps_probe（只读）+ deps_install（审批在环）。</div></div>
+    </section>
+
+    <section class="tbsec" id="gxSecRt" hidden>
+      <div class="tbbar">
+        <input id="gxRtFile" type="text" placeholder="--file 模式（glob/子串，如 *.test.ts）" autocomplete="off" aria-label="文件模式" style="max-width:200px">
+        <input id="gxRtName" type="text" placeholder="--name 子串（→ bun test -t）" autocomplete="off" aria-label="名字子串" style="max-width:180px">
+        <label class="tbmeta" style="display:inline-flex;align-items:center;gap:4px"><input type="checkbox" id="gxRtFailed" aria-label="只重跑失败"> failed-only</label>
+        <button type="button" onclick="gxRtPlan()">🔁 生成计划（不执行）</button>
+        <button type="button" onclick="gxRtFlaky()">📉 flaky 台账</button>
+        <span class="tbmeta" id="gxRtMeta"></span>
+      </div>
+      <div class="tbout" id="gxRtOut" style="max-height:380px"><div class="schempty">🔁 选择性重跑 / flaky 管理（#104）：tests/*.test.ts 发现 · 三选择器（--file / --name / --failed-only）· runtime/flaky.jsonl 台账（连续 2 败标记 flaky，再 pass 解除）· 生成 bun test … --timeout 120000 [-t 模式]（B-15 超时纪律）。Web 只读（计划不执行）；真跑走 CLI org retest run；工具环 retest_plan（只读）。</div></div>
+    </section>
   </div>
 
-  <div class="spwfoot">治理与扩展面板与 CLI / 工具环同源（lib/dbdiag · gitmerge · rbac · iacscan · plugins · openapi · browser · completion · rename · lsp · debug · collab · cloud · iac · tracker 单一实现三端消费）—— v0.5.16 「每个功能都有对应操作页面」的延续。</div>
+  <div class="spwfoot">治理与扩展面板与 CLI / 工具环同源（lib/dbdiag · gitmerge · rbac · iacscan · plugins · openapi · browser · completion · rename · lsp · debug · collab · cloud · iac · tracker · sast · deps · retest 单一实现三端消费）—— v0.5.16 「每个功能都有对应操作页面」的延续。</div>
 </div>
 <div id="voiceScrim" aria-hidden="true"></div>
 <div id="voicePane" role="dialog" aria-modal="true" aria-labelledby="voTitle">
@@ -6011,7 +6151,7 @@ function gxMcpSelftest() {
     out.innerHTML = h;
   }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
 }
-var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Lsp", "lsp"], ["Git", "git"], ["Collab", "collab"], ["Cloud", "cloud"], ["Mobile", "mobile"], ["Iacx", "iacx"], ["Remote", "remote"], ["Mcp", "mcp"], ["Trk", "trk"]];
+var GX_TABS = [["Iac", "iac"], ["Plug", "plug"], ["Rbac", "rbac"], ["Oapi", "oapi"], ["Web", "web"], ["Dbd", "dbd"], ["Code", "code"], ["Lsp", "lsp"], ["Git", "git"], ["Collab", "collab"], ["Cloud", "cloud"], ["Mobile", "mobile"], ["Iacx", "iacx"], ["Remote", "remote"], ["Mcp", "mcp"], ["Trk", "trk"], ["Sast", "sast"], ["Deps", "deps"], ["Rt", "rt"]];
 function gxTab(sec) {
   for (const [k, id] of GX_TABS) {
     document.getElementById("gxTab" + k).classList.toggle("on", id === sec);
@@ -6566,6 +6706,112 @@ function gxTrkPrCreate() {
     if (!j.ok) { gxTrkErr(out, j); return; }
     out.innerHTML = '<div class="tbsym">✓ 已创建 PR #' + j.pr.number + "：" + esc(j.pr.title) +
       '<br><span class="tbmeta">' + esc(j.pr.head) + " → " + esc(j.pr.base) + " · " + esc(j.pr.url) + "</span></div>";
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+
+// ---- 🛡 SAST / 📦 依赖 / 🔁 重跑面板（v0.5.22：#146/#65/#104 —— 与 CLI org sast/deps/retest · 工具环 sast_scan/deps_probe/deps_install/retest_plan 同源） ----
+function gxSastRun() {
+  const out = document.getElementById("gxSastOut"), meta = document.getElementById("gxSastMeta");
+  const targets = document.getElementById("gxSastTargets").value.trim();
+  const engine = document.getElementById("gxSastEngine").value;
+  out.innerHTML = '<div class="schempty">扫描中…（' + (engine === "builtin" ? "内置规则车道" : "多引擎降级链 ruff→bandit→内置") + "）</div>";
+  const q = "?engine=" + encodeURIComponent(engine) + (targets ? "&targets=" + encodeURIComponent(targets) : "");
+  fetch("/api/govex/sast" + q).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    const s = j.summary || {};
+    meta.textContent = j.scanned + "/" + j.files + " 文件 · " + j.total_findings + " 发现 · " + j.took_ms + "ms · 车道 py=" + (j.lanes || {}).py + " 密钥=" + (j.lanes || {}).secrets;
+    let h = '<div class="tbsym">🛡 SAST：high ' + s.high + " · medium " + s.medium + " · low " + s.low + '（引擎 ruff ' + (j.engines.ruff ? "✓" : "✗") + " · bandit " + (j.engines.bandit ? "✓" : "✗") + " · gitleaks " + (j.engines.gitleaks ? "✓" : "✗") + "）</div>";
+    for (const n of j.notes || []) h += '<div class="tbrow tbmeta">⬜ ' + esc(String(n).slice(0, 110)) + "</div>";
+    if (!j.total_findings) h += '<div class="schempty">✓ 未发现危险模式（内置 5 族 + 引擎 S 码）</div>';
+    for (const f of j.findings || []) {
+      h += '<div class="tbsym"><b>[' + String(f.severity).toUpperCase() + "]</b> " + esc(f.rule) + ' <span class="tbmeta">(' + esc(f.engine) + ")</span> " + esc(f.file) + ":" + f.line +
+        '<br><span class="tbmeta">' + esc(String(f.message).slice(0, 130)) + "</span></div>";
+    }
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxDepsProbe() {
+  const out = document.getElementById("gxDepsOut"), meta = document.getElementById("gxDepsMeta");
+  out.innerHTML = '<div class="schempty">探测中…（七工具 which + --version）</div>';
+  gxPost("/api/govex/deps", { action: "probe" }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    const av = (j.tools || []).filter(function (t) { return t.available; }).map(function (t) { return t.name; });
+    meta.textContent = "在场 " + av.length + "/7" + (av.length ? "：" + av.join("/") : "（全缺席）");
+    let h = '<div class="tbsym">📦 依赖工具链（' + (j.tools || []).length + " 家）</div>";
+    for (const t of j.tools || []) {
+      h += '<div class="tbrow">' + (t.available ? '<span class="spwc">✓</span>' : "⬜") + " <b>" + esc(t.name) + "</b> " +
+        (t.available ? esc(String(t.version || "").slice(0, 50)) : '<span class="tbmeta">' + esc(String(t.note || "").slice(0, 80)) + "</span>") + "</div>";
+    }
+    if (j.manifest) h += '<div class="tbrow tbmeta" style="margin-top:6px">工作区清单：' + esc(j.manifest.file) + "（" + esc(j.manifest.kind) + " · " + j.manifest.deps + " 依赖" + (j.manifest.name ? " · " + esc(j.manifest.name) : "") + "）</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxDepsList() {
+  const out = document.getElementById("gxDepsOut");
+  const file = document.getElementById("gxDepsFile").value.trim();
+  if (!file) { out.innerHTML = '<div class="schempty">先填清单文件（如 package.json）</div>'; return; }
+  out.innerHTML = '<div class="schempty">解析中…（行级解析）</div>';
+  gxPost("/api/govex/deps", { action: "list", file: file }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    const m = j.manifest || {};
+    let h = '<div class="tbsym">📦 ' + esc(m.file) + "（" + esc(m.kind) + (m.name ? " · " + esc(m.name) + (m.version ? "@" + esc(m.version) : "") : "") + " · " + (m.deps || []).length + " 依赖）</div>";
+    for (const d of m.deps || []) {
+      h += '<div class="tbrow">L' + d.line + " <b>" + esc(d.name) + '</b> <span class="tbmeta">[' + esc(d.kind) + "] " + esc(String(d.spec)) + "</span></div>";
+    }
+    for (const n of m.notes || []) h += '<div class="tbrow tbmeta">⚠ ' + esc(String(n)) + "</div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxDepsAdd() {
+  const out = document.getElementById("gxDepsOut");
+  const pkgs = document.getElementById("gxDepsPkgs").value.trim().split(/[\s,]+/).filter(function (s) { return s.length > 0; });
+  const file = document.getElementById("gxDepsFile").value.trim();
+  if (pkgs.length === 0) { out.innerHTML = '<div class="schempty">先填包名（空格分隔）</div>'; return; }
+  out.innerHTML = '<div class="schempty">安装中…（白名单车道 · 120s 超时）</div>';
+  const b = { action: "add", packages: pkgs };
+  if (file) b.file = file;
+  gxPost("/api/govex/deps", b).then(function (j) {
+    if (j.mode === "manual") {
+      out.innerHTML = '<div class="tbsym">📦 引擎缺席（' + esc(j.engine) + "）—— 手动命令车道：<br><code>" + esc(j.manual_command) + "</code></div>";
+      return;
+    }
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error || ("退出码 " + j.exit_code)) + "</div>"; return; }
+    let h = '<div class="tbsym">✓ ' + esc(j.engine) + " " + esc(String((j.argv || []).slice(1).join(" "))) + "（退出码 " + j.exit_code + "）</div>";
+    if (j.stdout) h += '<div class="tbout" style="max-height:200px;margin-top:6px"><span style="white-space:pre-wrap">' + esc(String(j.stdout).slice(-1500)) + "</span></div>";
+    out.innerHTML = h;
+    document.getElementById("gxDepsPkgs").value = "";
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxRtPlan() {
+  const out = document.getElementById("gxRtOut"), meta = document.getElementById("gxRtMeta");
+  const file = document.getElementById("gxRtFile").value.trim();
+  const name = document.getElementById("gxRtName").value.trim();
+  const failed = document.getElementById("gxRtFailed").checked;
+  out.innerHTML = '<div class="schempty">生成计划中…（只读，不执行）</div>';
+  const q = (file ? "&file=" + encodeURIComponent(file) : "") + (name ? "&name=" + encodeURIComponent(name) : "") + (failed ? "&failed_only=1" : "");
+  fetch("/api/govex/retest?action=plan" + q).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + (j.discovered !== undefined ? '（tests/ 发现 ' + j.discovered + " 文件）" : "") + "</div>"; return; }
+    meta.textContent = (j.files || []).length + " 文件 · flaky " + (j.flaky_count || 0);
+    let h = '<div class="tbsym">🔁 重跑计划（' + (j.files || []).length + " 文件" + (j.name_pattern ? ' · -t "' + esc(j.name_pattern) + '"' : "") + " · flaky 台账 " + (j.flaky_count || 0) + "）</div>";
+    if (j.note) h += '<div class="tbrow tbmeta">' + esc(j.note) + "</div>";
+    for (const f of j.files || []) h += '<div class="tbrow">· ' + esc(f) + "</div>";
+    if (j.failed_names) h += '<div class="tbrow tbmeta">失败集：' + esc((j.failed_names || []).slice(0, 8).join(" | ")) + "</div>";
+    h += '<div class="tbout" style="margin-top:6px"><code>' + esc(j.command) + "</code></div>";
+    out.innerHTML = h;
+  }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function gxRtFlaky() {
+  const out = document.getElementById("gxRtOut"), meta = document.getElementById("gxRtMeta");
+  out.innerHTML = '<div class="schempty">读取台账中…（runtime/flaky.jsonl）</div>';
+  fetch("/api/govex/retest?action=flaky").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error) + "</div>"; return; }
+    meta.textContent = j.runs + " 轮 · flaky " + j.flaky_count + "/" + (j.entries || []).length;
+    let h = '<div class="tbsym">📉 flaky 台账：' + j.runs + " 轮 · " + (j.entries || []).length + " 测试 · flaky " + j.flaky_count + (j.bad ? '（坏行 ' + j.bad + "）" : "") + '（连续 2 败标记）</div>';
+    if (!(j.entries || []).length) h += '<div class="schempty">（空 —— org retest run 跑一轮后自动记账）</div>';
+    for (const e of j.entries || []) {
+      h += '<div class="tbrow">' + (e.flaky ? "⚠" : "·") + " <b>" + esc(e.name) + '</b> <span class="tbmeta">' + esc(e.file) + " · " + e.runs + " 轮 " + e.fails + " 败 · " + esc((e.history || []).slice(-6).join("→")) + "</span></div>";
+    }
+    out.innerHTML = h;
   }).catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
 }
 

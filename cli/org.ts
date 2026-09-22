@@ -120,6 +120,11 @@ import {
   resolveTrackerTarget, issueList, issueGet, issueCreate, issueComment, issueSetState,
   prList, prView, prCreate, trackerGuidance, maskToken,
 } from "../lib/tracker.ts"; // v0.5.21 工单系统（#86 Issue 集成 + #82 PR/MR）
+import { scanSast, probeSastEngines, SAST_RULES, sastGuidance } from "../lib/sast.ts"; // v0.5.22 SAST（#146）
+import { probeDepsTools, parseDepsManifest, depsInstall, depsGuidance } from "../lib/deps.ts"; // v0.5.22 依赖管理面（#65）
+import {
+  retestPlan, retestRun, flakySummary, discoverTestFiles, retestGuidance,
+} from "../lib/retest.ts"; // v0.5.22 选择性重跑 / flaky 台账（#104）
 
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
@@ -2933,6 +2938,178 @@ async function cmdPr(a: Args): Promise<number> {
   }
 }
 
+// ============================================================================
+// v0.5.22 能力批 B（#146 SAST + #65 依赖管理 + #104 选择性重跑）
+// ----------------------------------------------------------------------------
+// lib/sast.ts / lib/deps.ts / lib/retest.ts 单一实现三端消费（CLI 此处 ·
+// 工具环 sast_scan/deps_probe/deps_install/retest_plan · Web govex 三端点）。
+// ============================================================================
+
+/** org sast <targets...> [--workspace DIR] [--engine auto|builtin] —— SAST 静态安全分析（#146）。 */
+async function cmdSast(a: Args): Promise<number> {
+  const ws = defaultWorkspace(a);
+  const engineFlag = (restFlag(a, "engine") ?? "auto").toLowerCase();
+  if (engineFlag !== "auto" && engineFlag !== "builtin") {
+    console.error(`✗ --engine 只支持 auto|builtin（收到：${engineFlag}）`);
+    return 2;
+  }
+  const targets = a.rest.filter((r) => !r.startsWith("--"));
+  const r = scanSast(ws, { targets, engine: engineFlag });
+  const eng = r.engines;
+  console.log(`🛡 SAST 扫描：${r.scanned}/${r.files} 文件 · ${r.findings.length} 发现（high ${r.summary.high} · medium ${r.summary.medium} · low ${r.summary.low}）· ${r.tookMs}ms`);
+  console.log(`  引擎链：py=${r.lanes.py}${r.lanes.py === "ruff" ? `（${eng.ruff.version ?? "?"}）` : ""} · 密钥=${r.lanes.secrets} · ts=${r.lanes.ts}${r.lanes.semgrep ? " · semgrep 增广✓" : ""}`);
+  if (r.notes.length > 0) for (const n of r.notes.slice(0, 4)) console.log(`  ⬜ ${n}`);
+  if (r.skipped.binary + r.skipped.oversize + r.skipped.read > 0) {
+    console.log(`  降级跳过：二进制 ${r.skipped.binary} · 超限 ${r.skipped.oversize} · 读失败 ${r.skipped.read}`);
+  }
+  if (r.unresolved.length > 0) console.log(`  ⚠ 目标无命中：${r.unresolved.join(", ")}`);
+  if (r.refused.length > 0) console.log(`  ⚠ 目标越界拒绝：${r.refused.join(", ")}`);
+  if (r.findings.length === 0) {
+    console.log(`\n✓ 未发现危险模式（内置 5 族：密钥/eval 注入/SQL 拼接/shell 拼接/弱随机 + 引擎 S 码）`);
+    return 0;
+  }
+  const order = { high: 0, medium: 1, low: 2 } as const;
+  const hits = [...r.findings].sort((x, y) => order[x.severity] - order[y.severity]);
+  for (const h of hits.slice(0, 200)) {
+    const rule = SAST_RULES.find((s) => s.id === h.rule);
+    console.log(`  [${h.severity.toUpperCase()}] ${h.rule}  ${h.file}:${h.line}\n         ${h.message.slice(0, 120)}${rule ? `\n         修复：${rule.hint.slice(0, 110)}` : ""}`);
+  }
+  if (hits.length > 200) console.log(`  …（共 ${hits.length} 条，仅显示前 200）`);
+  console.log(`\n  ${r.summary.high} 条高危 —— 与 org scan（密钥）/ org iacscan（容器/IaC）互补的三面安全底座`);
+  return r.summary.high > 0 ? 1 : 0;
+}
+
+/** org deps <probe|list|add> [--file package.json] —— 依赖管理面（#65）。 */
+async function cmdDeps(a: Args): Promise<number> {
+  const verb = a.rest[0] ?? "";
+  const usage = (): number => {
+    console.error("用法：");
+    console.error("  org deps probe                                    七工具探测（uv/pip/poetry/bun/npm/pnpm/cargo）");
+    console.error("  org deps list --file package.json                 清单解析（package.json / pyproject.toml / Cargo.toml）");
+    console.error("  org deps add <pkg...> [--file package.json]       安装车道（白名单子命令 + 监狱 + 超时；缺席降级手动命令）");
+    console.error(`  ${depsGuidance()}`);
+    return 2;
+  };
+  if (verb === "probe") {
+    const tools = probeDepsTools();
+    console.log("📦 依赖工具链探测（七工具 which + --version 探活）：");
+    for (const t of tools) {
+      console.log(`  ${t.available ? "✓" : "⬜"} ${t.name.padEnd(7)} ${t.available ? String(t.version ?? "").slice(0, 44) : `缺席 —— ${String(t.note ?? "").slice(0, 66)}`}`);
+    }
+    return 0;
+  }
+  if (verb === "list") {
+    const file = restFlag(a, "file");
+    if (!file) { console.error("✗ --file 必填（package.json / pyproject.toml / Cargo.toml）"); return 2; }
+    const ws = defaultWorkspace(a);
+    const r = parseDepsManifest(ws, file);
+    if (!r.ok || !r.manifest) { console.error(`✗ ${r.error}`); return 1; }
+    const m = r.manifest;
+    console.log(`📦 ${m.file}（${m.kind}）${m.name ? ` · ${m.name}${m.version ? "@" + m.version : ""}` : ""} · ${m.deps.length} 依赖`);
+    const byKind = new Map<string, typeof m.deps>();
+    for (const d of m.deps) {
+      const arr = byKind.get(d.kind) ?? [];
+      arr.push(d);
+      byKind.set(d.kind, arr);
+    }
+    for (const [kind, arr] of byKind) {
+      console.log(`\n  [${kind}]（${arr.length}）`);
+      for (const d of arr) console.log(`    L${String(d.line).padStart(4)}  ${d.name.padEnd(34)} ${d.spec}`);
+    }
+    for (const n of m.notes) console.log(`  ⚠ ${n}`);
+    return 0;
+  }
+  if (verb === "add") {
+    const VALUE_FLAGS = new Set(["file"]);
+    const pos: string[] = [];
+    for (let i = 1; i < a.rest.length; i++) {
+      const t = a.rest[i]!;
+      if (t.startsWith("--")) {
+        if (!t.includes("=") && VALUE_FLAGS.has(t.slice(2))) i++;
+        continue;
+      }
+      pos.push(t);
+    }
+    if (pos.length === 0) { console.error("✗ 至少一个包名（org deps add lodash zod --file package.json）"); return 2; }
+    const ws = defaultWorkspace(a);
+    const r = depsInstall(ws, { file: restFlag(a, "file"), packages: pos });
+    if (!r.ok && r.mode === "denied") { console.error(`✗ ${r.error}`); return 2; }
+    if (r.mode === "manual") {
+      console.log(`📦 引擎缺席（${r.engine}）—— 手动命令车道：`);
+      console.log(`  ${r.manualCommand}`);
+      console.log(`  （安装引擎后重跑 org deps add 可自动执行；探测：org deps probe）`);
+      return 0;
+    }
+    console.log(`📦 ${r.engine} ${r.argv!.slice(1).join(" ")}（${r.file}）`);
+    if (r.stdout) console.log(r.stdout.split("\n").slice(-8).map((l) => `  ${l}`).join("\n"));
+    if (!r.ok) {
+      console.error(`✗ ${r.engine} 退出码 ${r.exitCode}`);
+      if (r.stderr) console.error(r.stderr.split("\n").slice(-4).map((l) => `  ${l}`).join("\n"));
+      return 1;
+    }
+    console.log(`✓ 安装车道完成（${r.engine}）`);
+    return 0;
+  }
+  return usage();
+}
+
+/** org retest <plan|run> [--file 模式] [--name 子串] [--failed-only] —— 选择性重跑 / flaky（#104）。 */
+async function cmdRetest(a: Args): Promise<number> {
+  const verb = a.rest[0] ?? "";
+  const ws = defaultWorkspace(a);
+  const opts = {
+    file: restFlag(a, "file"),
+    name: restFlag(a, "name"),
+    failedOnly: process.argv.includes("--failed-only") || a.rest.includes("--failed-only"),
+  };
+  const usage = (): number => {
+    console.error("用法：");
+    console.error("  org retest plan [--file 模式] [--name 子串] [--failed-only]   生成重跑计划（只读，不执行）");
+    console.error("  org retest run  [--file 模式] [--name 子串] [--failed-only]   执行重跑并记入 flaky 台账");
+    console.error(`  ${retestGuidance()}`);
+    return 2;
+  };
+  if (verb === "plan") {
+    const p = retestPlan(ws, opts);
+    if (!p.ok) { console.error(`✗ ${p.error}`); return 2; }
+    const flaky = flakySummary(ws);
+    console.log(`🔁 重跑计划：${p.files.length} 文件${p.namePattern ? ` · -t "${p.namePattern}"` : ""} · flaky 台账 ${flaky.flakyCount}/${flaky.entries.length} 项`);
+    if (p.note) console.log(`  ${p.note}`);
+    for (const f of p.files) console.log(`  · ${f}`);
+    if (p.failedNames) console.log(`  失败集：${p.failedNames.slice(0, 8).join(" | ")}${p.failedNames.length > 8 ? " …" : ""}`);
+    console.log(`\n  命令：${p.command}`);
+    if (flaky.flakyCount > 0) {
+      console.log(`\n  ⚠ flaky 标记（连续 2 败）：`);
+      for (const e of flaky.entries.filter((x) => x.flaky).slice(0, 8)) {
+        console.log(`    ${e.key} —— ${e.history.slice(-4).join("→")}`);
+      }
+    }
+    return 0;
+  }
+  if (verb === "run") {
+    const r = retestRun(ws, opts);
+    if (!r.ok && r.results.length === 0 && r.error) { console.error(`✗ ${r.error}`); return 2; }
+    console.log(`🔁 重跑：${r.command}`);
+    console.log(`  ${r.passed} pass · ${r.failed} fail · bun 退出码 ${r.exitCode}${r.recorded ? " · 已记入 runtime/flaky.jsonl" : " · ⚠ 台账写入失败"}`);
+    for (const f of r.results.filter((x) => !x.pass).slice(0, 20)) {
+      console.log(`  ✗ ${f.file} > ${f.name}`);
+    }
+    if (r.flakyAfter.length > 0) {
+      console.log(`  ⚠ 新标记 flaky（连续 2 败）：${r.flakyAfter.join(", ")}`);
+    }
+    return r.exitCode === 0 ? 0 : 1;
+  }
+  // 无 verb：显示发现面概览
+  if (!verb) {
+    const files = discoverTestFiles(ws);
+    const flaky = flakySummary(ws);
+    console.log(`🔁 选择性重跑 / flaky 管理：tests/ 下 ${files.length} 个 *.test.ts · 台账 ${flaky.runs} 轮 · flaky ${flaky.flakyCount} 项`);
+    if (files.length > 0) console.log(`  示例：org retest plan --file ${path.basename(files[0]!)} · org retest plan --failed-only`);
+    return usage();
+  }
+  return usage();
+}
+
 async function cmdCollab(a: Args): Promise<number> {
   const verb = a.rest[0] ?? "";
   const ws = a.workspace;
@@ -4473,6 +4650,10 @@ export async function orgMain(): Promise<number> {
     // v0.5.21 工单系统（capabilities #86 Issue/工单集成 + #82 PR/MR —— GitHub 真集成）
     case "issue": case "issues": return cmdIssue(a);
     case "pr": case "prs": case "pull": return cmdPr(a);
+    // v0.5.22 能力批 B（#146 SAST + #65 依赖管理 + #104 选择性重跑）
+    case "sast": return cmdSast(a);
+    case "deps": case "dep": return cmdDeps(a);
+    case "retest": return cmdRetest(a);
     case "devtools": return cmdDevtools(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
@@ -4581,6 +4762,21 @@ export async function orgMain(): Promise<number> {
       密钥/敏感信息扫描（v0.5.15 · #141）：18 类模式（OpenAI/Anthropic/
       GitHub/AWS/私钥/JWT/.env 赋值…）· 预览行全脱敏 · 工具环 fs_write
       同款拦截
+  org sast <targets...> [--engine auto|builtin]
+      SAST 静态安全分析（v0.5.22 · #146）：多引擎降级链 ruff --select S →
+      bandit → 内置规则（密钥/eval 注入/SQL 拼接/shell 拼接/弱随机 ——
+      永远有产出）；gitleaks 密钥横切；semgrep 需 ORG_SEMGREP_CONFIG；
+      高危 exit 1（与 org scan / org iacscan 互补的三面安全底座）
+  org deps <probe|list|add> [--file package.json]
+      依赖管理面（v0.5.22 · #65）：七工具探测（uv/pip/poetry/bun/npm/
+      pnpm/cargo）· 清单解析（package.json / pyproject.toml / Cargo.toml
+      行级）· 白名单安装车道（bun add / npm install / uv pip install /
+      cargo add —— 包名白名单 + 路径监狱 + 120s 超时；缺席降级手动命令）
+  org retest <plan|run> [--file 模式] [--name 子串] [--failed-only]
+      选择性重跑 / flaky 管理（v0.5.22 · #104）：tests/*.test.ts 发现 ·
+      三选择器（--file glob/子串 · --name → -t · --failed-only 台账最新
+      失败集）· runtime/flaky.jsonl 台账（连续 2 败标记 flaky）· 生成
+      bun test <files> --timeout 120000 [-t 模式]（B-15 超时纪律）
   org audit [--run out-a] [--out FILE.zip]
       审计导出（v0.5.15 · #150）：events/journal/llm-stream/审批台账/
       key 池指纹 + markdown 摘要 → 零依赖 zip（python zipfile 可验）

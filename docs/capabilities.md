@@ -117,7 +117,7 @@
 | 62 | 脚本运行 | ✅ | 同上（bun/node 白名单内） |
 | 63 | 构建/编译 | ✅ | dhv check（编译期校验）+ emit（38 后端投射）+ py_compile 交叉语法校验 |
 | 64 | 启动服务 | ✅ | org web/taskd（守护执行器）；长程任务后台起停 |
-| 65 | 安装依赖 | 🟡 | shell_run 可执行 install（白名单内）；无专用依赖管理面 |
+| 65 | 安装依赖 | ✅ | **v0.5.22** lib/deps.ts 单一实现三端消费 —— ① 七工具探测（uv/pip/poetry/bun/npm/pnpm/cargo which 探测带版本）② 清单解析（package.json dependencies/devDependencies · pyproject.toml [project] · Cargo.toml [dependencies] 行级解析）③ 安装车道（uv pip install/bun add/npm install/cargo add 白名单子命令 + 路径监狱 + 超时；工具缺席降级为手动命令指引）。三端：CLI `org deps probe/list/add` · 工具环 `deps_probe`（只读）+ `deps_install`（process_spawn 门 + 审批在环）· Web 📦 依赖面板；tests/deps 16 例。诚实边界：锁文件升级（bun update/pip install -U）是路线图 |
 | 66 | 环境变量管理 | ✅ | 用户环境不可覆盖层 + org config 注入 + DHV_LLM_\*/ORG_\* 全链传递（双车道合并的历史 bug 档案） |
 | 67 | Docker/容器操作 | ✅ | **v0.5.17** lib/cloud.ts 四层：probeDocker（which + --version 探活 + docker info 守护进程可达 5s 硬超时）→ dockerRun **白名单子命令封装**（16 子命令：version/info/ps/images/build/run/create/start/stop/rm/rmi/logs/inspect/pull/tag/push；system prune/kill/exec 等破坏性命令绝不在内，拒绝先于 spawn）+ 数组参数零 shell 面 + 30s 硬超时 + dockerBuild（context/Dockerfile 过 pathjail）→ 降级车道：dockerfileFor 四型生产级模板（node/bun/python/rust，多阶段 + 非 root + healthcheck，过自家 iacscan 自检）+ composeFor + dockerPlan 五意图可粘贴命令序列。三端：CLI org cloud · 工具环 cloud_docker/cloud_dockerfile（process_spawn 门+审批）· Web ☁ 面板 |
 | 68 | 远程 SSH | ✅ | **v0.5.17** lib/cloud.ts：probeSsh（ssh -V 探活 + ~/.ssh config/known_hosts **只看存在性** —— 私钥/密钥内容绝不读取绝不回显）→ sshRun/scpUpload **host 白名单门控**（<ws>/ssh-hosts.allow 缺席 = 拒绝一切远程执行 + 创建指引）+ BatchMode=yes + ConnectTimeout=10 + StrictHostKeyChecking=accept-new + 数组参数 + scp local 过 pathjail/remote 拒 shell 元字符 → 降级车道：sshConfigTemplate（Host 片段 + 密钥/跳板机/IdentitiesOnly 安全建议）+ sshPlan 五步计划。三端：CLI org cloud ssh/scp/ssh-template · 工具环 cloud_ssh（双形态：执行/上传）· Web ☁ 面板。诚实注：沙箱无真实远程主机，交付门控+模板车道，真实车道代码路径完整 |
@@ -166,7 +166,7 @@
 | 101 | 契约测试 | ✅ | 信封契约类型化 + P 投射铁律 |
 | 102 | 快照/视觉回归 | 🟡 | dist/demo 入库快照再生（CI 对拍）；视觉回归未做 |
 | 103 | 模糊/属性/突变测试 | 🟡 | 上游 HSL fuzz 用例；org 侧故障注入即突变测试的运行时形态 |
-| 104 | flaky 管理/测试选择 | 🟡 | 超时纪律（B-15 档案）+ 逐例超时声明；选择性重跑未做 |
+| 104 | flaky 管理/测试选择 | ✅ | **v0.5.22** lib/retest.ts 单一实现三端消费 —— ① tests/*.test.ts 发现 ② 三选择器（--file glob/子串 · --name → bun test -t · --failed-only 台账最新失败集）③ flaky 台账（runtime/flaky.jsonl append-only：file::name 键跨文件不混账 · 连续 2 败标记 flaky · 再 pass 解除 · 坏行容忍）④ 命令生成（--timeout 120000 B-15 纪律）。三端：CLI `org retest plan/run` · 工具环 `retest_plan`（只读——计划生成不执行）· Web 🔁 重跑面板；tests/retest 13 例 |
 | 105 | 测试数据管理 | ✅ | fixtures 目录 + 剧本变体 fixtureVariant + makeWorkspace 隔离工作区 |
 
 ## 八、调试与诊断（106–120）
@@ -223,7 +223,7 @@
 | 143 | 成本/Token 限额 | ✅ | 计量全链 + 日预算（budget_requests 路由器强制 429）+ 成本时间线面板 |
 | 144 | 数据脱敏 | ✅ | key/args 摘要截断 + preview 60 字符；全量脱敏管道未做 |
 | 145 | 登录/API Key/配置管理 | ✅ | org config v3（车道/key 池/降级链/预算）+ env 自动发现 + 连通测试 |
-| 146 | SAST/DAST | 🟡 | dhv check 是 SAST 的语言级形态（编译期处决）；通用 SAST 未接 |
+| 146 | SAST/DAST | ✅ | **v0.5.22** lib/sast.ts 单一实现三端消费 —— 多引擎降级链：① ruff check（Python，实测 0.16.8 在机）② bandit/semgrep/gitleaks（which 探测缺席诚实降级）③ **内置规则引擎兜底**（纯 TS regex：硬编码密钥 sk-/ghp_/AKIA · eval/exec 注入 · SQL 字符串拼接 · shell 拼接 · 弱随机 —— 引擎全缺席也永远有产出）。findings {file,line,rule,severity,engine} + 摘要。三端：CLI `org sast <targets>` · 工具环 `sast_scan`（只读）· Web 🛡 SAST 面板；tests/sast 16 例（ruff 车道 + 内置兜底双对拍）。诚实边界：DAST 动态面与依赖漏洞库（OSV）查询是路线图 |
 | 147 | 容器/IaC 扫描 | ✅ | **v0.5.16** lib/iacscan.ts：16 条规则三族 —— Dockerfile（USER root/无 USER/:latest/ADD url/EXPOSE 22/ENV 密钥/apt 未瘦身，续行 \\ 拼接后同层判定）· compose（privileged/docker.sock/ports 22/network host/2375，环回绑定误报守卫）· terraform（0.0.0.0/0 ingress 且非 80/443/publicly_accessible/硬编码 secret/ssl=false）；注释跳过 + 二进制/超限/读失败三重降级逐文件隔离。诚实边界：行级正则非完整 parser（截断误截方向是漏报，安全侧）。三端：CLI `org iacscan`（高危 exit 1）· 工具环 `iac_scan`（只读）· Web 🛡 面板；tests/iacscan 22 例 |
 | 148 | SBOM/许可证合规 | ✅ | **v0.5.15** lib/sbom.ts SPDX-2.3 生成器：application（org 本体）+ runtime（z-ai-web-dev-sdk，bun.lock 三层宽容解析 JSONC 尾随逗号）+ vendored（dhv-ts）；JSON 与 tag:value 双渲染，**spdx-tools 全量校验 0 错误**；CLI `org sbom --format json|tv` + Web 📋 工具箱；tests/sbom 12 例 |
 | 149 | SSO/RBAC/数据驻留 | ✅ | **v0.5.16 RBAC 半面**：lib/rbac.ts（策略 <ws>/.org/rbac.json 严格形状校验坏文件降级单机 owner 兜底；模式匹配 `*` 全量/尾 `*` 前缀通配/中置 * 不通配；判定次序：未知角色拒→deny 优先→allow→默认拒）+ **工具环可选门控**（`ORG_RBAC_ROLE` 未设 = 完全不启用零回归；设了 → 每工具调用判 tool:<name>，拒绝返回含 rule/reason 的工具错误并落审计：journal rbac_denied 事件 + runtime/rbac.jsonl 决策账本）+ 插件 permissions 字段同命名空间联动（执行面路线图）。诚实边界：**SSO 身份联邦/数据驻留未做**（单机角色声明形态，路线图）。三端：CLI `org rbac list/check` · 工具环 `rbac_check` · Web 🛂 面板；tests/rbac 16 例 |
@@ -264,7 +264,7 @@
 | E24 成本限额/多模型 | ✅ | 预算水位 + 21 车道 + key 池轮换 |
 | E25 评测/配置管理 | ✅ | 评分卡归因 + org config v3 |
 
-**统计（v0.5.21 工单系统批后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 123 · 🟡 27 · ⬜ 0；专家 25 项 → ✅ 25 · 🟡 0 · ⬜ 0。（v0.5.20.2：#88 多人协作与角色权限 🟡→✅ —— collab v0.5.17 + RBAC v0.5.16 合围实态；vendored dhv-ts 0.2.66→0.2.68 同步 S-19 负例口径升级。v0.5.21：#86 Issue/工单集成 + #82 PR/MR 双 🟡→✅ —— lib/tracker.ts GitHub REST 真集成三端消费 + B-23 DSML 第 4 形态 + B-24 推理型模型预算适配 + B-25 测试环境隔离铁律。）
+**统计（v0.5.22 能力批 B 后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 126 · 🟡 24 · ⬜ 0；专家 25 项 → ✅ 25 · 🟡 0 · ⬜ 0。（v0.5.20.2：#88 🟡→✅ collab+RBAC 合围实态；vendored 0.2.66→0.2.68。v0.5.21：#86+#82 双 🟡→✅ GitHub REST 真集成 + B-23/24/25 三 bugfix + vendored 0.2.69/0.2.70。v0.5.22：#146 SAST + #65 依赖管理 + #104 选择性重跑 三 🟡→✅ —— SAST 多引擎降级链 ruff→bandit→内置规则永远有产出 · 七工具探测+白名单安装车道 · flaky 台账+三选择器。）
 
 > v0.5.19 MCP 客户端桥（#122 主表 🟡→✅ + 专家表 C12 🟡→✅ —— **专家矩阵 25/25 满贯**）：
 > lib/mcp.ts 单一实现三端消费 —— stdio 换行分帧 JSON-RPC（跨 chunk 半行缓冲 + 坏行拒收
