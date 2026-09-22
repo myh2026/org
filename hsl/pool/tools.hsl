@@ -297,7 +297,15 @@ export fn tools_prompt(mode: ToolMode) -> String {
         out.push_str("- shell_run {\"cmd\":\"git status\"} — run an allowlisted command (may require approval)\n");
         out.push_str("- agent_spawn {\"goal\":\"...\",\"mode\":\"run\"|\"ask\",\"expert\":\"name\",\"reuse\":false?} — spawn a sub-organization (team mission via org run, or direct expert via org ask). Depth+budget governed recursion (child budget halves each level); similar goals hit the spawn pool and are REUSED at zero cost (pass reuse:false to force a fresh spawn). Use it ONLY when the task genuinely needs multi-step decomposition or another expert's specialty; for trivial lookups use fs_read/fs_list first. The child inherits your model lane.\n");
         out.push_str("- audio_compose {\"timbre\":\"strings\",\"chords\":\"D3:canon:arp\",\"tempo\":90} — compose from chord progression + timbre (8 instruments: piano/strings/flute/organ/harpsichord/music-box/guitar/bell; 7 progressions: canon/pop/epic/circle/jazz/blues/romance); or explicit notes [{\"freq\":261.63,\"start_beat\":0,\"beats\":1}]. Engine renders playable .wav + .mid alongside your reply (deliverable = audio, not sheet).\n");
+        out.push_str("- issue_create {\"repo\":\"owner/repo\",\"title\":\"…\",\"body\":\"…\",\"labels\":[]?} — create a GitHub issue (write, may require approval). Project convention: deliver every meaningful batch with an issue.\n");
+        out.push_str("- issue_comment {\"repo\":\"owner/repo\",\"number\":N,\"body\":\"…\"} — comment on an issue (write, may require approval).\n");
+        out.push_str("- issue_close {\"repo\":\"owner/repo\",\"number\":N,\"state\":\"closed\"|\"open\"} — close/reopen an issue (write, may require approval).\n");
+        out.push_str("- pr_create {\"repo\":\"owner/repo\",\"title\":\"…\",\"head\":\"feat/x\",\"base\":\"main\",\"body\":\"…\"?} — open a pull request (write, may require approval).\n");
     }
+    out.push_str("- issue_list {\"repo\":\"owner/repo\",\"state\":\"open\",\"limit\":20} — list GitHub issues (read-only). Auth: ORG_GH_TOKEN or org config set gh_token.\n");
+    out.push_str("- issue_get {\"repo\":\"owner/repo\",\"number\":51} — read one issue with body (read-only).\n");
+    out.push_str("- pr_list {\"repo\":\"owner/repo\",\"state\":\"open\"} — list pull requests (read-only).\n");
+    out.push_str("- pr_view {\"repo\":\"owner/repo\",\"number\":12} — PR detail with truncated diff (read-only).\n");
     out.push_str("After a tool call you will receive a <tool_result> message; use it and continue. When you have the final answer, reply WITHOUT any <tool> tags.\n");
     out
 }
@@ -464,6 +472,9 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         // process_spawn 门 + 审批在环；档案门拒绝发生在门与 spawn 之前，
         // lib/mcp.ts 内部先判）；mcp_servers/mcp_tools 是枚举面协议操作（例外清单）
         "mcp_call_tool" => String::from("process_spawn"),
+        // v0.5.21：工单写动作（远端 issue/PR 变更 —— file_write 门 + 审批在环，
+        // 与本地文件同级治理；issue_close 含 reopen 语义）
+        "issue_create" | "issue_comment" | "issue_close" | "pr_create" => String::from("file_write"),
         // v0.5.20：DevTools DOM 交互是外部浏览器动作车道（agent-browser 子进程
         // 或 CDP 连接 —— process_spawn 门 + 审批在环；probe/console/network 是
         // 只读采集面（例外清单）
@@ -512,7 +523,11 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         // v0.5.20：DevTools 只读采集三件（probe 零副作用；console/network 是
         // 采集面不写任何东西）+ mcp_sessions 池观测（纯读计数）
         && name != String::from("devtools_probe") && name != String::from("devtools_console")
-        && name != String::from("devtools_network") && name != String::from("mcp_sessions") {
+        && name != String::from("devtools_network") && name != String::from("mcp_sessions")
+        // v0.5.21：工单只读四件（issue_list/issue_get + pr_list/pr_view —— 纯查询
+        // 远端仓库零本地写副作用；写动作 create/comment/close 走 file_write 门）
+        && name != String::from("issue_list") && name != String::from("issue_get")
+        && name != String::from("pr_list") && name != String::from("pr_view") {
         let approved = gate_write(policy, gate_cap, name.clone(), args.clone()).await;
         if approved == String::from("denied") {
             emit_tool(String::from("tool_denied"), format!("{} {}", name, "capability denied"));
@@ -600,6 +615,15 @@ export async fn execute_tool(policy: CapabilityPolicy, call: ToolCall) -> String
         "devtools_network" => tool_devtools_network(args.clone()),
         "devtools_interact" => tool_devtools_interact(args.clone()),
         "mcp_sessions" => tool_mcp_sessions(args.clone()),
+        // v0.5.21 工单系统（#86/#82 GitHub 真集成）
+        "issue_list" => tool_issue_list(args.clone()),
+        "issue_get" => tool_issue_get(args.clone()),
+        "issue_create" => tool_issue_create(args.clone()),
+        "issue_comment" => tool_issue_comment(args.clone()),
+        "issue_close" => tool_issue_close(args.clone()),
+        "pr_list" => tool_pr_list(args.clone()),
+        "pr_view" => tool_pr_view(args.clone()),
+        "pr_create" => tool_pr_create(args.clone()),
         _ => json_ok(name.clone(), false, format!("未知工具 {}（可用：fs_read/fs_list/fs_glob/semantic_search/symbol_search/db_schema/db_query/db_diagnose/read_pdf/fs_write/fs_edit/fs_move/db_migrate/git_merge/git_rebase/rbac_check/iac_scan/openapi_parse/plugin_list/plugin_install/plugin_remove/browser_snapshot/browser_screenshot/complete_at/rename_symbol/collab_threads/collab_feed/collab_summary/collab_post/collab_comment/lsp_definition/lsp_references/lsp_hover/lsp_servers/debug_breakpoints/debug_plan/cloud_probe/cloud_dockerfile/cloud_clis/cloud_docker/cloud_ssh/cloud_k8s/iac_parse/iac_plan/iac_graph/iac_generate/mobile_devices/mobile_logcat/mobile_plan/mcp_servers/mcp_tools/mcp_call_tool/devtools_probe/devtools_console/devtools_network/devtools_interact/mcp_sessions/shell_run/agent_spawn/audio_compose/audit_export/review_suggest）", name)),
     };
     emit_tool(String::from("tool_result"), result_summary(result.clone()));
@@ -2463,6 +2487,162 @@ fn tool_mcp_sessions(args: String) -> String {
 }
 
 
+// ----------------------------------------------------------------------------
+// v0.5.21 工单系统（#86 Issue/工单集成 + #82 PR/MR —— GitHub REST 真集成）
+// lib/tracker.ts 单一实现三端消费；issue_list/issue_get/pr_list/pr_view 只读，
+// issue_create/issue_comment/issue_close/pr_create 写动作
+// （file_write 门 + 审批在环 —— 远端工单与本地文件同级治理）。
+// 鉴权：ORG_GH_TOKEN env > org config set gh_token > GH_TOKEN/GITHUB_TOKEN。
+// ----------------------------------------------------------------------------
+
+fn tool_issue_list(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "issue_list", ok: false, error: "org 根目录未定位（DHV_TS 缺席，需经 org 宿主启动）" });
+            const tracker = await import(root + "/lib/tracker.ts");
+            const a = JSON.parse(args);
+            const { target, error } = tracker.resolveTrackerTarget(String(a.repo ?? ""));
+            if (!target) return JSON.stringify({ tool: "issue_list", ok: false, error });
+            const r = await tracker.issueList(target, { state: a.state, limit: a.limit });
+            if (!r.ok) return JSON.stringify({ tool: "issue_list", ok: false, error: r.error, status: r.status });
+            return JSON.stringify({ tool: "issue_list", ok: true, repo: target.repo, count: Array.isArray(r.data) ? r.data.length : 0, data: r.data });
+        } catch (e) {
+            return JSON.stringify({ tool: "issue_list", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_issue_get(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "issue_get", ok: false, error: "org 根目录未定位" });
+            const tracker = await import(root + "/lib/tracker.ts");
+            const a = JSON.parse(args);
+            const { target, error } = tracker.resolveTrackerTarget(String(a.repo ?? ""));
+            if (!target) return JSON.stringify({ tool: "issue_get", ok: false, error });
+            const r = await tracker.issueGet(target, Number(a.number));
+            if (!r.ok) return JSON.stringify({ tool: "issue_get", ok: false, error: r.error, status: r.status });
+            const d = r.data || {};
+            return JSON.stringify({ tool: "issue_get", ok: true, repo: target.repo, issue: { number: d.number, title: d.title, state: d.state, body: String(d.body ?? "").slice(0, 4000), user: d.user && d.user.login, url: d.html_url, comments: d.comments } });
+        } catch (e) {
+            return JSON.stringify({ tool: "issue_get", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_issue_create(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "issue_create", ok: false, error: "org 根目录未定位" });
+            const tracker = await import(root + "/lib/tracker.ts");
+            const a = JSON.parse(args);
+            const { target, error } = tracker.resolveTrackerTarget(String(a.repo ?? ""));
+            if (!target) return JSON.stringify({ tool: "issue_create", ok: false, error });
+            const r = await tracker.issueCreate(target, { title: a.title, body: a.body, labels: a.labels });
+            if (!r.ok) return JSON.stringify({ tool: "issue_create", ok: false, error: r.error, status: r.status });
+            return JSON.stringify({ tool: "issue_create", ok: true, repo: target.repo, number: r.data.number, title: r.data.title, url: r.data.url });
+        } catch (e) {
+            return JSON.stringify({ tool: "issue_create", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_issue_comment(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "issue_comment", ok: false, error: "org 根目录未定位" });
+            const tracker = await import(root + "/lib/tracker.ts");
+            const a = JSON.parse(args);
+            const { target, error } = tracker.resolveTrackerTarget(String(a.repo ?? ""));
+            if (!target) return JSON.stringify({ tool: "issue_comment", ok: false, error });
+            const r = await tracker.issueComment(target, Number(a.number), String(a.body ?? ""));
+            if (!r.ok) return JSON.stringify({ tool: "issue_comment", ok: false, error: r.error, status: r.status });
+            const d = r.data || {};
+            return JSON.stringify({ tool: "issue_comment", ok: true, repo: target.repo, number: Number(a.number), comment_id: d.id, url: d.html_url });
+        } catch (e) {
+            return JSON.stringify({ tool: "issue_comment", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_issue_close(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "issue_close", ok: false, error: "org 根目录未定位" });
+            const tracker = await import(root + "/lib/tracker.ts");
+            const a = JSON.parse(args);
+            const { target, error } = tracker.resolveTrackerTarget(String(a.repo ?? ""));
+            if (!target) return JSON.stringify({ tool: "issue_close", ok: false, error });
+            const state = String(a.state ?? "closed") === "open" ? "open" : "closed";
+            const r = await tracker.issueSetState(target, Number(a.number), state);
+            if (!r.ok) return JSON.stringify({ tool: "issue_close", ok: false, error: r.error, status: r.status });
+            return JSON.stringify({ tool: "issue_close", ok: true, repo: target.repo, number: r.data.number, state: r.data.state });
+        } catch (e) {
+            return JSON.stringify({ tool: "issue_close", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_pr_list(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "pr_list", ok: false, error: "org 根目录未定位" });
+            const tracker = await import(root + "/lib/tracker.ts");
+            const a = JSON.parse(args);
+            const { target, error } = tracker.resolveTrackerTarget(String(a.repo ?? ""));
+            if (!target) return JSON.stringify({ tool: "pr_list", ok: false, error });
+            const r = await tracker.prList(target, { state: a.state, limit: a.limit });
+            if (!r.ok) return JSON.stringify({ tool: "pr_list", ok: false, error: r.error, status: r.status });
+            return JSON.stringify({ tool: "pr_list", ok: true, repo: target.repo, count: Array.isArray(r.data) ? r.data.length : 0, data: r.data });
+        } catch (e) {
+            return JSON.stringify({ tool: "pr_list", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_pr_view(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "pr_view", ok: false, error: "org 根目录未定位" });
+            const tracker = await import(root + "/lib/tracker.ts");
+            const a = JSON.parse(args);
+            const { target, error } = tracker.resolveTrackerTarget(String(a.repo ?? ""));
+            if (!target) return JSON.stringify({ tool: "pr_view", ok: false, error });
+            const r = await tracker.prView(target, Number(a.number));
+            if (!r.ok) return JSON.stringify({ tool: "pr_view", ok: false, error: r.error, status: r.status });
+            return JSON.stringify({ tool: "pr_view", ok: true, repo: target.repo, pr: r.data });
+        } catch (e) {
+            return JSON.stringify({ tool: "pr_view", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+fn tool_pr_create(args: String) -> String {
+    native typescript {
+        try {
+            const root = (() => { const d = String($host.env.get("DHV_TS") || "").replace(/\\/g, "/"); const m = d.match(/^(.*)\/toolchain\/dhv-ts\/src\/main\.(ts|js)$/); return m ? m[1] : ""; })();
+            if (!root) return JSON.stringify({ tool: "pr_create", ok: false, error: "org 根目录未定位" });
+            const tracker = await import(root + "/lib/tracker.ts");
+            const a = JSON.parse(args);
+            const { target, error } = tracker.resolveTrackerTarget(String(a.repo ?? ""));
+            if (!target) return JSON.stringify({ tool: "pr_create", ok: false, error });
+            const r = await tracker.prCreate(target, { title: a.title, head: a.head, base: a.base, body: a.body });
+            if (!r.ok) return JSON.stringify({ tool: "pr_create", ok: false, error: r.error, status: r.status });
+            return JSON.stringify({ tool: "pr_create", ok: true, repo: target.repo, number: r.data.number, title: r.data.title, head: r.data.head, base: r.data.base, url: r.data.url });
+        } catch (e) {
+            return JSON.stringify({ tool: "pr_create", ok: false, error: String(e && e.message || e) });
+        }
+    }
+}
+
+
 fn tool_semantic_search(args: String) -> String {
     native typescript {
         try {
@@ -3137,6 +3317,11 @@ fn result_summary(result: String) -> String {
                 if (tool === "db_schema") return tool + " ok tables=" + String((o.tables || []).length) + " " + (o.tables || []).map((t) => t.name).slice(0, 5).join(",");
                 if (tool === "db_query") return tool + " ok rows=" + String(o.row_count ?? (o.rows || []).length) + (o.truncated ? " (截断)" : "") + " ms=" + String(o.ms ?? "?");
                 if (tool === "db_migrate") return tool + (o.dry_run ? " dry-run ok" : " ok") + " v" + String(o.version) + " " + String(o.name || "");
+                // v0.5.21：工单系统观测摘要（issue/PR 动作的人读面）
+                if (tool === "issue_list" || tool === "pr_list") return tool + " ok count=" + String(o.count ?? (o.data || []).length) + " " + String(o.repo ?? "");
+                if (tool === "issue_get") return tool + " ok #" + String(o.issue && o.issue.number) + " " + String(o.issue && o.issue.title || "").slice(0, 40);
+                if (tool === "issue_create" || tool === "pr_create") return tool + " ok #" + String(o.number) + " " + String(o.title || "").slice(0, 40);
+                if (tool === "issue_comment" || tool === "issue_close") return tool + " ok #" + String(o.number) + (o.state ? " " + String(o.state) : "");
                 if (tool === "fs_move") return tool + " ok " + String(o.from) + " → " + String(o.to);
                 if (tool === "read_pdf") return tool + " ok engine=" + String(o.engine) + " pages=" + String(o.pages) + " chars=" + String((o.text || "").length);
                 if (tool === "audit_export") return tool + " ok " + String(o.zip) + " entries=" + String(o.entries);

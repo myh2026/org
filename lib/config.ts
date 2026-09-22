@@ -41,12 +41,14 @@ import { PROVIDERS } from "./provider-registry.ts";
 export type ConfigKey =
   | "gateway" | "api_key" | "model" | "thinking" | "timeout_ms" | "default_lane"
   | "api_keys" | "fallbacks" | "budget_requests" | "desktop_notify"
-  | "notify_webhook_url" | "notify_webhook_events";
+  | "notify_webhook_url" | "notify_webhook_events"
+  | "gh_token" | "gh_api";
 
 export const CONFIG_KEYS: readonly ConfigKey[] = [
   "gateway", "api_key", "model", "thinking", "timeout_ms", "default_lane",
   "api_keys", "fallbacks", "budget_requests", "desktop_notify",
   "notify_webhook_url", "notify_webhook_events",
+  "gh_token", "gh_api",
 ] as const;
 
 /** 命名车道（文件形态）。 */
@@ -99,6 +101,10 @@ export interface UserConfig {
   notify_webhook_url: string;
   /** webhook 事件过滤（逗号分隔 kind；空/"*" = 全发）。 */
   notify_webhook_events: string;
+  /** GitHub token（v0.5.21 工单系统 #86/#82）：issue/PR 真集成鉴权（空 = 未配置）。 */
+  gh_token: string;
+  /** GitHub API base（GitHub Enterprise 指向 <host>/api/v3；空 = api.github.com）。 */
+  gh_api: string;
   lanes: Record<string, LaneConfig>;
 }
 
@@ -106,7 +112,8 @@ export function emptyConfig(): UserConfig {
   return {
     gateway: "", api_key: "", model: "", thinking: "", timeout_ms: "", default_lane: "",
     api_keys: [], fallbacks: [], budget_requests: "", desktop_notify: "",
-    notify_webhook_url: "", notify_webhook_events: "", lanes: {},
+    notify_webhook_url: "", notify_webhook_events: "", gh_token: "", gh_api: "",
+    lanes: {},
   };
 }
 

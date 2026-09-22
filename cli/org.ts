@@ -116,6 +116,10 @@ import {
 } from "../lib/schedule.ts"; // 定时任务触发器（v0.5.5）
 import { expandMentions } from "../lib/mentions.ts"; // @文件引用（v0.5.3）
 import { listMemories, addMemory, removeMemory, allMemories } from "../lib/memories.ts"; // 长期记忆（v0.5.3）
+import {
+  resolveTrackerTarget, issueList, issueGet, issueCreate, issueComment, issueSetState,
+  prList, prView, prCreate, trackerGuidance, maskToken,
+} from "../lib/tracker.ts"; // v0.5.21 工单系统（#86 Issue 集成 + #82 PR/MR）
 
 const HSL_ENTRY = path.join(ROOT, "hsl/org.hsl");
 const DIRECT_ENTRY = path.join(ROOT, "hsl/pool/direct.hsl");
@@ -2771,6 +2775,164 @@ async function cmdRename(a: Args): Promise<number> {
 // 子命令：whoami/user（身份）· threads/feed（读）· post/comment（写）·
 // users/summary（视图）· bridge（单用户账本 → 团队可见）。
 
+
+// ============================================================================
+// v0.5.21 工单系统（#86 Issue/工单集成 + #82 PR/MR —— GitHub REST 真集成）
+// ----------------------------------------------------------------------------
+// 鉴权：ORG_GH_TOKEN env > org config set gh_token > GH_TOKEN/GITHUB_TOKEN；
+// 端点：ORG_GH_API env > org config set gh_api > api.github.com（GHE 兼容）。
+// 写动作（create/comment/close/pr create）在工具环走审批；CLI 是用户亲自
+// 执行（与 org config set 同治理档）。
+async function cmdIssue(a: Args): Promise<number> {
+  const verb = a.rest[0] ?? "";
+  const VALUE_FLAGS = new Set(["repo", "state", "limit", "title", "body", "labels"]);
+  const pos: string[] = [];
+  for (let i = 1; i < a.rest.length; i++) {
+    const t = a.rest[i]!;
+    if (t.startsWith("--")) {
+      if (!t.includes("=") && VALUE_FLAGS.has(t.slice(2))) i++;
+      continue;
+    }
+    pos.push(t);
+  }
+  const usage = (): number => {
+    console.error("用法：");
+    console.error("  org issue list --repo <owner/repo> [--state open|closed|all] [--limit N]   列 issue");
+    console.error("  org issue get <num> --repo <owner/repo>                                 issue 详情（含正文）");
+    console.error("  org issue create --repo <owner/repo> --title \"...\" [--body \"...\"]      创建 issue（写动作）");
+    console.error("  org issue comment <num> --repo <owner/repo> --body \"...\"               issue 评论（写动作）");
+    console.error("  org issue close <num> --repo <owner/repo>                               关闭 issue（写动作）");
+    console.error("  org issue reopen <num> --repo <owner/repo>                              重开 issue（写动作）");
+    console.error("  同族：org pr list/get/create（PR/MR 车道）");
+    console.error(`  ${trackerGuidance()}`);
+    return 2;
+  };
+  if (!verb) return usage();
+  const repo = restFlag(a, "repo") ?? "";
+  const { target, error } = resolveTrackerTarget(repo);
+  if (!target) { console.error(`✗ ${error}`); console.error(`\n  ${trackerGuidance()}`); return 2; }
+  try {
+    if (verb === "list") {
+      const r = await issueList(target, { state: restFlag(a, "state"), limit: restFlag(a, "limit") ? Number(restFlag(a, "limit")) : 20 });
+      if (!r.ok) { console.error(`✗ ${r.error}`); return 1; }
+      console.log(`📋 ${target.repo} 的 issue（${restFlag(a, "state") ?? "open"} · ${r.data!.length} 条 · token ${maskToken(target.token)}）`);
+      for (const i of r.data!) {
+        const labels = i.labels.length > 0 ? ` [${i.labels.join(",")}]` : "";
+        console.log(`  #${String(i.number).padEnd(5)} ${i.state === "open" ? "⚪" : "🔒"} ${i.title.slice(0, 64)}${labels}`);
+        console.log(`         ${i.user} · ${i.comments} 评论 · ${i.created_at.slice(0, 10)}`);
+      }
+      console.log(`\n  详情：org issue get <num> --repo ${target.repo}`);
+      return 0;
+    }
+    if (verb === "get") {
+      const num = Number(pos[0] ?? 0);
+      const r = await issueGet(target, num);
+      if (!r.ok) { console.error(`✗ ${r.error}`); return 1; }
+      const d = r.data as Record<string, unknown>;
+      console.log(`#${d.number} ${d.title} [${d.state}]`);
+      console.log(`  ${String((d.user as { login?: string } | undefined)?.login ?? "")} · ${String(d.created_at ?? "").slice(0, 19)} · ${d.comments} 评论 · ${d.html_url}`);
+      const body = String(d.body ?? "");
+      if (body) console.log(`\n${body.slice(0, 2000)}`);
+      return 0;
+    }
+    if (verb === "create") {
+      const title = restFlag(a, "title") ?? pos[0] ?? "";
+      const body = restFlag(a, "body") ?? pos.slice(1).join(" ");
+      const r = await issueCreate(target, { title, body });
+      if (!r.ok) { console.error(`✗ ${r.error}`); return 1; }
+      console.log(`✓ 已创建 issue #${r.data!.number}：${r.data!.title}`);
+      console.log(`  ${r.data!.url}`);
+      return 0;
+    }
+    if (verb === "comment") {
+      const num = Number(pos[0] ?? 0);
+      const body = restFlag(a, "body") ?? "";
+      const r = await issueComment(target, num, body);
+      if (!r.ok) { console.error(`✗ ${r.error}`); return 1; }
+      console.log(`✓ 已评论 #${num}`);
+      return 0;
+    }
+    if (verb === "close" || verb === "reopen") {
+      const num = Number(pos[0] ?? 0);
+      const r = await issueSetState(target, num, verb === "close" ? "closed" : "open");
+      if (!r.ok) { console.error(`✗ ${r.error}`); return 1; }
+      console.log(`✓ issue #${num} → ${r.data!.state}`);
+      return 0;
+    }
+    return usage();
+  } catch (e) {
+    console.error(`✗ ${String((e as Error).message ?? e)}`);
+    return 1;
+  }
+}
+
+async function cmdPr(a: Args): Promise<number> {
+  const verb = a.rest[0] ?? "";
+  const VALUE_FLAGS = new Set(["repo", "state", "limit", "title", "body", "head", "base"]);
+  const pos: string[] = [];
+  for (let i = 1; i < a.rest.length; i++) {
+    const t = a.rest[i]!;
+    if (t.startsWith("--")) {
+      if (!t.includes("=") && VALUE_FLAGS.has(t.slice(2))) i++;
+      continue;
+    }
+    pos.push(t);
+  }
+  const usage = (): number => {
+    console.error("用法：");
+    console.error("  org pr list --repo <owner/repo> [--state open|closed|all] [--limit N]     列 PR");
+    console.error("  org pr view <num> --repo <owner/repo>                                   PR 详情 + diff（8KB 截断）");
+    console.error("  org pr create --repo <owner/repo> --title \"...\" --head <src> --base <dst> [--body]  创建 PR（写动作）");
+    console.error(`  ${trackerGuidance()}`);
+    return 2;
+  };
+  if (!verb) return usage();
+  const repo = restFlag(a, "repo") ?? "";
+  const { target, error } = resolveTrackerTarget(repo);
+  if (!target) { console.error(`✗ ${error}`); console.error(`\n  ${trackerGuidance()}`); return 2; }
+  try {
+    if (verb === "list") {
+      const r = await prList(target, { state: restFlag(a, "state"), limit: restFlag(a, "limit") ? Number(restFlag(a, "limit")) : 20 });
+      if (!r.ok) { console.error(`✗ ${r.error}`); return 1; }
+      console.log(`🔀 ${target.repo} 的 PR（${restFlag(a, "state") ?? "open"} · ${r.data!.length} 条）`);
+      for (const p of r.data!) {
+        console.log(`  #${String(p.number).padEnd(5)} ${p.draft ? "✏️ " : ""}${p.title.slice(0, 64)}`);
+        console.log(`         ${p.head} → ${p.base} · ${p.user} · ${p.created_at.slice(0, 10)}`);
+      }
+      return 0;
+    }
+    if (verb === "view" || verb === "get") {
+      const num = Number(pos[0] ?? 0);
+      const r = await prView(target, num);
+      if (!r.ok) { console.error(`✗ ${r.error}`); return 1; }
+      const d = r.data as Record<string, unknown>;
+      console.log(`PR #${d.number} ${d.title} [${d.state}${d.draft ? " · draft" : ""}]`);
+      console.log(`  ${d.head} → ${d.base} · ${d.user} · +${d.additions}/-${d.deletions} · ${d.changed_files} 文件`);
+      console.log(`  ${d.url}`);
+      const diff = String(d.diff ?? "");
+      if (diff) console.log(`\n--- diff（前 8KB）---\n${diff}`);
+      else if (d.diff_note) console.log(`\n（${d.diff_note}）`);
+      return 0;
+    }
+    if (verb === "create") {
+      const r = await prCreate(target, {
+        title: restFlag(a, "title") ?? pos[0] ?? "",
+        head: restFlag(a, "head") ?? "",
+        base: restFlag(a, "base") ?? "",
+        body: restFlag(a, "body"),
+      });
+      if (!r.ok) { console.error(`✗ ${r.error}`); return 1; }
+      console.log(`✓ 已创建 PR #${r.data!.number}：${r.data!.title}`);
+      console.log(`  ${r.data!.head} → ${r.data!.base} · ${r.data!.url}`);
+      return 0;
+    }
+    return usage();
+  } catch (e) {
+    console.error(`✗ ${String((e as Error).message ?? e)}`);
+    return 1;
+  }
+}
+
 async function cmdCollab(a: Args): Promise<number> {
   const verb = a.rest[0] ?? "";
   const ws = a.workspace;
@@ -4308,6 +4470,9 @@ export async function orgMain(): Promise<number> {
     case "remote": return cmdRemote(a);
     // v0.5.19 MCP 客户端桥（capabilities #122 / C12 —— 协议翻译半面）
     case "mcp": return cmdMcp(a);
+    // v0.5.21 工单系统（capabilities #86 Issue/工单集成 + #82 PR/MR —— GitHub 真集成）
+    case "issue": case "issues": return cmdIssue(a);
+    case "pr": case "prs": case "pull": return cmdPr(a);
     case "devtools": return cmdDevtools(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）

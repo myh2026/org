@@ -139,11 +139,11 @@
 | 79 | 提交/amend | ✅ | 注册表自动提交 + 留痕（sh_quote POSIX 转义防注入） |
 | 80 | merge/rebase | ✅ | **v0.5.16** lib/gitmerge.ts：`gitMerge`（--no-ff/自定义 message）· `gitRebase` · `gitMergeState` 只读探测（分支/上游/ahead-behind/分叉/脏树/stash，git 缺席降级不炸）。**冲突哲学：绝不自动解决** —— 冲突即自动 abort 回滚 + 冲突清单；每命令 30s 超时 + 输出 64KB 截断；仓外零执行（repoGuard）。三端：CLI `org merge/rebase/mergestate` · 工具环 `git_merge/git_rebase`（审批在环 + repo 工作区监狱）· Web 🌿 面板；tests/gitmerge 19 例（真 clone 含冲突 abort 后工作区干净验证） |
 | 81 | 冲突处理 | 🟡 | 同 53 |
-| 82 | 创建 PR/MR | 🟡 | 工程流程层（本开发系列即 PR 工作流）；org 无 API 集成 |
+| 82 | 创建 PR/MR | ✅ | **v0.5.21** lib/tracker.ts `prCreate/prList/prView`（GitHub REST 真集成：head/base 校验 + diff 8KB 截断 + diff 失败降级仅元数据）。三端：CLI `org pr list/view/create` · 工具环 `pr_list/pr_view`（只读）+ `pr_create`（file_write 门 + 审批在环）· Web 📋 面板；tests/tracker 18 例（mock GitHub API 零外联）。诚实边界：merge/review 评论是路线图；GHE 经 ORG_GH_API 兼容 |
 | 83 | PR 审查 | ✅ | **监督回路 review 是 org 的核心**（四态 + 复发检测 + 补丁提案 + 金丝雀） |
 | 84 | 变更影响分析 | ✅ | 补丁 flow 级闸门（评测分不回退）+ 评分卡漂移 + 影子对比 |
 | 85 | 评审人推荐 | ✅ | **v0.5.15** lib/owners.ts `recommendReviewers`：CODEOWNERS 规则聚合（覆盖数排序 + 模式归因 reason）；无 CODEOWNERS → 目录启发式降级（fromCodeowners:false + 诚实说明）。三端：CLI `org owners --review a,b` · 工具环 `review_suggest`（ReadOnly）· Web 工具箱；tests/owners 14 例 |
-| 86 | Issue/工单集成 | 🟡 | 开发流程层（issue 驱动交付，本系列 #28-#31）；org 运行时无 tracker API |
+| 86 | Issue/工单集成 | ✅ | **v0.5.21** lib/tracker.ts 单一实现三端消费 —— GitHub REST v3 真集成（鉴权解析 ORG_GH_TOKEN env > config.gh_token > GH_TOKEN；GHE 端点 ORG_GH_API；token 脱敏 maskToken；repo 形状校验防注入；15s 超时保护；HTTP 错误可诊断传播；无 token 诚实拒绝带三条指引）。issueList/Get/Create/Comment/SetState 五动作。三端：CLI `org issue list/get/create/comment/close/reopen` · 工具环 `issue_list/issue_get`（只读）+ `issue_create/issue_comment/issue_close`（file_write 门 + 审批在环 —— 远端工单与本地文件同级治理）· Web 📋 面板；tests/tracker 18 例（含工具环 e2e：scripted 剧本 → mock 网关真实 fetch → 数据回灌；异步 spawn 驱动 —— spawnSync 阻塞事件循环会让 mock 网关挂死）。真实车道实测：org issue list myh2026/org 5 条渲染 + 本批 issue 由 org issue create 自举提交 |
 | 87 | 团队共享会话/评论 | ✅ | **v0.5.17** lib/collab.ts：单用户会话账本之上叠多用户协作层（向后兼容铁律 —— lib/sessions.ts 只读复用零改写）。append-only JSONL 团队线程（runtime/collab/threads/<id>.jsonl，与审计账本同哲学：只追加不改写；seq 单调 + 坏行容忍）· 回复树（replyTo 任意挂评论，flattenThread 平铺带 depth）· @mention 自动抽取（@name 用户 id 形，与 @路径 同形实现）· 身份层（collab-user 文件 + ORG_COLLAB_USER 覆盖 + 缺省 local）· 协作者视图/摘要 · **会话账本桥** bridgeSession（LedgerTurn 镜像成 kind:"system" 帖，只镜像不改写，meta 回溯键幂等）。三端：CLI `org collab`（whoami/user/threads/feed --since/post/comment/users/summary/bridge 九子命令）· 工具环 `collab_threads/collab_feed/collab_summary/collab_post/collab_comment`（前三只读，后二 file_write 门 + 审批在环）· Web 👥 治理与扩展面板协作 Tab（GET/POST /api/govex/collab，XSS esc 全转义）；tests/collab 26 例（含工具环 e2e + 原账本字节不变 sha256 对拍）。诚实注：本地文件协议，多进程强并发不在面内（append 直写 + seq 冲突检测重读，单机协作场景） |
 | 88 | 多人协作与角色权限 | ✅ | **v0.5.16 RBAC + v0.5.17 collab 合围交付**：多人协作 = lib/collab.ts（团队线程/回复树/@mention/身份层/会话账本桥，见 #87）；角色权限 = lib/rbac.ts（策略文件严格形状校验坏文件降级 owner 兜底；模式匹配 `*` 全量/尾 `*` 前缀；判定次序：未知角色拒→deny 优先→allow→默认拒）+ 工具环可选门控 `ORG_RBAC_ROLE`（未设 = 零回归不启用；设了 → 每工具调用判 tool:<name>，拒绝含 rule/reason 落审计 + rbac.jsonl 决策账本）+ 插件 permissions 同命名空间。三端：CLI `org rbac`/`org collab` · 工具环 `rbac_check` 等 · Web 🛂/👥 面板；tests/rbac 16 例。诚实边界：单机角色声明形态，SSO 身份联邦/数据驻留归 #149 路线图（v0.5.20.2 行文修正：旧口径「RBAC 未做」与 #149 ✅ 行自相矛盾，按实态重写） |
 | 89 | CODEOWNERS | ✅ | **v0.5.15** lib/owners.ts `loadCodeowners`：GitHub 兼容子集（glob 模式 + @owner + 注释 + 后规则覆盖语义）；查找顺序 .org/CODEOWNERS → CODEOWNERS → .github/CODEOWNERS；`matchOwners` 最长匹配。CLI `org owners` + 匹配清单；tests/owners 14 例 |
@@ -264,7 +264,7 @@
 | E24 成本限额/多模型 | ✅ | 预算水位 + 21 车道 + key 池轮换 |
 | E25 评测/配置管理 | ✅ | 评分卡归因 + org config v3 |
 
-**统计（v0.5.20.2 漂移治理批后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 121 · 🟡 29 · ⬜ 0；专家 25 项 → ✅ 25 · 🟡 0 · ⬜ 0。（v0.5.20.2：#88 多人协作与角色权限 🟡→✅ —— collab v0.5.17 + RBAC v0.5.16 合围实态，旧行文「RBAC 未做」与 #149 ✅ 自相矛盾系行文级漂移，本轮修正；同时 vendored dhv-ts 0.2.66→0.2.68 同步，S-19 收紧负例口径升级。）
+**统计（v0.5.21 工单系统批后口径，tests/check.test.ts 防漂移守卫锁定）**：主 Agent 150 项 → ✅ 123 · 🟡 27 · ⬜ 0；专家 25 项 → ✅ 25 · 🟡 0 · ⬜ 0。（v0.5.20.2：#88 多人协作与角色权限 🟡→✅ —— collab v0.5.17 + RBAC v0.5.16 合围实态；vendored dhv-ts 0.2.66→0.2.68 同步 S-19 负例口径升级。v0.5.21：#86 Issue/工单集成 + #82 PR/MR 双 🟡→✅ —— lib/tracker.ts GitHub REST 真集成三端消费 + B-23 DSML 第 4 形态 + B-24 推理型模型预算适配 + B-25 测试环境隔离铁律。）
 
 > v0.5.19 MCP 客户端桥（#122 主表 🟡→✅ + 专家表 C12 🟡→✅ —— **专家矩阵 25/25 满贯**）：
 > lib/mcp.ts 单一实现三端消费 —— stdio 换行分帧 JSON-RPC（跨 chunk 半行缓冲 + 坏行拒收
