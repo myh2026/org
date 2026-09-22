@@ -1,13 +1,14 @@
 // ============================================================================
-// probe10-negative.hsl — B-7 负样本：S-19 应对未知方法名给出 check 期 warning
+// probe10-negative.hsl — B-7 负样本：S-19 未知方法名 check 期拦截
 // ============================================================================
 // 本文件 **故意调用不存在的方法**（vec_nope / str_nope / map_nope）。
-// 预期行为：
-//   check：0 error + 3 warning[S-19]（B-1 类「check 过 / run 崩」断层的前置暴露）；
-//   run  ：按旧行为崩溃（「没有方法」）—— 本文件不被 demo/测试执行，
-//          仅作 S-19 的静态验证载体（`bun toolchain/dhv-ts/src/main.ts check
-//          hsl/probe/probe10-negative.hsl` 应输出 3 条 S-19 warning）。
-// 注意：org check 的退出码只统计 error —— warning 不影响 CI 门禁。
+// 预期行为（上游 v0.2.67 S-19 收紧后口径，issue #13 check/run 对齐）：
+//   check：3 error[S-19]，退出非零 —— check 期即拦（旧口径「0 error +
+//          3 warning、check 过 / run 崩」已于 v0.2.67 升级为 error 即拦，
+//          本文件随之从「warning 载体」升级为「拦截对照面」）；
+//   run  ：同样崩溃 —— 本文件不被 demo/测试执行。
+// 门禁口径：org check CLI 与 tests/check.test.ts 均将 *-negative.hsl
+// 单列反向验证（必须被拦下），不计入「应全过」清单。
 // ============================================================================
 export fn main() -> Result<(), String> {
     let v: Vec<u32> = vec![1, 2, 3];

@@ -431,3 +431,60 @@
 - **测试**：tests/rescue.test.ts 15 例（R1-R7：定标/评分/双入口 e2e/域内
   与显式 fixture 零影响）；degrade T2 适配（卡农任务移交 rescue 领地，
   原意图用域内任务保持）。全量 484/484。
+
+## B-20（ORG 修复，v0.5.13）幽灵转写浮条：hidden 属性被 display:flex 特异性压过
+
+- **现象**（agent-browser QA 复测 v0.5.12）：「⠋ 转写中…」浮条从页面加载
+  即常驻显示，`hidden` 属性形同虚设。
+- **根因**：`.mictx`/`.schmeta` 自定义元素样式定义了 `display:flex`，其
+  特异性覆盖了 UA 样式表的 `[hidden]{display:none}` —— 一切带 `hidden`
+  的元素只要类样式声明了 display 就会显形。
+- **修复**：全局防护规则 `[hidden] { display: none !important; }`
+  （一劳永逸防再犯；`.rchip[hidden]` 定向规则保留双保险）。
+- **测试**：回归测试锚定两受害元素 + 防护规则存在性（tests/fixes.test.ts）。
+  全量 536/536。
+- **教训**：自定义元素默认 display 与 HTML 全局语义（hidden）的交互是
+  UI 回归的高发面 —— 全局 `!important` 防护规则比逐元素修补更抗复发。
+
+## B-21（ORG 修复，v0.5.13）Enter 派发无视团队模式：最常用路径 UI 与行为分裂
+
+- **现象**：用户切「团队」模式后按 Enter（最常用路径），UI 显示团队、
+  行为却是直连车道 —— textarea 的 Enter handler 无条件 `ask()`。
+- **根因**：Enter 键 handler 与 send 按钮 onclick 不同构 —— 前者漏了
+  `state.mode` 分派（`state.mode === "team" ? runTeam(text) : ask()`）。
+- **修复**：Enter 与按钮 onclick 同构分派；回归测试锚定 Enter 块内含
+  mode 分派。修复后团队模式卡农全链路 QA 复验：Enter → 团队 → 语义地板
+  0 < 0.15 → ⇄ 跨车道救援 → composer → audio_compose → ♪ 24.7s WAV
+  + MIDI（B-19 修复持续有效）。
+- **测试**：tests/fixes.test.ts 回归锚；全量 536/536。
+- **教训**：同一动作（发送）的多入口（Enter/按钮）必须共享同一条派发
+  路径 —— 入口分叉即行为分叉。
+
+## B-22（ORG 修复，v0.5.14）直连车道语义地板（B-19 的直连变体）：GUI 缺省专家对域外问题答非所问
+
+- **现象**（agent-browser QA 驱动 Web GUI 直连模式）：GUI 缺省专家
+  notice-parser + scripted 模型，问「你好」/「请创作卡农」得到的是公告域
+  罐头答案（字段映射规则 memo）—— v0.5.10 的 B-19 只修了团队车道，
+  直连车道是同一哲学的漏网变体。
+- **修复**（`directAskGateOf` 三岔口，lib/engine.ts 共享闸门，
+  Web askOnce/askStreamOnce + CLI cmdAsk 双入口同构）：
+  ① `passthrough`：选中专家域内（`direct:<name>` 轨道语料或 manifest
+  词面重合 ≥ 0.15 地板）→ 原行为零变化；
+  ② `reroute`：域外但注册表有域内专家（rescueExpertOf 复用）→ 换专家 +
+  换剧本 + `lane_rescue` 事件前插 + 救援轮默认开工具环（与团队救援同规则）；
+  ③ `degrade`：域外且无可救援 → 零消耗诚实降级（不跑模型不落账本，
+  产物直写 + 建议出口）。仅 scripted 车道介入（真实 LLM 天然域感知）。
+- **附带修复**：选中专家无 `direct:<name>` 轨道时旧路径会 FIXTURE_EXHAUSTED
+  硬失败 → 也走 ②/③；vision 端点宽容解析（裸 data URL 字符串元素也收）；
+  CLI `dim` 未定义潜伏雷（非 TTY 管道下 ReferenceError）。
+- **口径**：超短问题（「你好」）直连车道也降级（团队车道保守放行）——
+  直连的降级是一段可读应答而非拦路墙，答非所问的罐头更糟。
+- **测试**：tests/directgate.test.ts 14 例（D1 单元三岔口定标 · D2/D3 CLI
+  reroute/degrade e2e · D4/D5 Web SSE · D6 域内零影响 · D7 GUI 要素）。
+  全量 550/550。
+- **教训**：同一类缺陷（语义错配）会在平行的车道入口（团队/直连/CLI/Web）
+  逐一复发 —— 修复要提炼成共享闸门函数双入口同构，而不是补某一个入口。
+
+> 台账补录说明（v0.5.20.2 漂移治理批）：B-20/B-21/B-22 实录原仅存于
+> CHANGELOG v0.5.13/v0.5.14，BUGFIXES.md 台账止于 B-19 —— 三节按原格式
+> 补录归档，保持 B-xx 编号体系完整性（论文 bug 修复台账）。

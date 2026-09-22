@@ -25,7 +25,13 @@ function collectHsl(dir: string, out: string[] = [], skip = new Set([".git", "no
 }
 
 describe("结构闸门（dhv check）", () => {
-  const files = collectHsl(ROOT);
+  const all = collectHsl(ROOT);
+  // 负例探针（*-negative.hsl）：按定义应被 S-19 拦下（上游 v0.2.67 收紧：
+  // 未知方法 check 期即拦，issue #13 check/run 对齐）。单列反向验证，
+  // 不入「应全过」清单 —— 与 cli/org.ts cmdCheck 的门禁口径同步（2026-09-19
+  // vendored 0.2.66→0.2.68 同步批）。
+  const files = all.filter((f) => !f.includes("-negative.hsl"));
+  const negatives = all.filter((f) => f.includes("-negative.hsl"));
 
   test("模块数量合理（≥30：内核 + 域目录 + probe + dist 铸出专家）", () => {
     expect(files.length).toBeGreaterThanOrEqual(30);
@@ -40,10 +46,22 @@ describe("结构闸门（dhv check）", () => {
     });
   }
 
-  test("org check CLI 全过（入口链优先排序）", () => {
+  test("org check CLI 全过（入口链优先排序 + 负例单列反向验证）", () => {
     const r = runOrg(["check"]);
     expect(r.ok).toBe(true);
     expect(r.stdout).toContain("0 失败");
+    if (negatives.length > 0) expect(r.stdout).toContain("全部被 S-19 拦截");
+  }, 120_000);
+
+  test("负例探针被 S-19 check 期拦截（v0.2.67 收紧：未知方法 error 即拦，非 warning）", () => {
+    // 拦截面本身也要被测试锁定：每个负例 check 必须失败，且诊断必须
+    // 搞 S-19 码（不是碰巧因别的错误失败）。
+    expect(negatives.length).toBeGreaterThanOrEqual(1);
+    for (const f of negatives) {
+      const r = runDhv(["check", f]);
+      expect(r.ok).toBe(false);
+      expect(r.stdout + r.stderr).toContain("S-19");
+    }
   }, 120_000);
 
   test("mint_hsl 剧本与 stock 逐字一致（生成器出题 = 人工抽查存档）", () => {

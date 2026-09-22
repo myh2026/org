@@ -1343,6 +1343,14 @@ async function cmdCheck(): Promise<number> {
     }
   };
   walk(ROOT);
+  // 负例探针（*-negative.hsl）按定义应 check 失败（S-19 拦截的对照面），
+  // 不计入门禁：上游 v0.2.67 起 S-19 从 warning 收紧为 error（issue #13
+  // check/run 对齐），负例从「0 error + warning」升级为「error 即拦」——
+  // 门禁口径同步跟进：负例单列验证，不入「应全过」清单。
+  const negative: string[] = [];
+  for (let i = files.length - 1; i >= 0; i--) {
+    if (files[i].includes("-negative.hsl")) negative.push(files.splice(i, 1)[0]);
+  }
   // 顺序：入口优先（其 import 链最先建立），stock 与 probe 随后
   files.sort((x, y) => {
     const rank = (p: string): number =>
@@ -1354,8 +1362,22 @@ async function cmdCheck(): Promise<number> {
     const ok = await checkFile(f);
     if (!ok) failed += 1;
   }
-  console.log(`\n${failed === 0 ? "✓" : "✗"} ${files.length} 个 HSL 模块（${failed} 失败）`);
-  return failed === 0 ? 0 : 1;
+  // 负例探针：反向验证 —— 每个都必须被 S-19 拦下（check 非零退出）。
+  // 若有负例意外「check 通过」，说明上游拦截面回退，同样是门禁事件。
+  let negPassedUnexpectedly = 0;
+  for (const f of negative) {
+    const ok = await checkFile(f);
+    if (ok) negPassedUnexpectedly += 1;
+  }
+  if (negative.length > 0) {
+    console.log(
+      negPassedUnexpectedly === 0
+        ? `  ◻ 负例探针 ${negative.length} 个：全部被 S-19 拦截（v0.2.67 收紧后预期行为）`
+        : `  ✗ 负例探针 ${negPassedUnexpectedly}/${negative.length} 个意外通过 —— 上游拦截面可能回退，请复核 vendored dhv-ts 版本`,
+    );
+  }
+  console.log(`\n${failed === 0 && negPassedUnexpectedly === 0 ? "✓" : "✗"} ${files.length} 个 HSL 模块（${failed} 失败）${negative.length > 0 ? ` + 负例 ${negative.length} 个（${negPassedUnexpectedly} 意外通过）` : ""}`);
+  return failed === 0 && negPassedUnexpectedly === 0 ? 0 : 1;
 }
 
 // ---- TUI（OpenCode 级终端前端；实现见 tui/，规格见 docs/tui-spec.md） ----
