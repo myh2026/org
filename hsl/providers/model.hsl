@@ -21,7 +21,13 @@ import { ExpertError } from "../types/errors.hsl";
 ///   review:<role> / direct:<expert> / <expert>:<node>
 export async fn ask(track: String, system: String, user: String) -> Result<String, ExpertError> {
     // 单轮 = 恰好一条用户消息的多轮（v0.5.3 统一实现，语义零变化）。
-    let turns = format!("[{{\"role\":\"user\",\"content\":\"{}\"}}]", json_str(user));
+    // v0.5.24 修（真车道全盲回归）：json_str(user) 返回值自带引号（JSON.stringify
+    // 语义），模板再包一层 \"{}\会产生双引号 —— turns_json 非法 JSON → 运行期
+    // JSON.parse 失败 → 回落 [{role:"user",content:""}] → 真实车道 user 消息恒空
+    // （模型只见系统提示词：decompose 凭提示词里的公告示例自由发挥成 STOCK 管线
+    // / bard 一律要求补充需求 —— 剧本车道掩盖此回归，1385 测试全绿也看不见）。
+    // 修法：模板占位符不加引号，让 json_str 的引号直接充当 JSON 字符串定界。
+    let turns = format!("[{{\"role\":\"user\",\"content\":{}}}]", json_str(user));
     ask_conv(track, system, turns).await
 }
 

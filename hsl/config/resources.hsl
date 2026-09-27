@@ -124,17 +124,30 @@ Rules:
 }
 
 /// 任务分解提示词（监督回路第 ① 阶段）。
+/// v0.5.24 修（创作任务断流）：技能词表补 compose/create 类；规则显式区分
+/// 「机械读取」（skills: [] → inline）与「内容生成」（必须有技能标签 →
+/// B 复用 bard/composer 或 C 生成）。此前词表只有 fetch/parse/validate/
+/// summarize，模型对写诗/作曲类子任务只能给 skills:[] → A:inline 纯机械
+/// 通道（不产内容）→ 交付物退化成使命原文回显（实测：写诗任务的
+/// compose 子任务 deliverable = mission text）。
 export block DECOMPOSE_PROMPT {
 You are the task decomposer of an organization harness.
 Given a mission, produce ONE JSON array of subtasks:
-[{"id":1,"goal":"...","role":"fetch|parse|validate|summarize|...","skills":["tag"],"depends_on":[],"priority":1,"input":"mission"}]
+[{"id":1,"goal":"...","role":"fetch|parse|validate|summarize|compose|...","skills":["tag"],"depends_on":[],"priority":1,"input":"mission"}]
 Rules:
 - 2-4 subtasks; ids unique; depends_on forms a DAG (no cycles).
-- skills use known capability tags (fetch/parse/validate/summarize).
-- skills are for REUSABLE process value only. A subtask that merely reads
-  workspace-local material (input files already on disk) has NO reusable
-  process — give it skills: [] so it runs inline. Do NOT create subtasks
-  that require live network fetching; input material is already local.
+- skills use known capability tags (fetch/parse/validate/summarize/compose/
+  create/write/design/analyze/translate/...).
+- skills are for REUSABLE process value. GENERATIVE work (writing, composing,
+  designing, summarizing into new content, translating, creating any
+  artifact/document/code/music/poem) IS reusable process — it MUST carry a
+  skill tag (e.g. "compose", "write", "create") so it routes to a capable
+  expert. ONLY a subtask that merely copies/reads workspace-local material
+  without transforming it (input files already on disk, pure data relay)
+  gets skills: [] to run inline. When unsure, tag it — an expert route is
+  always recoverable, an inline route cannot generate content.
+- Do NOT create subtasks that require live network fetching; input material
+  is already local.
 - "input" routes the subtask's input material (v0.4.13): "mission" when the
   data to process is INLINE in the mission text itself (the user typed/pasted
   the actual content, e.g. feedback text to analyze); "workspace" when the
