@@ -19,13 +19,16 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { setDefaultTimeout } from "bun:test";
 import { ROOT, DHV, shPath } from "./helpers";
 
 setDefaultTimeout(120_000);
 
-const TMP = "/tmp/org-lane-ask-test";
+// 跨平台临时目录（CI 教训：硬编码 /tmp 在 Windows 必红 —— 文件写入失败
+// → 子进程空输出 → 断言读到 ""）
+const TMP = path.join(os.tmpdir(), "org-lane-ask-test");
 
 interface SeenMsg {
   role: unknown;
@@ -91,7 +94,7 @@ async function runDhvAsync(args: string[], env: Record<string, string> = {}): Pr
 
 function laneEnv(): Record<string, string> {
   return {
-    ORG_CONFIG: "/tmp/org-lane-ask-test/config-absent.json",
+    ORG_CONFIG: path.join(TMP, "config-absent.json"),
     ORG_LANE_KIND: "real",
     DHV_LLM_GATEWAY: `http://127.0.0.1:${server!.port}/v1`,
     DHV_LLM_API_KEY: "test-key",
