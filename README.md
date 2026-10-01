@@ -5,8 +5,8 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.5.25_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
-[![Tests](https://img.shields.io/badge/tests-1385%2F1385_passing-brightgreen.svg)](#-测试与验证状态)
+[![Status](https://img.shields.io/badge/status-v0.5.25.3_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Tests](https://img.shields.io/badge/tests-1387_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.71-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
 [![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-三平台单二进制分发)
@@ -20,6 +20,8 @@
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
 > **v0.5.24 当前状态**：可运行实现，机制级测试全绿（64 文件 · 1385/1385 本地分块实测）。本版为 **vendored 工具链同步 + 版本卫生批**：① vendored dhv-ts 0.2.70 → **0.2.71**（上游 issue #23 三层修复回流：N-6 空分组 check 期拦截（双端同码）+ native 桥 new Function 构造移入 try（可诊断性兜底）+ Ok/Err/Some/None 垫片注入（__enum 标记，HSL match 正确派发）—— org 工具环的 native 定式（IIFE `(() => {...})()`）经此批次实测互证：三段模式误伤 IIFE 已修为四段，org check 闸门全绿）；② 版本单一来源修复：lib/version.ts 停留 0.5.20（v0.5.21~23 三批漏改）→ 0.5.24 对齐 package.json；③ README 徽章三处漂移（status/tests/HSL 版本）+ 本状态段补记。上游对拍：vendored 新鲜度守卫 0.2.71 ≥ 上游 main 0.2.70 ✓；conformance 110/110（+N6 语料双端码集合一致）。
+
+> **v0.5.25.3 当前状态**：可运行实现，**全量终验全绿**（11 批分块 · 66 文件 · **1387 pass / 0 fail / 11 skip**（条件跳过，1398 用例）；慢内核 scale=6 口径，CI/常规环境行为零变化）。v0.5.25 → v0.5.25.3 为**环境兼容四连**（iSH 实弹驱动）：受限内核 Bun rmSync 三级降级链（B-29）· 测试时间预算缩放 TT/PERF + DevTools 冷启动韧性（B-30）· pdfread 子进程超时环境覆盖 · Web 连接保活（Bun.serve idleTimeout + SSE 心跳，B-32）· 超时用例孤儿进程治理（B-31）。完整弧线：基线 1009P/38F → 38 红全归因 → 修复后复跑 13 文件全绿 → **全量 scale=6 终验 0 fail**。
 
 > **v0.5.25 当前状态**：可运行实现。本版为 **环境兼容批 —— 受限内核 Bun rmSync 三级降级链**（iSH 实弹驱动）：新环境实测暴露 Bun 递归删除在受限内核上四版本全断裂（1.1.45 EFAULT / 1.2.23 EACCES / 1.3.14 EFAULT / 1.4.2 EPERM；unlink/rmdir 与 Node/busybox 均正常 → 不兼容在 Bun 实现侧），交付 `lib/fssafe.ts` 三级降级链（原生 → 手工遍历 → shell 兜底；语义保持三不变量 · 常规内核零变化）+ `lib/fssafe-fs.ts` 垫片（68 处调用点改指）+ preload/bunfig 双保险 + tests/fssafe 10 例。实测：org check 48 模块全绿 · demo 六相位全叙事跑通（修复前尾步 exportDist 必炸）· tests/degrade 2/3 → 3/3 · tests/config 20/20。文档治理：CHANGELOG 补 v0.5.24 段 + BUGFIXES 补录 B-23~B-28 + B-29 入账。
 
