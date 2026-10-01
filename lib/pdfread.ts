@@ -27,8 +27,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-/** 子进程硬超时（pdftotext / uv 通用）。 */
-const SUBPROC_TIMEOUT_MS = 30_000;
+/** 子进程硬超时（pdftotext / uv 通用）。慢内核（模拟器 / iSH 类沙箱）上 uv 单次
+ *  提取可逼近并偶超 30s —— ORG_PDF_TIMEOUT_MS 环境覆盖（缺省 30000 = 历史行为；
+ *  慢内核建议 120000，见 v0.5.25.2）。 */
+const SUBPROC_TIMEOUT_MS = (() => {
+  const n = Number(process.env.ORG_PDF_TIMEOUT_MS ?? "30000");
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 30_000;
+})();
 /** 引擎探测（uv --version）超时 —— 坏安装快速降级。 */
 const PROBE_TIMEOUT_MS = 3_000;
 const DEFAULT_MAX_PAGES = 50;
