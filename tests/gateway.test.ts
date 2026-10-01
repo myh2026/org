@@ -10,6 +10,7 @@
 // 缺省行为不变 —— 不出网、确定性、毫秒级。
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { Host } from "../toolchain/dhv-ts/src/host";
 
@@ -149,7 +150,7 @@ describe("v0.4.13 网关直连三件套（DHV_LLM_API_KEY / DHV_LLM_MODEL / DHV_
     expect(out).toBe("ok:20478"); // 升档后预算贯通到网关（8191×2+4096，未触 cap 32768）
     expect(seen[0].body.max_tokens).toBe(32); // 首次按原请求
     expect(seen[1].body.max_tokens).toBe(20478); // 重试按观测需求升档（8191×2+4096）
-  }, 120_000);
+  }, TT);
 
   test("B-24 观测记忆：首次升档成功后，同 Host 后续请求预算下限保持抬升", async () => {
     // 同一 Host 第二次 complete：不再重试（预算已抬），单次直达且
@@ -184,7 +185,7 @@ describe("v0.4.13 网关直连三件套（DHV_LLM_API_KEY / DHV_LLM_MODEL / DHV_
     expect(second).toBe("ok");
     expect(calls).toBe(callsAfterFirst + 1); // 第二次零重试（记忆已抬升预算）
     expect(seen[seen.length - 1].body.max_tokens).toBe(20478);
-  }, 120_000);
+  }, TT);
 
   test("B-24 诚实边界：非预算型空补全（无 reasoning 观测、非 length）不重试，原样抛可诊断错误", async () => {
     let calls = 0;
@@ -212,7 +213,7 @@ describe("v0.4.13 网关直连三件套（DHV_LLM_API_KEY / DHV_LLM_MODEL / DHV_
     expect(calls).toBe(1); // 非预算型：零重试（不为无关错误浪费配额）
     expect(String((err as Error).message)).toContain("empty completion");
     expect(String((err as Error).message)).toContain("content_filter");
-  }, 120_000);
+  }, TT);
 
   test("超时保护：DHV_LLM_TIMEOUT_MS=1 对慢网关（300ms）及时中止并传播错误", async () => {
     startMockGateway(300);

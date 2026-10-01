@@ -17,6 +17,7 @@
 //   5. 注册表与总入口：10 家云 CLI 完整性 · cloudProbeAll 五键齐全 ·
 //      cloudProvidersOverview 21+10 全景联动。
 // ============================================================================
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
@@ -540,7 +541,7 @@ describe("云生态：工具环 e2e（cloud_* 六工具）", () => {
     // 不锁环境（「可观测」的测试意图不变）。
     expect(tr[0]).toMatch(/clis=\d+\/10/);
     expect(tr[0]).toMatch(/docker=(daemon✓|CLI|✗)/);
-  }, 120_000);
+  }, TT);
 
   test("cloud_dockerfile（只读模式可用）：node 模板四要素可观测", () => {
     WS = path.join(WS_ROOT, `t${String(++wsSeq).padStart(3, "0")}`);
@@ -567,7 +568,7 @@ describe("云生态：工具环 e2e（cloud_* 六工具）", () => {
     expect(tr.length).toBe(1);
     expect(tr[0]).toContain("cloud_dockerfile ok python 模板");
     expect(tr[0]).toContain("多阶段");
-  }, 120_000);
+  }, TT);
 
   test("cloud_docker 审批放行后 system prune 仍被 lib 白名单拒绝（拒绝先于 spawn）+ cloud_ssh host 门控", () => {
     WS = path.join(WS_ROOT, `t${String(++wsSeq).padStart(3, "0")}`);
@@ -602,7 +603,7 @@ describe("云生态：工具环 e2e（cloud_* 六工具）", () => {
     // host 不在 ssh-hosts.allow（文件不存在）→ host-not-allowed
     expect(tr[1]).toContain("cloud_ssh error [host-not-allowed]");
     expect(tr[1]).toContain(SSH_HOSTS_ALLOW);
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 8. CLI 冒烟（runOrg 真子进程）--------------------------------------------------
@@ -628,7 +629,7 @@ describe("云生态：CLI 冒烟（org cloud）", () => {
     expect(c.stdout).toContain("aws");
     expect(c.stdout).toContain("oci");
     expect(c.stdout).toContain("云 CLI 注册表");
-  }, 120_000);
+  }, TT);
 
   test("org cloud dockerfile node：模板四要素 + 过 iacscan 自检说明；org cloud manifest deployment", () => {
     const d = runOrg(["cloud", "dockerfile", "node"]);
@@ -642,7 +643,7 @@ describe("云生态：CLI 冒烟（org cloud）", () => {
     expect(m.stdout).toContain("kind: Deployment");
     expect(m.stdout).toContain("resources:");
     expect(m.stdout).toContain("livenessProbe:");
-  }, 120_000);
+  }, TT);
 
   test("org cloud docker system prune：CLI 白名单拒绝 exit 1 + 不 spawn 证明", () => {
     const r = runOrg(["cloud", "docker", "system", "prune"]);
@@ -650,7 +651,7 @@ describe("云生态：CLI 冒烟（org cloud）", () => {
     expect(r.stderr).toContain("白名单拒绝");
     expect(r.stderr).toContain("system prune");
     expect(r.stderr).toContain("零 shell 面");
-  }, 120_000);
+  }, TT);
 
   test("org cloud ssh 无白名单文件 → host-not-allowed + 创建指引", () => {
     const ws = tmpWs("cli-ssh");
@@ -663,7 +664,7 @@ describe("云生态：CLI 冒烟（org cloud）", () => {
     } finally {
       fs.rmSync(ws, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 9. Web 端点 e2e（startWebServer · port 0 随机，web.test.ts 同款）--------------
@@ -680,7 +681,7 @@ describe("云生态：Web /api/govex/cloud 端点", () => {
     server = startWebServer({ workspace: ws, port: 0, model: "scripted" });
     base = `http://127.0.0.1:${server.port}`;
     expect(server.port).toBeGreaterThan(1024);
-  }, 120_000);
+  }, TT);
 
   afterAll(() => {
     server.stop(true);

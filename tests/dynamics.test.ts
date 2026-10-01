@@ -16,6 +16,7 @@
 // 都不生效 —— 详见 tests/helpers.ts 的说明），故逐例显式声明 120_000，
 // 与 tests/demo.test.ts 既有写法一致。放宽的是等待上限，不是断言标准。
 
+import { TT } from "./tt.ts";
 import { describe, test, expect } from "bun:test";
 import * as path from "node:path";
 import * as fs from "node:fs";
@@ -46,7 +47,7 @@ describe("静默更新检测（评分卡漂移告警）", () => {
     expect(countEvents(events, "score_drift_alert")).toBeGreaterThanOrEqual(1);
     const m = metricsOf(ws, "drift")!;
     expect(m.drift_alerts).toBeGreaterThanOrEqual(1);
-  }, 120_000);
+  }, TT);
 });
 
 // ----------------------------------------------------------------------------
@@ -72,7 +73,7 @@ describe("固化自动降级（降级是生命线）", () => {
     // 解冻后 memo 只剩 1 条旧键
     const memo = readJson(path.join(ws, "registry/memos/notice-parser.json"));
     expect(Object.keys(memo.memos)).toEqual(["旧键乙"]);
-  }, 120_000);
+  }, TT);
 });
 
 // ----------------------------------------------------------------------------
@@ -106,7 +107,7 @@ describe("Reject 重派（路由重选）", () => {
     const m = metricsOf(ws, "reject")!;
     expect(m.accepted).toBe(3);
     expect(m.revises_total).toBeGreaterThanOrEqual(1);
-  }, 120_000);
+  }, TT);
 });
 
 // ----------------------------------------------------------------------------
@@ -128,7 +129,7 @@ describe("Escalate 仲裁（用户是信任链的根）", () => {
     expect(journalEvents(events, "arbitrate").some((d) => String(d.detail).includes("verdict=Accept"))).toBe(true);
     const m = metricsOf(ws, "escalate")!;
     expect(m.accepted).toBe(3);
-  }, 120_000);
+  }, TT);
 
   test("仲裁要求修改 → 复用 Revise 全逻辑（返工 + 复发计数）", () => {
     const ws = makeWorkspace("escalate-revise");
@@ -149,7 +150,7 @@ describe("Escalate 仲裁（用户是信任链的根）", () => {
     expect(journalEvents(events, "re-dispatch").length).toBeGreaterThanOrEqual(1);
     const m = metricsOf(ws, "escalate-revise")!;
     expect(m.accepted).toBe(3);
-  }, 120_000);
+  }, TT);
 });
 
 // ----------------------------------------------------------------------------
@@ -187,7 +188,7 @@ describe("补丁变更分级闸门（提议权与合入权分离）", () => {
     expect(events.some((e) => e.name === "audit" && String(e.data?.event ?? "").includes("capability_change_rejected"))).toBe(true);
     const manifest = readJson(path.join(ws, "registry/record-validator.json"));
     expect(manifest.version).toBe("1.0.0");
-  }, 120_000);
+  }, TT);
 
   test("能力变更补丁经用户批准（ORG_CAPABILITY_APPROVED=1）→ 合入 audit-user-only 闸门", () => {
     const ws = makeWorkspace("cap-approve");
@@ -206,7 +207,7 @@ describe("补丁变更分级闸门（提议权与合入权分离）", () => {
     expect(manifest.version).toBe("1.0.1");
     expect(manifest.provenance[0].kind).toBe("capability");
     expect(manifest.provenance[0].gate).toContain("audit-user-only");
-  }, 120_000);
+  }, TT);
 
   test("流程补丁（拓扑关键词）→ full-fixture+no-regress 闸门合入", () => {
     const ws = makeWorkspace("flow-patch");
@@ -225,7 +226,7 @@ describe("补丁变更分级闸门（提议权与合入权分离）", () => {
     expect(manifest.version).toBe("1.0.1");
     expect(manifest.provenance[0].kind).toBe("flow");
     expect(manifest.provenance[0].gate).toBe("full-fixture+no-regress");
-  }, 120_000);
+  }, TT);
 
   test("评测分不回退闸门：恶意流程补丁（破坏校验规则）→ 拒绝回滚", () => {
     const ws = makeWorkspace("flow-regress");
@@ -245,7 +246,7 @@ describe("补丁变更分级闸门（提议权与合入权分离）", () => {
     expect(manifest.version).toBe("1.0.0");
     expect(journalEvents(eventsOf(path.join(ws, "out-b")), "patch")
       .some((d) => String(d.detail).includes("补丁未合入"))).toBe(true);
-  }, 120_000);
+  }, TT);
 });
 
 // ----------------------------------------------------------------------------
@@ -307,5 +308,5 @@ describe("N 版本冗余（实现来源多样）", () => {
     expect(cmp.data!.agree).toBe(true);
     const m = metricsOf(ws, "redundancy")!;
     expect(m.accepted).toBe(3);
-  }, 120_000);
+  }, TT);
 });

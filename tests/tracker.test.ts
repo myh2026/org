@@ -19,6 +19,7 @@
 //      无 token 诚实降级 + 面板区块在场 + 本簇 JS 独立可解析
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
@@ -303,7 +304,7 @@ describe("tracker：CLI 冒烟（org issue / org pr）", () => {
     expect(r.stdout).toContain("#51");
     expect(r.stdout).toContain("DevTools 常驻会话");
     expect(r.stdout).toContain("ghp_…2345"); // token 脱敏（首4+尾4）
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 4. 工具环 e2e（scripted 剧本 + mock 网关） ---------------------------------
@@ -356,7 +357,7 @@ describe("tracker：工具环 e2e（issue_list 只读全链）", () => {
     // 会话账本落最终答案（模型消费了工具结果）
     const ledger = fs.readFileSync(path.join(WS, "runtime/sessions/notice-parser/tracker-e2e.jsonl"), "utf-8");
     expect(ledger).toContain("DevTools 常驻会话");
-  }, 120_000);
+  }, TT);
 
   test("issue_create 工具：只读模式（ORG_TOOLS=1）明确拒绝 + 写档需审批的口径", async () => {
     const fixture = path.join(TEST_RUN, "tracker-fixture.json");
@@ -389,7 +390,7 @@ describe("tracker：工具环 e2e（issue_list 只读全链）", () => {
     const denied = events.filter((e) => e.name === "journal" && (e.data as { name?: string })?.name === "tool_denied");
     expect(denied.length).toBe(1); // 写动作：只读模式拦截（mock 网关零外发）
     expect(requests.length).toBe(0);
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 5. Web 📋 工单面板（第三端：startWebServer 进程内 + mock 网关零外联） --------
@@ -496,7 +497,7 @@ describe("tracker：Web 📋 工单面板（/api/govex/tracker）", () => {
       srv.stop(true);
       fs.rmSync(ws, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, TT);
 
   test("面板：📋 工单 Tab 区块在场（gxSecTrk/端点引用/按钮接线）+ 本簇 JS 独立可解析", async () => {
     const { startWebServer } = await import("../web/entry.ts");

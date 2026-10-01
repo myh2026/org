@@ -20,6 +20,7 @@
 //   4. e2e（工具环 audio_compose，direct 车道）：模型作曲 → 工件 + 渲染
 // ============================================================================
 
+import { TT, PERF } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
@@ -215,7 +216,7 @@ describe("audio：e2e 团队车道（古典音乐 = 音频不是乐谱）", () =
     expect(audioEv.length).toBe(1);
     const files = (audioEv[0]!.data as { files?: Array<{ wavFile?: string; file?: string }> }).files ?? [];
     expect(files.some((f) => (f.wavFile ?? f.file) === "music.wav")).toBe(true);
-  }, 120_000);
+  }, TT);
 
   test("优雅降级：非法 compose 输出 → 内置卡农兜底（WAV 仍在 + 降级标注）", async () => {
     // 剧本：compose 轨道返回垃圾文本（模型输出不可解析）
@@ -238,7 +239,7 @@ describe("audio：e2e 团队车道（古典音乐 = 音频不是乐谱）", () =
     expect(info).not.toBeNull();
     expect(info!.durationSec).toBeGreaterThan(20); // 兜底卡农 8 小节 ≈ 27s
     expect(rms(fs.readFileSync(wavPath))).toBeGreaterThan(3000);
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 4. e2e：工具环（direct 车道 audio_compose → 工件 + 渲染） ----------------
@@ -268,7 +269,7 @@ describe("audio：e2e 工具环（audio_compose 工具）", () => {
     const info = wavInfo(fs.readFileSync(path.join(out, "music.wav")));
     expect(info).not.toBeNull();
     expect(info!.durationSec).toBeGreaterThan(1.9); // 4 拍 @120BPM = 2s + 余量
-  }, 120_000);
+  }, TT);
 
   test("只读模式降级：ORG_TOOLS=1 时 audio_compose 明确拒绝", async () => {
     const fixture = path.join(TEST_RUN, "audio-ro-fixture.json");
@@ -295,7 +296,7 @@ describe("audio：e2e 工具环（audio_compose 工具）", () => {
       && (e.data as { name?: string })?.name === "tool_denied");
     expect(denied.length).toBe(1);
     expect(fs.existsSync(path.join(out, "music.notes.json"))).toBe(false); // 未写工件
-  }, 120_000);
+  }, TT);
 });
 
 // ============================================================================
@@ -376,7 +377,7 @@ describe("audio v0.5.9：音色库（TIMBRES · 8 种乐器）", () => {
     });
     expect(r.ok).toBe(true);
     expect(r.durationSec!).toBeGreaterThan(20);
-    expect(Date.now() - t0).toBeLessThan(10_000); // 24 音 < 10s（性能护栏）
+    expect(Date.now() - t0).toBeLessThan(PERF(10_000)); // 24 音 < 10s（性能护栏·按环境缩放，见 tests/tt.ts）
   });
 });
 
@@ -593,7 +594,7 @@ describe("audio v0.5.9：e2e 工具环和弦车道（timbre + chords 全链）",
     expect(mid.readUInt16BE(12)).toBe(480);
     // 观测：CLI 收尾输出附 MIDI 文件名
     expect(r.stdout).toContain("music.mid");
-  }, 120_000);
+  }, TT);
 
   test("和弦车道宽容形态：对象参数 {root, name, style} 同样可用", async () => {
     const fixture = path.join(TEST_RUN, "audio-chord-obj-fixture.json");
@@ -621,5 +622,5 @@ describe("audio v0.5.9：e2e 工具环和弦车道（timbre + chords 全链）",
     expect(notesJson.notes.some((n) => n.start_beat > 0 && n.start_beat < 2)).toBe(true); // 琶音滚动（bpc=2）
     expect(fs.existsSync(path.join(out, "lullaby.mid"))).toBe(true);
     expect(fs.existsSync(path.join(out, "lullaby.wav"))).toBe(true);
-  }, 120_000);
+  }, TT);
 });

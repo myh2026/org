@@ -28,6 +28,7 @@
 // 环境自适应：fixture server 用 bun 宿主随机端口（spawn 后按行等
 // CDP_FIXTURE_READY 就绪行）；FAKE_CDP_* 快照/恢复（env-hygiene 哲学）。
 // ============================================================================
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
@@ -39,7 +40,7 @@ import {
   parseAbConsoleLine, parseAbNetworkLine, wsUrlToHttpBase, interactScript,
   CDP_DEFAULT_HTTP, ORG_CDP_URL_ENV,
 } from "../lib/devtools.ts";
-import { ROOT, runOrg, runDhv, eventsOf, TEST_RUN } from "./helpers";
+import { ROOT, runOrg, runDhv, eventsOf, TEST_RUN, warmUpEndpoint } from "./helpers";
 import { startWebServer } from "../web/entry.ts";
 import { snapshotEnv, clearEnv, restoreEnv } from "./env-hygiene";
 
@@ -87,6 +88,8 @@ async function startCdpFixture(env: Record<string, string> = {}): Promise<Fixtur
     throw new Error(`CDP fixture 未就绪：${line ?? "(无输出)"}`);
   }
   const httpUrl = m[1]!;
+  // 端点热身：消除冷启动/高负载首连抖动（v0.5.25.1；见 helpers.warmUpEndpoint）
+  await warmUpEndpoint(httpUrl);
   return {
     httpUrl,
     port: Number(new URL(httpUrl).port),
@@ -718,7 +721,7 @@ describe("DevTools：工具环 e2e（devtools_probe / devtools_console / mcp_ses
     } finally {
       fx.stop();
     }
-  }, 120_000);
+  }, TT);
 
   test("devtools_console + mcp_sessions（fixture CDP + 池观测只读例外）", async () => {
     const fx = await startCdpFixture({ FAKE_CDP_CONSOLE: JSON.stringify([{ type: "log", text: "工具环 console 条目" }]) });
@@ -750,5 +753,5 @@ describe("DevTools：工具环 e2e（devtools_probe / devtools_console / mcp_ses
     } finally {
       fx.stop();
     }
-  }, 120_000);
+  }, TT);
 });

@@ -325,12 +325,12 @@ async function agentBrowserCdpUrl(bin: string): Promise<string | null> {
   return m ? m[0] : null;
 }
 
-/** fetch /json/version + /json/list（1.5s 预算 —— 快速失败）。 */
+/** fetch /json/version + /json/list（1.5s 预算 —— 快速失败；冷启动超时单次重试）。 */
 async function fetchCdpInfo(httpUrl: string): Promise<{ version: CdpVersion; pages: CdpTarget[] } | null> {
-  try {
+  const attempt = async (budgetMs: number): Promise<{ version: CdpVersion; pages: CdpTarget[] } | null> => {
     const [vRes, lRes] = await Promise.all([
-      fetch(`${httpUrl}/json/version`, { signal: AbortSignal.timeout(1500) }),
-      fetch(`${httpUrl}/json/list`, { signal: AbortSignal.timeout(1500) }),
+      fetch(`${httpUrl}/json/version`, { signal: AbortSignal.timeout(budgetMs) }),
+      fetch(`${httpUrl}/json/list`, { signal: AbortSignal.timeout(budgetMs) }),
     ]);
     if (!vRes.ok || !lRes.ok) return null;
     const v = (await vRes.json()) as Record<string, unknown>;
@@ -352,8 +352,21 @@ async function fetchCdpInfo(httpUrl: string): Promise<{ version: CdpVersion; pag
       },
       pages,
     };
-  } catch {
-    return null;
+  };
+  try {
+    return await attempt(1500);
+  } catch (e: any) {
+    // 冷启动单次重试（v0.5.25.1 · iSH 实测）：未热身的新起端点在慢速内核上
+    // 首连可超 1.5s 预算（实测首连 1.63s 超时、次连 2ms；测试 fixture 与真实
+    // Chrome 冷启动同构）。仅超时重试 —— 真缺席（拒绝连接）即时返回，
+    // 「快速失败」语义不变；重试预算 3s 仍守有界。
+    const isTimeout = e?.name === "TimeoutError" || /abort|time-?out/i.test(String(e?.message ?? ""));
+    if (!isTimeout) return null;
+    try {
+      return await attempt(3000);
+    } catch {
+      return null;
+    }
   }
 }
 

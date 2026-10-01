@@ -17,6 +17,7 @@
 // 端到端用例逐例 120s 超时（B-15 纪律）。
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
@@ -100,7 +101,7 @@ describe("v0.5.15 工具环扩展 e2e（scripted 剧本驱动）", () => {
     const tr = lastToolResult(out);
     expect(tr).toContain("defs=1");
     expect(tr).toContain("src/app.hsl"); // top= 命中定义位置
-  }, 120_000);
+  }, TT);
 
   test("db_schema + db_query：SQLite 只读查询（真库真查）", () => {
     // 工作区播种一个真实 SQLite 库（bun:sqlite 不建父目录 —— 先建）
@@ -126,7 +127,7 @@ describe("v0.5.15 工具环扩展 e2e（scripted 剧本驱动）", () => {
     const queryDetail = String((results[1]!.data as { detail?: string }).detail ?? "");
     expect(schemaDetail).toContain("notices"); // 表名可观测
     expect(queryDetail).toContain("rows=2");   // 行数可观测（数据面由 tests/db.test.ts 锁定）
-  }, 120_000);
+  }, TT);
 
   test("db_query 只读门：DROP TABLE 被拒（双层门第一层）", () => {
     fs.mkdirSync(path.join(WS, "data"), { recursive: true });
@@ -149,7 +150,7 @@ describe("v0.5.15 工具环扩展 e2e（scripted 剧本驱动）", () => {
     const names = db2.query("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>;
     db2.close();
     expect(names.some((n) => n.name === "t")).toBe(true);
-  }, 120_000);
+  }, TT);
 
   test("db_migrate：审批放行（granted 缓存）→ 版本账本 + dry_run 回滚", () => {
     const fixture = makeFixture({
@@ -172,7 +173,7 @@ describe("v0.5.15 工具环扩展 e2e（scripted 剧本驱动）", () => {
     expect(ver[0]!.name).toBe("init");
     // 伴车迁移账本
     expect(fs.existsSync(path.join(WS, "data", "app.db.migrations.json"))).toBe(true);
-  }, 120_000);
+  }, TT);
 
   test("db 路径监狱：工作区外的库拒绝", () => {
     const fixture = makeFixture({
@@ -186,7 +187,7 @@ describe("v0.5.15 工具环扩展 e2e（scripted 剧本驱动）", () => {
     expect(r.ok).toBe(true);
     const tr = lastToolResult(out);
     expect(tr).toContain("越界");
-  }, 120_000);
+  }, TT);
 
   test("fs_write preview：返回 unified diff 不落盘（#60 干跑）", () => {
     fs.writeFileSync(path.join(WS, "raw", "target.txt"), "alpha\nbeta\n");
@@ -204,7 +205,7 @@ describe("v0.5.15 工具环扩展 e2e（scripted 剧本驱动）", () => {
     expect(tr).toContain("raw/target.txt");
     // 未落盘：内容原样（干跑的核心承诺）
     expect(fs.readFileSync(path.join(WS, "raw", "target.txt"), "utf-8")).toBe("alpha\nbeta\n");
-  }, 120_000);
+  }, TT);
 
   test("fs_write 密钥拦截：高危密钥拒绝落盘（#141）", () => {
     const fixture = makeFixture({
@@ -219,7 +220,7 @@ describe("v0.5.15 工具环扩展 e2e（scripted 剧本驱动）", () => {
     const tr = lastToolResult(out);
     expect(tr).toContain("[secret_scan]");
     expect(fs.existsSync(path.join(WS, "raw", "leak.txt"))).toBe(false);
-  }, 120_000);
+  }, TT);
 
   test("fs_write 密钥拦截逃生口：ORG_SCAN=off 放行", () => {
     const fixture = makeFixture({
@@ -232,7 +233,7 @@ describe("v0.5.15 工具环扩展 e2e（scripted 剧本驱动）", () => {
     const r = askOnce(fixture, out, { ORG_SCAN: "off" });
     expect(r.ok).toBe(true);
     expect(fs.existsSync(path.join(WS, "raw", "trusted.env"))).toBe(true);
-  }, 120_000);
+  }, TT);
 
   test("fs_move：审批放行 → 真实移动 + 越界拒绝", () => {
     fs.writeFileSync(path.join(WS, "raw", "origin.txt"), "content");
@@ -252,7 +253,7 @@ describe("v0.5.15 工具环扩展 e2e（scripted 剧本驱动）", () => {
     const results = events.filter((e) => e.name === "journal" && (e.data as { name?: string })?.name === "tool_result");
     expect(String((results[0]!.data as { detail?: string }).detail ?? "")).toContain("raw/origin.txt → archive/moved.txt");
     expect(String((results[1]!.data as { detail?: string }).detail ?? "")).toContain("越界");
-  }, 120_000);
+  }, TT);
 
   test("audit_export：审批放行 → zip + 摘要落盘（#150）", () => {
     const fixture = makeFixture({
@@ -266,7 +267,7 @@ describe("v0.5.15 工具环扩展 e2e（scripted 剧本驱动）", () => {
     expect(r.ok).toBe(true);
     const zips = fs.readdirSync(WS).filter((f) => f.startsWith("audit-export-") && f.endsWith(".zip"));
     expect(zips.length).toBe(1);
-  }, 120_000);
+  }, TT);
 
   test("review_suggest：CODEOWNERS 推荐（#85/#89）", () => {
     fs.mkdirSync(path.join(WS, ".org"), { recursive: true });
@@ -283,7 +284,7 @@ describe("v0.5.15 工具环扩展 e2e（scripted 剧本驱动）", () => {
     const tr = lastToolResult(out);
     expect(tr).toContain("data-owner");
     expect(tr).toContain("asset-owner");
-  }, 120_000);
+  }, TT);
 
   const pdfReady = pdfEngines().pdftotext || pdfEngines().uv;
   (pdfReady ? test : test.skip)("read_pdf：PDF 文本提取（引擎在场才跑）", () => {

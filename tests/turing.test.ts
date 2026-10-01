@@ -30,6 +30,7 @@
 //      对拍前 normLines() 归一 —— 与解释器逐行一致。
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -69,7 +70,7 @@ function hasTool(tool: string): boolean {
 }
 
 /** 工具在场才注册用例；缺席降级为 skip（理由写进用例名，输出可见）。 */
-function toolTest(tool: string, name: string, fn: () => void, ms = 120_000) {
+function toolTest(tool: string, name: string, fn: () => void, ms = TT) {
   const reg = hasTool(tool) ? test : test.skip;
   reg(`${name}${hasTool(tool) ? "" : `（${tool} 缺席，降级跳过）`}`, fn, ms);
 }
@@ -141,7 +142,7 @@ describe("图灵完备 I：Rule 110 元胞自动机（Cook 2004 TC 证明）", (
     expect(lines[1]!.split("").filter((c2) => c2 === "#").length).toBe(2);
     // 黄金锚点：第 5 代（邻域规则复合演化的稳定对拍位）
     expect(lines[5]).toBe("..................................##...#.......................................");
-  }, 120_000);
+  }, TT);
 
   toolTest(WIN32 ? "python" : "python3", "python 投射：真实运行输出一致 + ruff 全绿", () => {
     const dir = path.join(SCRATCH, "r110-py");
@@ -185,7 +186,7 @@ describe("图灵完备 II：图灵机（3 态忙海狸 BB(3)）", () => {
     // Σ(3)=6：文献级不变量（Rado 1962）
     expect(joined).toContain("steps=13 configs=14 ones=6");
     expect(joined).toContain("BB(3) VERIFIED");
-  }, 120_000);
+  }, TT);
 
   toolTest(WIN32 ? "python" : "python3", "python 投射：真实运行输出一致 + ruff 全绿", () => {
     const dir = path.join(SCRATCH, "bb-py");
@@ -216,7 +217,7 @@ describe("图灵完备 III：Brainfuck 解释器（用 HSL 解释 TC 语言）",
     expect(joined).toContain("BF says: Hello World!");
     expect(joined).toContain("executed=906 instructions");
     expect(joined).toContain("BF VERIFIED");
-  }, 120_000);
+  }, TT);
 
   toolTest(WIN32 ? "python" : "python3", "python 投射：真实运行输出一致 + ruff 全绿", () => {
     const dir = path.join(SCRATCH, "bf-py");

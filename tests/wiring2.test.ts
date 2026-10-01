@@ -21,6 +21,7 @@
 // 端到端用例逐例 120s 超时（B-15 纪律）。
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
@@ -101,7 +102,7 @@ describe("v0.5.16 RBAC 可选门控（execute_tool 分发处）", () => {
     const events = eventsOf(out);
     expect(events.some((e) => e.name === "journal" && (e.data as { name?: string })?.name === "rbac_denied")).toBe(false);
     expect(fs.existsSync(path.join(WS, "runtime", "rbac.jsonl"))).toBe(false);
-  }, 120_000);
+  }, TT);
 
   test("ORG_RBAC_ROLE=observer（deny:*）→ fs_read 被拒 + rule/reason + 双审计落盘", () => {
     // 播种 DEFAULT_RBAC_POLICY 模板（observer 的 deny:["*"] 按拒绝优先语义生效）
@@ -136,7 +137,7 @@ describe("v0.5.16 RBAC 可选门控（execute_tool 分发处）", () => {
     expect(entry.rule).toBe("deny:*");
     expect(entry.reason).toContain("deny 优先");
     expect(typeof entry.ts).toBe("string");
-  }, 120_000);
+  }, TT);
 
   test("ORG_RBAC_ROLE=dev（allow tool:fs_* 前缀通配）→ fs_read 放行", () => {
     fs.mkdirSync(path.join(WS, ".org"), { recursive: true });
@@ -158,7 +159,7 @@ describe("v0.5.16 RBAC 可选门控（execute_tool 分发处）", () => {
     // 放行静默：无 rbac_denied、无账本
     const events = eventsOf(out);
     expect(events.some((e) => e.name === "journal" && (e.data as { name?: string })?.name === "rbac_denied")).toBe(false);
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 2. 工具环新工具 e2e（scripted 剧本驱动） -----------------------------------
@@ -179,7 +180,7 @@ describe("v0.5.16 工具环新工具 e2e", () => {
     expect(tr[0]).toContain("steps=1");
     expect(tr[0]).toContain("tables=t");
     expect(tr[0]).not.toContain("全表扫描"); // INTEGER PRIMARY KEY 命中
-  }, 120_000);
+  }, TT);
 
   test("iac_scan：播种 Dockerfile → 命中可观测（#147）", () => {
     fs.mkdirSync(path.join(WS, "deploy"), { recursive: true });
@@ -200,7 +201,7 @@ describe("v0.5.16 工具环新工具 e2e", () => {
     expect(Number(tr[0]!.match(/high=(\d+)/)?.[1] ?? "0")).toBeGreaterThanOrEqual(1);
     expect(Number(tr[0]!.match(/hits=(\d+)/)?.[1] ?? "0")).toBeGreaterThanOrEqual(3);
     expect(tr[0]).toContain("deploy/Dockerfile"); // top= 命中路径可观测
-  }, 120_000);
+  }, TT);
 
   test("openapi_parse + complete_at：操作清单与补全候选可观测（#134/#32）", () => {
     fs.writeFileSync(path.join(WS, "api.json"), JSON.stringify({
@@ -226,7 +227,7 @@ describe("v0.5.16 工具环新工具 e2e", () => {
     expect(tr[0]).toContain("Demo API");
     expect(tr[1]).toContain("1 候选");
     expect(tr[1]).toContain("prefix=com");
-  }, 120_000);
+  }, TT);
 
   test("rename_symbol：dryRun 缺省预览不落盘（#56）+ git_merge 真合并（#80）", () => {
     // git 仓：main 先落 src/app.hsl（rename 要能找到定义），feature 改一行
@@ -276,7 +277,7 @@ describe("v0.5.16 工具环新工具 e2e", () => {
     expect(merged).toContain("x * 3");
     expect(merged).toContain("fn compute(");
     expect(merged).not.toContain("computeV2");
-  }, 120_000);
+  }, TT);
 
   test("git_merge：审批放行 → 真合并落历史（#80 写半环）", () => {
     for (const args of [
@@ -312,7 +313,7 @@ describe("v0.5.16 工具环新工具 e2e", () => {
     const log = Bun.spawnSync(["git", "log", "--oneline"], { cwd: WS, stdout: "pipe" });
     expect(log.stdout.toString()).toContain("merge feature");
     expect(fs.readFileSync(path.join(WS, "feature.txt"), "utf8")).toBe("y");
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 3. CLI 冒烟（runOrg 真子进程） ---------------------------------------------
@@ -327,7 +328,7 @@ describe("v0.5.16 CLI 冒烟", () => {
     expect(bad.ok).toBe(false); // exit 1
     expect(bad.stdout).toContain("拒绝");
     expect(bad.stdout).toContain("unknown-role");
-  }, 120_000);
+  }, TT);
 
   test("org dbdiag :memory: --setup：EQP 计划 + 建议输出", () => {
     const r = runOrg(["dbdiag", ":memory:", "SELECT b FROM t WHERE a = 2", "--setup",
@@ -336,7 +337,7 @@ describe("v0.5.16 CLI 冒烟", () => {
     expect(r.stdout).toContain("查询计划");
     expect(r.stdout).toContain("INTEGER PRIMARY KEY");
     expect(r.stdout).toContain("涉及表：t");
-  }, 120_000);
+  }, TT);
 
   test("org plugin list + org openapi + org complete + org rename（预览）", () => {
     // 工作区播种：api spec + 补全源 + 重命名目标
@@ -366,13 +367,13 @@ describe("v0.5.16 CLI 冒烟", () => {
     expect(rn.stdout).toContain("src/app.hsl");
     // 预览不落盘
     expect(fs.readFileSync(path.join(WS, "src", "app.hsl"), "utf8")).toContain("fn compute(");
-  }, 120_000);
+  }, TT);
 
   test("org browser status：引擎探测输出（引擎缺席退出 1 是诚实降级，非失败）", () => {
     const r = runOrg(["browser", "status"]);
     expect(r.stdout).toContain("浏览器引擎链");
     expect([0, 1]).toContain(r.exitCode); // 引擎在场 0 / 缺席 1（附安装指引）
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 4. Web 🛡 治理与扩展面板 API（/api/govex/*） -------------------------------
@@ -478,7 +479,7 @@ describe("Web 🛡 治理面板 API（/api/govex/*，11 端点）", () => {
     } finally {
       srv.stop();
     }
-  }, 120_000);
+  }, TT);
 
   test("GUI 单页含治理面板要素 + 内联脚本可解析（govexPane/govexBtn/CSS）", async () => {
     const { startWebServer } = await import("../web/entry.ts");

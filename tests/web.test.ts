@@ -13,6 +13,7 @@
 // CI 无残留进程、无端口冲突（绝不用 3000/3030/5000/4600 固定端口）。
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import * as path from "node:path";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
@@ -72,7 +73,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     // 实测可超 5s，而 bun 的默认 hook 超时同样是 5000ms —— 一旦超时，依赖 server/base
     // 的用例会连带失败，且读数是 undefined 而不是「超时」，极易误诊成产品缺陷。
     // 全局手段为何不可用见 tests/helpers.ts 的说明。
-  }, 120_000);
+  }, TT);
 
   afterAll(() => {
     server.stop(true);
@@ -149,7 +150,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     expect(out.durationMs).toBeGreaterThanOrEqual(0);
     expect(out.turn).toBe(1);                       // 新会话首轮
     expect(out.logs).toContain("harness 返回 Ok");  // 引擎收尾行
-  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
+  }, TT);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   test("ask 之后：会话账本落盘 → sessions 列表与逐轮读取全链路", async () => {
     // 账本文件（org 磁盘事实源，GUI 不另建副本）
@@ -175,7 +176,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     expect(t.answer).toContain("占位剧本应答");
     expect(t.tokens).toBeGreaterThan(0);
     expect(t.ctx_tokens).toBeGreaterThan(0);
-  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
+  }, TT);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   test("POST /api/ask 第二轮：同会话 ctx 单调增长（会话史织入提示词）", async () => {
     const r = await fetch(base + "/api/ask", {
@@ -192,7 +193,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     };
     expect(detail.turns.length).toBe(2);
     expect(detail.turns[1]!.ctx_tokens).toBeGreaterThan(detail.turns[0]!.ctx_tokens);
-  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
+  }, TT);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   // ---- SSE 流式端点（issue #11）----
 
@@ -262,7 +263,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     expect(events.has("error")).toBe(false);
     // 账本落盘（磁盘事实源）
     expect(exists(path.join(ws, "runtime/sessions/poet/web-sse1.jsonl"))).toBe(true);
-  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
+  }, TT);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   test("ask-stream 第二轮：同会话 turn=2 + ctx 单调增长（与 JSON 端点同语义）", async () => {
     const r = await fetch(base + "/api/ask-stream", {
@@ -281,7 +282,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     };
     expect(detail.turns.length).toBe(2);
     expect(detail.turns[1]!.ctx_tokens).toBeGreaterThan(detail.turns[0]!.ctx_tokens);
-  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
+  }, TT);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   test("ask-stream 防呆：必填缺失/坏 JSON → 400 JSON（流建立前拒绝）", async () => {
     const r1 = await fetch(base + "/api/ask-stream", {
@@ -389,7 +390,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     // 账本事实源：A 落盘、B 未落（取消的轮次从未运行）
     expect(exists(path.join(ws, "runtime/sessions/poet/web-queue-a.jsonl"))).toBe(true);
     expect(exists(path.join(ws, "runtime/sessions/poet/web-queue-b.jsonl"))).toBe(false);
-  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
+  }, TT);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   test("GUI 单页含 SSE 消费实现（渐进渲染要素齐备）", async () => {
     const html = await (await fetch(base + "/")).text();
@@ -479,7 +480,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     // 再删 → 404（幂等防呆）
     const del2 = await fetch(base + "/api/session/poet/web-mgmt-renamed", { method: "DELETE" });
     expect(del2.status).toBe(404);
-  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
+  }, TT);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   test("PATCH 防呆：坏 JSON/非法名/目标已存在 → 400/400/409", async () => {
     const bad = await fetch(base + "/api/session/poet/web-t1", {
@@ -584,7 +585,7 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     const logLines = git.stdout.toString().split("\n");
     const curation = logLines.filter((l) => l.includes("(user curation)"));
     expect(curation.length).toBeGreaterThanOrEqual(2);
-  }, 120_000);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
+  }, TT);   // 真实 spawn 解释器（见文件头/helpers.ts 超时说明）
 
   test("keep/drop 防呆：非法名 400 · 不存在专家 404", async () => {
     const bad = await fetch(base + "/api/keep", {
@@ -810,7 +811,7 @@ describe("Web 团队模式：派单 SSE + 运行产物 + 评分卡", () => {
     ws = makeWorkspace("web-team");
     srv = startWebServer({ workspace: ws, port: 0, model: "scripted" });
     base = `http://127.0.0.1:${srv.port}`;
-  }, 120_000);
+  }, TT);
 
   afterAll(() => {
     srv.stop(true);
@@ -851,7 +852,7 @@ describe("Web 团队模式：派单 SSE + 运行产物 + 评分卡", () => {
     const parsed = JSON.parse(oneCard!.slice(6)) as { ev: { kind: string }; fact: { t: string } };
     expect(parsed.ev.kind).toBeDefined();
     expect(parsed.fact.t).toBeDefined();
-  }, 120_000);
+  }, TT);
 
   test("card 帧覆盖关键叙事事实（mission/route/review/asset 至少各一）", async () => {
     const res = await fetch(`${base}/api/run-stream`, {
@@ -868,7 +869,7 @@ describe("Web 团队模式：派单 SSE + 运行产物 + 评分卡", () => {
     }
     // 非法事实不得出现（分类器的兜底必须留名，而不是 undefined）
     expect(facts).not.toContain(undefined as unknown as string);
-  }, 120_000);
+  }, TT);
 
   test("POST /api/run-stream：task 必填 → 400 JSON（不建流）", async () => {
     const res = await fetch(`${base}/api/run-stream`, {
@@ -879,7 +880,7 @@ describe("Web 团队模式：派单 SSE + 运行产物 + 评分卡", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toContain("task");
-  }, 120_000);
+  }, TT);
 
   test("GET /api/runs：运行产物列表（派单后非空，含 elapsed/task）", async () => {
     const res = await fetch(`${base}/api/runs`);
@@ -890,7 +891,7 @@ describe("Web 团队模式：派单 SSE + 运行产物 + 评分卡", () => {
     expect(first.name).toMatch(/^out-/);
     expect(first.ok).toBe(true);
     expect(first.elapsed_ms).toBeGreaterThan(0);
-  }, 120_000);
+  }, TT);
 
   test("GET /api/run?dir=：只读回放（events/metrics/runJson）；坏名 400；不存在 404", async () => {
     const list = (await (await fetch(`${base}/api/runs`)).json()) as { runs: Array<{ name: string }> };
@@ -909,7 +910,7 @@ describe("Web 团队模式：派单 SSE + 运行产物 + 评分卡", () => {
     // 合法但不存在 → 404
     const missing = await fetch(`${base}/api/run?dir=out-nope`);
     expect(missing.status).toBe(404);
-  }, 120_000);
+  }, TT);
 
   test("GET /api/score：评分卡（cells + evidence_count）", async () => {
     const res = await fetch(`${base}/api/score`);
@@ -919,7 +920,7 @@ describe("Web 团队模式：派单 SSE + 运行产物 + 评分卡", () => {
     expect(body.scorecard.model).toBe("scripted");
     expect(body.scorecard.evidence_count).toBeGreaterThan(0);
     expect(body.scorecard.cells.length).toBeGreaterThan(0);
-  }, 120_000);
+  }, TT);
 
   test("GUI 单页含团队模式要素（模式切换 / 卡片渲染 / 运行列表 / 评分卡）", async () => {
     const html = await (await fetch(`${base}/`)).text();
@@ -932,7 +933,7 @@ describe("Web 团队模式：派单 SSE + 运行产物 + 评分卡", () => {
     const m = html.match(/<script>([\s\S]*?)<\/script>/);
     expect(m).not.toBeNull();
     expect(() => new Function(m![1]!)).not.toThrow();
-  }, 120_000);
+  }, TT);
 });
 
 // ---- v0.5.1：模型车道/服务商面板（org providers / org config 的 GUI 面） ----

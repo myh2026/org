@@ -26,6 +26,7 @@
 // 形态正则做法同源：不锁环境，锁「可观测」）。win32 无 POSIX shell → 假脚本
 // 用例显式 skip（空 PATH 降级用例全平台跑）。
 // ============================================================================
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
@@ -839,7 +840,7 @@ describe("iac 工具环 e2e（iac_* 四只读工具 · ReadOnly 模式可用）"
     expect(tr[1]).toContain("iac_plan ok create=2 data=0 vars=1 lane=builtin");
     expect(tr[2]).toContain("iac_graph ok nodes=3 edges=2 top=var.region");
     expect(tr[3]).toMatch(/^iac_generate ok aws 资源1 变量2 tf=\d+字符 往返✓$/);
-  }, 120_000);
+  }, TT);
 
   test("jail 铁律：iac_parse 越界 file → error 摘要 + 越界文案（拒绝先于读盘）", () => {
     WS = path.join(WS_ROOT, `t${String(++wsSeq).padStart(3, "0")}`);
@@ -866,7 +867,7 @@ describe("iac 工具环 e2e（iac_* 四只读工具 · ReadOnly 模式可用）"
     expect(tr.length).toBe(1);
     expect(tr[0]).toContain("iac_parse error [jail]");
     expect(tr[0]).toContain("路径越界");
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 10. CLI 冒烟（runOrg 真子进程） ------------------------------------------------
@@ -910,7 +911,7 @@ describe("iac CLI 冒烟（org iac）", () => {
     expect(pl.ok).toBe(true);
     expect(pl.stdout).toContain("Plan: to create 2 resources");
     expect(pl.stdout).toContain("诚实边界");
-  }, 120_000);
+  }, TT);
 
   test("org iac graph：边 + 拓扑序；org iac probe：五面 + 内置车道指引", () => {
     const g = runOrg(["iac", "graph", "infra/main.tf", "--workspace", ws]);
@@ -925,7 +926,7 @@ describe("iac CLI 冒烟（org iac）", () => {
     expect(p.stdout).toContain("tflint");
     // 沙箱全缺席 → builtin 主车道文案；CI 若预装 terraform（罕见）也不锁断言
     expect(p.stdout).toMatch(/车道\s+(builtin|cli)/);
-  }, 120_000);
+  }, TT);
 
   test("org iac generate manifest.json：.tf 文本 + 往返自解析；org iac self-test 全过", () => {
     const g = runOrg(["iac", "generate", "manifest.json", "--workspace", ws]);
@@ -936,7 +937,7 @@ describe("iac CLI 冒烟（org iac）", () => {
     const st = runOrg(["iac", "self-test"]);
     expect(st.ok).toBe(true);
     expect(st.stdout).toMatch(/\d+\/\d+ 通过/);
-  }, 120_000);
+  }, TT);
 
   test("org iac parse 越界 → exit 1 + 越界文案；语法错误 → 行号", () => {
     const esc = runOrg(["iac", "parse", "../../etc/passwd", "--workspace", ws]);
@@ -947,7 +948,7 @@ describe("iac CLI 冒烟（org iac）", () => {
     expect(syn.ok).toBe(false);
     expect(syn.stderr).toContain("syntax");
     expect(syn.stderr).toContain("第 2 行");
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 11. Web 端点 e2e（startWebServer · port 0 随机，web.test.ts 同款） --------------
@@ -979,7 +980,7 @@ describe("iac Web 端点（GET /api/govex/iac）", () => {
     server = (await import("../web/entry.ts")).startWebServer({ workspace: ws, port: 0, model: "scripted" });
     base = `http://127.0.0.1:${server.port}`;
     expect(server.port).toBeGreaterThan(1024);
-  }, 120_000);
+  }, TT);
 
   afterAll(() => {
     server.stop(true);

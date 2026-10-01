@@ -15,6 +15,7 @@
 // 端到端用例逐例声明 120s 超时（B-15 纪律：spawn 解释器跑完整回路）。
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
@@ -98,7 +99,7 @@ describe("tasks：单发执行（run-next · scripted 全链）", () => {
     // 通知自动产生
     const ns = readNotifications(WS);
     expect(ns.some((n) => n.kind === "task_done" && n.taskId === t.id)).toBe(true);
-  }, 120_000);
+  }, TT);
 
   test("优先级 P0 抢先执行", async () => {
     submitTask(WS, "run", { task: "低优先", model: "scripted" }, { priority: 9 });
@@ -108,7 +109,7 @@ describe("tasks：单发执行（run-next · scripted 全链）", () => {
     expect(done?.status).toBe("done");
     // 低优先级仍在队列
     expect(listTasks(WS, { status: "queued" }).length).toBe(1);
-  }, 120_000);
+  }, TT);
 
   test("队列空 → null（不炸）", async () => {
     expect(await runNextTask(WS)).toBeNull();
@@ -257,7 +258,7 @@ describe("Web 任务中心（taskRunner:true 内嵌执行器）", () => {
     } finally {
       srv.stop(true); // 联动停执行器 + 释放 lock
     }
-  }, 120_000);
+  }, TT);
 
   test("pause/cancel 动作端到端（queued → paused → 取消）", async () => {
     const { startWebServer } = await import("../web/entry.ts");
@@ -362,5 +363,5 @@ describe("engine：RunHandle.pause/resume（spawn 车道 SIGSTOP/SIGCONT）", ()
     expect(await handle.resume()).toBe(true);
     const r = await donePromise;
     expect(r.ok).toBe(true);
-  }, 120_000);
+  }, TT);
 });

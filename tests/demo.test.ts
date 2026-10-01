@@ -16,6 +16,7 @@
 //   - 静默更新检测：评分卡基线建立、无漂移时零告警
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll } from "bun:test";
 import * as path from "node:path";
 import * as fs from "node:fs";
@@ -32,7 +33,7 @@ beforeAll(() => {
   const r = runOrg(["demo", "--workspace", WS]);
   if (!r.ok) console.error(r.stdout + r.stderr);
   expect(r.ok).toBe(true);
-}, 120_000);
+}, TT);
 
 describe("README 走读：三连跑监督回路", () => {
   for (const id of ["a", "b", "c"]) {

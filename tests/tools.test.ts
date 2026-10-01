@@ -16,6 +16,7 @@
 // 端到端用例逐例 120s 超时（B-15 纪律）。
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
@@ -86,7 +87,7 @@ describe("tools：agent 工具环（scripted 剧本驱动 e2e）", () => {
     const ledger = fs.readFileSync(path.join(WS, "runtime/sessions/notice-parser/tools-dsml.jsonl"), "utf-8");
     expect(ledger).toContain("最终答案");
     expect(ledger).not.toContain("DSML");
-  }, 120_000);
+  }, TT);
 
   test("DSML 第 4 形态：数值参数语义（string=\"false\" → 数值，B-23）", async () => {
     // 同一解析器路径的参数类型锁定：audio_compose 的 tempo 在 DSML 里标
@@ -116,7 +117,7 @@ describe("tools：agent 工具环（scripted 剧本驱动 e2e）", () => {
     expect(callJson).toContain("audio_compose");
     expect(callJson).toMatch(/tempo[":= ]+84/);
     expect(callJson).not.toMatch(/tempo[":= ]+"84"/);
-  }, 120_000);
+  }, TT);
 
   test("读工具全链：<tool> 调用 → 真实读文件 → 结果回灌 → 最终答案 + 事件", async () => {
     const fixture = makeFixture({
@@ -149,7 +150,7 @@ describe("tools：agent 工具环（scripted 剧本驱动 e2e）", () => {
     // 会话账本落的是最终答案（不是工具调用轮）
     const ledger = fs.readFileSync(path.join(WS, "runtime/sessions/notice-parser/tools-e2e.jsonl"), "utf-8");
     expect(ledger).toContain("最终答案");
-  }, 120_000);
+  }, TT);
 
   test("只读模式：fs_write 被拒（模型收到明确反馈，事件 tool_denied）", async () => {
     const fixture = makeFixture({
@@ -174,7 +175,7 @@ describe("tools：agent 工具环（scripted 剧本驱动 e2e）", () => {
     expect(denied.length).toBe(1);
     // 文件绝不被写
     expect(fs.existsSync(path.join(WS, "evil.txt"))).toBe(false);
-  }, 120_000);
+  }, TT);
 
   test("write 模式未开审批：fs_write 仍被拒（安全缺省 —— 人在环不可静默绕过）", async () => {
     const fixture = makeFixture({
@@ -195,7 +196,7 @@ describe("tools：agent 工具环（scripted 剧本驱动 e2e）", () => {
     ], { ORG_ASK_EXPERT: "notice-parser", ORG_ASK_SESSION: "tools-write", ORG_ASK_QUESTION: "写文件", ORG_TOOLS: "write" });
     expect(r.ok).toBe(true);
     expect(fs.existsSync(path.join(WS, "evil2.txt"))).toBe(false);
-  }, 120_000);
+  }, TT);
 
   test("工具环关闭：ORG_TOOLS 未设 → 纯问答（v0.5.2 行为零变化）", async () => {
     const fixture = makeFixture({
@@ -214,7 +215,7 @@ describe("tools：agent 工具环（scripted 剧本驱动 e2e）", () => {
     expect(r.ok).toBe(true);
     const events = eventsOf(dir);
     expect(events.filter((e) => e.name === "journal" && String((e.data as { name?: string })?.name).startsWith("tool_")).length).toBe(0);
-  }, 120_000);
+  }, TT);
 
   test("轮数上限：ORG_TOOL_MAX_TURNS=1 → 强制收束（不失控）", async () => {
     const fixture = makeFixture({
@@ -236,7 +237,7 @@ describe("tools：agent 工具环（scripted 剧本驱动 e2e）", () => {
     // 有界收束：run 完成（不强转失败），答案带收束说明
     expect(r.ok).toBe(true);
     expect(r.stdout).toContain("轮上限");
-  }, 120_000);
+  }, TT);
 
   test("坏工具 JSON 跳过不炸（无有效调用 → 原文即答案，不空转）", async () => {
     const fixture = makeFixture({
@@ -260,7 +261,7 @@ describe("tools：agent 工具环（scripted 剧本驱动 e2e）", () => {
     expect(r.stdout).toContain("部分回答");
     const events = eventsOf(dir);
     expect(events.filter((e) => e.name === "journal" && String((e.data as { name?: string })?.name).startsWith("tool_")).length).toBe(0);
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 5. @文件引用（纯 TS 单测） --------------------------------------------------
@@ -361,7 +362,7 @@ describe("prompt 注入：AGENTS.md 与长期记忆（HSL 探针）", () => {
     // 记忆与 AGENTS.md 都在（文件落盘可查证注入源存在）
     expect(fs.existsSync(path.join(WS, "AGENTS.md"))).toBe(true);
     expect(listMemories(WS, "notice-parser").length).toBe(1);
-  }, 120_000);
+  }, TT);
 
   test("记忆注入：HSL memory_block 直读 runtime/memories/<expert>.md", async () => {
     // 用工具环的 fs_read 探针验证 hsl 侧读记忆文件这条路径本身可用：
@@ -380,7 +381,7 @@ describe("prompt 注入：AGENTS.md 与长期记忆（HSL 探针）", () => {
       "--allow", "bun,node,ls,cat,grep,diff,git",
     ], { ORG_ASK_EXPERT: "notice-parser", ORG_ASK_SESSION: "tools-mem", ORG_ASK_QUESTION: "hi" });
     expect(r.ok).toBe(true);
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 8. Web：@文件引用 + 记忆端点 -------------------------------------------------
@@ -405,7 +406,7 @@ describe("Web：@文件引用与记忆端点", () => {
     } finally {
       srv.stop(true);
     }
-  }, 120_000);
+  }, TT);
 
   test("GET/POST /api/memory：列表 + 追加 + 删除 + GUI 要素", async () => {
     const { startWebServer } = await import("../web/entry.ts");
@@ -435,5 +436,5 @@ describe("Web：@文件引用与记忆端点", () => {
     } finally {
       srv.stop(true);
     }
-  }, 120_000);
+  }, TT);
 });

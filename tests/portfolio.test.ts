@@ -18,6 +18,7 @@
 //   #10 发布说明撰写     A:inline
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
@@ -66,7 +67,7 @@ describe("portfolio：10 个项目矩阵（scripted · 三条车道）", () => {
     // 解析记录真实交付（公告标题出现在交付物里）
     expect(r.stdout).toContain("关于修订公司内部审计制度的公告");
     expect(fs.existsSync(path.join(r.outDir, "report.md"))).toBe(true);
-  }, 120_000);
+  }, TT);
 
   test("#2 古典音乐创作 → B:reuse composer（音频产物开袋即食）", () => {
     const r = runProject("p2", "为读书会创作一段约 30 秒的古典背景音乐（卡农风格）",
@@ -77,7 +78,7 @@ describe("portfolio：10 个项目矩阵（scripted · 三条车道）", () => {
     const info = wavInfo(fs.readFileSync(path.join(r.outDir, "music.wav")));
     expect(info).not.toBeNull();
     expect(info!.durationSec).toBeGreaterThan(28);
-  }, 120_000);
+  }, TT);
 
   test("#3 十四行诗创作 → B:reuse bard（poem.md 工件）", () => {
     const r = runProject("p3", "为毕业论文写一首十四行诗，主题是多智能体协作如卡农",
@@ -88,7 +89,7 @@ describe("portfolio：10 个项目矩阵（scripted · 三条车道）", () => {
     const poem = fs.readFileSync(path.join(r.outDir, "poem.md"), "utf-8");
     expect(poem).toContain("《代码与卡农》");
     expect(poem.split("\n").length).toBeGreaterThanOrEqual(10);
-  }, 120_000);
+  }, TT);
 
   test("#4 变更日志解析 → B:reuse 导入 harness changelog-parser（嵌套解释器车道）", () => {
     // 导入 Conventional Commits 解析 harness（org import · 登记即可派单）
@@ -137,7 +138,7 @@ describe("portfolio：10 个项目矩阵（scripted · 三条车道）", () => {
     expect(stats["breaking"]).toBeGreaterThanOrEqual(1);
     // 恢复 notices 原料（后续内联项目共享工作区）
     fs.copyFileSync(path.join(ROOT, "demo-ws/raw/notices.txt"), path.join(WS, "raw/notices.txt"));
-  }, 120_000);
+  }, TT);
 
   // ---- #5-#10 内联车道（六类文书使命：监督回路 + 审查 + 报告骨架） ----------
 
@@ -165,6 +166,6 @@ describe("portfolio：10 个项目矩阵（scripted · 三条车道）", () => {
       // 澄清早发被消费（批量澄清与执行重叠的机制证据）
       const clarify = events.filter((e) => String((e.data as { detail?: string })?.detail ?? "").includes(p.q.slice(0, 8)));
       expect(clarify.length).toBeGreaterThanOrEqual(1);
-    }, 120_000);
+    }, TT);
   }
 });

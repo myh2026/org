@@ -14,6 +14,7 @@
 // 每用例超时是 5000ms。全局手段都不可用（详见 tests/helpers.ts 的说明），
 // 故逐例显式声明 120_000。
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll } from "bun:test";
 import * as path from "node:path";
 import * as fs from "node:fs";
@@ -110,7 +111,7 @@ describe("v0.5.0：版本回退 org revert", () => {
     const ws = makeWorkspace("revert");
     expect(runOrgRun(ws, path.join(ws, "out-a")).ok).toBe(true);
     expect(runOrgRun(ws, path.join(ws, "out-b")).ok).toBe(true);
-  }, 120_000);
+  }, TT);
 
   const versionOf = (name: string): string =>
     (readJson(path.join(WS, "registry/index.json")) as Array<{ name: string; version: string }>)

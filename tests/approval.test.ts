@@ -14,6 +14,7 @@
 // 端到端用例超时：本文件用例会真实 spawn 解释器；bun 默认每用例 5000ms，
 // 故逐例显式声明（与 tests/helpers.ts 的说明一致）。
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import * as path from "node:path";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
@@ -83,13 +84,13 @@ describe("v0.5.0：审批队列 —— 队列关闭时行为零变化", () => {
     expect(r.out).toContain("verdict-2 = NotQueued");
     // 不留痕：CI / 脚本场景不该被写工作区
     expect(fs.readdirSync(APPR()).length).toBe(0);
-  }, 120_000);
+  }, TT);
 
   test("显式关闭（ORG_APPROVAL=0/off）同样 NotQueued", () => {
     resetApprovals();
     const r = runProbe("o-off2", { ORG_APPROVAL: "0" });
     expect(r.out).toContain("verdict-1 = NotQueued");
-  }, 120_000);
+  }, TT);
 });
 
 describe("v0.5.0：审批队列 —— 无人应答时有界降级", () => {
@@ -115,7 +116,7 @@ describe("v0.5.0：审批队列 —— 无人应答时有界降级", () => {
     const ev = fs.readFileSync(path.join(WS, "o-timeout/events.jsonl"), "utf-8");
     expect(ev).toContain("approval_requested");
     expect(ev).toContain("approval_timeout");
-  }, 120_000);
+  }, TT);
 });
 
 describe("v0.5.0：审批队列 —— 放行与长期放行集", () => {
@@ -140,7 +141,7 @@ describe("v0.5.0：审批队列 —— 放行与长期放行集", () => {
     expect(ev).toContain("approval_resolved");
     expect(ev).toContain("approval_cached");          // 第二次是缓存命中
     expect((ev.match(/approval_requested/g) ?? []).length).toBe(1); // 只打扰了一次
-  }, 120_000);
+  }, TT);
 
   test("放行（不带 always）→ Allowed，但不写长期放行集", async () => {
     resetApprovals();
@@ -155,7 +156,7 @@ describe("v0.5.0：审批队列 —— 放行与长期放行集", () => {
     // 第二次没有放行集可命中 → 会再次请求（拿不到回复 → 超时拒绝）
     expect(out).toContain("verdict-2 = Denied");
     expect(exists(path.join(APPR(), "granted.json"))).toBe(false);
-  }, 120_000);
+  }, TT);
 
   test("拒绝 → Denied，且请求标记 resolved.allow=false", async () => {
     resetApprovals();
@@ -169,7 +170,7 @@ describe("v0.5.0：审批队列 —— 放行与长期放行集", () => {
     const obj = readJson(path.join(APPR(), `${id}.json`)) as { resolved?: { allow: boolean; by: string } };
     expect(obj.resolved?.allow).toBe(false);
     expect(obj.resolved?.by).toBe("test");
-  }, 120_000);
+  }, TT);
 });
 
 describe("v0.5.0：org approvals CLI", () => {
@@ -197,7 +198,7 @@ describe("v0.5.0：org approvals CLI", () => {
     expect(again.exitCode).toBe(1);
     // 非法 id 直接 400 语义（退出码 2）
     expect(runOrg(["approvals", "allow", "not-an-id", "--workspace", WS]).exitCode).toBe(2);
-  }, 120_000);
+  }, TT);
 });
 
 describe("v0.5.0：审批的 Web 端点", () => {
@@ -205,7 +206,7 @@ describe("v0.5.0：审批的 Web 端点", () => {
   beforeAll(() => {
     srv = startWebServer({ workspace: WS, port: 0, model: "scripted" });
     base = `http://127.0.0.1:${srv.port}`;
-  }, 120_000);
+  }, TT);
   afterAll(() => { srv.stop(true); });
 
   test("GET 列表 / POST 决策 / 409 重复 / 400 坏 id / 404 不存在", async () => {
@@ -245,7 +246,7 @@ describe("v0.5.0：审批的 Web 端点", () => {
     const after = await (await fetch(`${base}/api/approvals`)).json() as { pending: unknown[]; granted: string[] };
     expect(after.pending.length).toBe(0);
     expect(after.granted).toContain("capability_change");
-  }, 120_000);
+  }, TT);
 
   test("GUI 单页含审批要素（徽标 / 面板 / 三态按钮 / 轮询）", async () => {
     const html = await (await fetch(`${base}/`)).text();
@@ -256,7 +257,7 @@ describe("v0.5.0：审批的 Web 端点", () => {
     }
     const m = html.match(/<script>([\s\S]*?)<\/script>/);
     expect(() => new Function(m![1]!)).not.toThrow();
-  }, 120_000);
+  }, TT);
 });
 
 describe("v0.5.0：审批事件的具名化与分类", () => {

@@ -23,6 +23,7 @@
 //   D6 域内零影响（CLI）：公告问题 → 原罐头答案（无救援行）
 //   D7 GUI 要素：rsc-badge 徽标样式 + finalize 救援渲染（内联脚本自洽）
 // ============================================================================
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -106,7 +107,7 @@ describe("v0.5.14 D1 直连闸门三岔口（单元）", () => {
     const g3 = directAskGateOf(ws, "notice-parser", "quantum braiding simulation", true);
     expect(g3.kind).toBe("degrade");
     expect(g3.placeholder).toBeFalsy();
-  }, 120_000);
+  }, TT);
 
   test("空问题旁路（信息不足不拦，原行为）", () => {
     const ws = makeWorkspace("dgate-unit-empty");
@@ -157,7 +158,7 @@ describe("v0.5.14 直连救援/降级（e2e CLI）", () => {
     expect(ev.data["mode"]).toBe("reroute");
     expect(ev.data["expert"]).toBe("composer");
     expect(ev.data["from"]).toBe("notice-parser");
-  }, 120_000);
+  }, TT);
 
   test("D3 ask degrade：notice-parser × 量子 → 零消耗 + 产物诚实 + 不落账本", () => {
     const ws = makeWorkspace("dgate-e2e-quantum");
@@ -252,7 +253,7 @@ describe("v0.5.14 直连救援/降级（e2e Web · SSE 主路径）", () => {
     const first = fs.readFileSync(path.join(ws, "out-ask/events.jsonl"), "utf-8")
       .split("\n")[0]!;
     expect((JSON.parse(first) as { name: string }).name).toBe("lane_rescue");
-  }, 120_000);
+  }, TT);
 
   test("D5 Web degrade：done 帧 degraded + 零账本 + 降级产物", async () => {
     const r = await fetch(base + "/api/ask-stream", {

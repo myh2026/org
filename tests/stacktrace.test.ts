@@ -17,6 +17,7 @@
 // 全部本地操作（tmp 工作区隔离 + 进程内 Web 服务 + 假剧本）—— 不出网、确定性。
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
@@ -510,7 +511,7 @@ describe("stacktrace · 工具环 stack_analyze e2e（scripted 剧本）", () =>
     expect(tr[0]).toContain("stack_analyze ok ts 2帧=1用户+1外部 符号化1");
     expect(tr[0]).toContain("top=compute lib/app.ts:2");
     expect(tr[0]).toContain("提示1条[js-null-deref]");
-  }, 120_000);
+  }, TT);
 
   test("stack_analyze（file 形态）：工作区日志 + PY 语言 + KeyError 提示", () => {
     fs.writeFileSync(path.join(TOOLS_WS, "crash.log"), `Traceback (most recent call last):\n  File "${TOOLS_WS}/lib/mod.py", line 2, in scale\n    if v > 0:\nKeyError: 'price'\n`);
@@ -528,7 +529,7 @@ describe("stacktrace · 工具环 stack_analyze e2e（scripted 剧本）", () =>
     expect(tr[0]).toContain("stack_analyze ok py 1帧=1用户+0外部");
     expect(tr[0]).toContain("top=scale lib/mod.py:2");
     expect(tr[0]).toContain("提示1条[py-key]");
-  }, 120_000);
+  }, TT);
 
   test("工具环 jail 铁律 + 参数校验：越界 file 拒绝先于读盘；text/file 双缺席明确报错", () => {
     const fixture = makeFixture({
@@ -547,5 +548,5 @@ describe("stacktrace · 工具环 stack_analyze e2e（scripted 剧本）", () =>
     expect(tr[0]).toContain("路径越界");
     expect(tr[1]).toContain("stack_analyze error");
     expect(tr[1]).toContain("至少其一");
-  }, 120_000);
+  }, TT);
 });

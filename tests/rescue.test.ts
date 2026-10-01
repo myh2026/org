@@ -21,6 +21,7 @@
 //   R6 域内零影响（CLI）：公告任务 → STOCK 原行为（3/3 收货，无 lane_rescue）
 //   R7 显式 fixture 零影响：--fixture 显式传参跳过预检（用户意图优先）
 // ============================================================================
+import { TT } from "./tt.ts";
 import { describe, test, expect } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -148,7 +149,7 @@ describe("v0.5.10 跨车道救援（e2e）", () => {
     expect(fs.existsSync(path.join(out, "music.mid"))).toBe(true); // v0.5.9 MIDI 同行
     // 会话账本落盘（记账权不可绕）
     expect(fs.existsSync(path.join(ws, "runtime/sessions/composer/default.jsonl"))).toBe(true);
-  }, 120_000);
+  }, TT);
 
   test("R4 startRun reroute：事件流注入 lane_rescue（Web/TUI 车道契约）", async () => {
     const ws = makeWorkspace("rescue-e2e-events");
@@ -172,7 +173,7 @@ describe("v0.5.10 跨车道救援（e2e）", () => {
     // 音频收尾钩子在直连车道同样生效（B-18 契约）
     expect(res.audioRendered.length).toBeGreaterThanOrEqual(1);
     expect(res.audioRendered[0]!.wavFile).toBe("music.wav");
-  }, 120_000);
+  }, TT);
 
   test("R5 CLI degrade：完全域外 → 零消耗 + 产物诚实（不套用域外剧本）", () => {
     const ws = makeWorkspace("rescue-e2e-quantum");
@@ -210,7 +211,7 @@ describe("v0.5.10 跨车道救援（e2e）", () => {
     expect(r.stdout).not.toContain("跨车道救援");
     expect(r.stdout).toContain("accepted 3 / 3 subtasks");
     expect(fs.existsSync(path.join(out, "metrics.json"))).toBe(true); // 流水线真实跑了
-  }, 120_000);
+  }, TT);
 
   test("R7 显式 fixture 零影响：--fixture 显式传参跳过预检（用户意图优先）", () => {
     const ws = makeWorkspace("rescue-e2e-explicit");
@@ -225,5 +226,5 @@ describe("v0.5.10 跨车道救援（e2e）", () => {
     expect(r.stdout).not.toContain("跨车道救援");
     // 走了团队流水线（STOCK decompose 的任务树可见）
     expect(r.stdout).toContain("task#1 fetch");
-  }, 120_000);
+  }, TT);
 });

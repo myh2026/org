@@ -20,6 +20,7 @@
 //      /api/govex/collab GET/POST 全 action + 越界拒绝 + 面板区块在场 +
 //      本簇 JS 块独立可解析（不与并行簇的存量问题互相连坐）
 // ============================================================================
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
@@ -439,7 +440,7 @@ describe("协作：CLI org collab 冒烟", () => {
     const s = runOrg(["collab", "summary", "--workspace", WS]);
     expect(s.exitCode).toBe(0);
     expect(s.stdout).toContain("1 线程 · 3 帖（1 评论）· 2 位协作者");
-  }, 120_000);
+  }, TT);
 
   test("bridge：镜像会话账本 → 线程；原账本字节不变；幂等（再 bridge 跳过）", () => {
     const before = fs.readFileSync(ledgerFile());
@@ -457,7 +458,7 @@ describe("协作：CLI org collab 冒烟", () => {
     const f = runOrg(["collab", "feed", "mirror-1", "--workspace", WS]);
     expect(f.stdout).toContain("系统");
     expect(f.stdout).toContain("[notice-parser/demo #1]");
-  }, 120_000);
+  }, TT);
 
   test("用法/防呆：无子命令 → 2；未知子命令 → 2；jail threadId → 1 诚实报错", () => {
     expect(runOrg(["collab", "--workspace", WS]).exitCode).toBe(2);
@@ -525,7 +526,7 @@ describe("协作：工具环 e2e（collab_* 5 工具 · direct 车道全链）",
     expect(posts.length).toBe(2);
     expect(posts[0]!.mentions).toEqual(["alice"]);
     expect(posts[1]!.kind).toBe("comment");
-  }, 120_000);
+  }, TT);
 });
 
 describe("协作：Web /api/govex/collab + 👥 面板", () => {

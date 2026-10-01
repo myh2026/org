@@ -7,6 +7,7 @@
 // 都不生效 —— 详见 tests/helpers.ts 的说明），故逐例显式声明 120_000，
 // 与 tests/demo.test.ts 既有写法一致。放宽的是等待上限，不是断言标准。
 
+import { TT } from "./tt.ts";
 import { describe, test, expect } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -35,7 +36,7 @@ describe("结构闸门（dhv check）", () => {
 
   test("模块数量合理（≥30：内核 + 域目录 + probe + dist 铸出专家）", () => {
     expect(files.length).toBeGreaterThanOrEqual(30);
-  }, 120_000);
+  }, TT);
 
   for (const f of files) {
     const rel = path.relative(ROOT, f);
@@ -51,7 +52,7 @@ describe("结构闸门（dhv check）", () => {
     expect(r.ok).toBe(true);
     expect(r.stdout).toContain("0 失败");
     if (negatives.length > 0) expect(r.stdout).toContain("全部被 S-19 拦截");
-  }, 120_000);
+  }, TT);
 
   test("负例探针被 S-19 check 期拦截（v0.2.67 收紧：未知方法 error 即拦，非 warning）", () => {
     // 拦截面本身也要被测试锁定：每个负例 check 必须失败，且诊断必须
@@ -62,13 +63,13 @@ describe("结构闸门（dhv check）", () => {
       expect(r.ok).toBe(false);
       expect(r.stdout + r.stderr).toContain("S-19");
     }
-  }, 120_000);
+  }, TT);
 
   test("mint_hsl 剧本与 stock 逐字一致（生成器出题 = 人工抽查存档）", () => {
     const stock = fs.readFileSync(path.join(ROOT, "hsl/factory/stock/record-validator.hsl"), "utf-8");
     const fixture = JSON.parse(fs.readFileSync(path.join(ROOT, "fixtures/run-notices.json"), "utf-8"));
     expect(fixture.tracks.mint_hsl[0]).toBe(stock);
-  }, 120_000);
+  }, TT);
 });
 
 // ============================================================================

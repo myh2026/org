@@ -17,6 +17,7 @@
 // 都不生效 —— 详见 tests/helpers.ts 的说明），故逐例显式声明 120_000，
 // 与 tests/demo.test.ts 既有写法一致。放宽的是等待上限，不是断言标准。
 
+import { TT } from "./tt.ts";
 import { describe, test, expect } from "bun:test";
 import * as path from "node:path";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
@@ -42,7 +43,7 @@ describe("v0.4.12 修复：recurrence 序列化卫生", () => {
     const rec = readJson(path.join(ws, "runtime/recurrence.json"));
     const keys = Object.keys(rec);
     expect(keys.some((k) => k.includes("flagged"))).toBe(true);
-  }, 120_000);
+  }, TT);
 
   test("读侧 round-trip：第二次运行加载既有 recurrence 不崩", () => {
     // 复用上一用例的工作区（recurrence 已含转义键）—— 旧代码：损坏文件 +
@@ -58,7 +59,7 @@ describe("v0.4.12 修复：recurrence 序列化卫生", () => {
     const r = runVariant(ws, path.join(ws, "out-b"), fx);
     if (!r.ok) console.error(r.stdout + r.stderr);
     expect(r.ok).toBe(true);
-  }, 120_000);
+  }, TT);
 
   test("读侧容错：手工损坏的 recurrence.json → 降级空表不炸运行（自愈）", () => {
     const ws = makeWorkspace("fix-recurrence-corrupt");
@@ -75,7 +76,7 @@ describe("v0.4.12 修复：recurrence 序列化卫生", () => {
     expect(r.stderr + r.stdout).toContain("损坏");
     // save 侧重写后文件已自愈为合法 JSON
     expect(() => readJson(path.join(ws, "runtime/recurrence.json"))).not.toThrow();
-  }, 120_000);
+  }, TT);
 });
 
 describe("v0.4.12 修复：工厂有界再生成（deepseek 真实模式实测）", () => {
@@ -97,7 +98,7 @@ describe("v0.4.12 修复：工厂有界再生成（deepseek 真实模式实测�
     const index = readJson(path.join(ws, "registry/index.json"));
     const names = (Array.isArray(index) ? index : index.experts ?? []).map((e: any) => e.name);
     expect(names).toContain("record-validator");
-  }, 120_000);
+  }, TT);
 
   test("耗尽上限仍不过 → 优雅降级：失败报告交监督回路，不炸整场 run", () => {
     const ws = makeWorkspace("fix-mint-exhaust");
@@ -121,7 +122,7 @@ describe("v0.4.12 修复：工厂有界再生成（deepseek 真实模式实测�
     const journal = fs.readFileSync(path.join(ws, "out-a/journal.jsonl"), "utf-8");
     expect(journal).toContain("mint-failed");
     expect(journal).toContain("3 次再生成均未过结构闸门");
-  }, 120_000);
+  }, TT);
 });
 
 describe("v0.4.12 修复：handoff 账本续写", () => {
@@ -152,7 +153,7 @@ describe("v0.4.12 修复：handoff 账本续写", () => {
       expect(rec.channel).toBe("handoff");
       expect(rec.expert).toBe("notice-parser");
     }
-  }, 120_000);
+  }, TT);
 });
 
 describe("v0.4.12 修复：ctx meter 正则（Web GUI）", () => {
@@ -169,7 +170,7 @@ describe("v0.4.12 修复：ctx meter 正则（Web GUI）", () => {
     expect(m2![0]).toBe("8.4k/131.0k");
     expect(m2![1]).toBe("8.4");
     expect(m2![2]).toBe("131.0");
-  }, 120_000);
+  }, TT);
 });
 
 describe("v0.4.12 修复：crystallize 序列化卫生", () => {
@@ -191,7 +192,7 @@ describe("v0.4.12 修复：crystallize 序列化卫生", () => {
     expect(exists(memoPath)).toBe(true);
     // 旧代码：json_escape 缺失 → 含引号值写坏 JSON → 后续加载丢全部观测计数
     expect(() => readJson(memoPath)).not.toThrow();
-  }, 120_000);
+  }, TT);
 });
 
 describe("v0.4.13 修复：任务物料路由（mission 数据不达专家 → 专家编造数据）", () => {
@@ -216,7 +217,7 @@ describe("v0.4.13 修复：任务物料路由（mission 数据不达专家 → �
     const records = readJson(path.join(ws, "work/parse-output.json"));
     expect(Array.isArray(records)).toBe(true);
     expect(records.length).toBe(1);
-  }, 120_000);
+  }, TT);
 
   test("缺省 workspace：不带 input 字段的旧剧本行为不变（载荷 = raw/notices.txt 5 条）", () => {
     const ws = makeWorkspace("fix-payload-default");
@@ -225,7 +226,7 @@ describe("v0.4.13 修复：任务物料路由（mission 数据不达专家 → �
     expect(r.ok).toBe(true);
     const records = readJson(path.join(ws, "work/parse-output.json"));
     expect(records.length).toBe(5);
-  }, 120_000);
+  }, TT);
 
   test("无工作区材料回落：删 raw/notices.txt → 内联不硬错、载荷回落使命文本", () => {
     const ws = makeWorkspace("fix-payload-fallback");
@@ -236,7 +237,7 @@ describe("v0.4.13 修复：任务物料路由（mission 数据不达专家 → �
     // 旧代码：内联通道 raw/notices.txt 缺失 → OrgError 硬错炸整场 run
     const records = readJson(path.join(ws, "work/parse-output.json"));
     expect(records.length).toBe(1); // 使命文本 1 块（诚实回落，不编造数据）
-  }, 120_000);
+  }, TT);
 });
 
 describe("v0.4.13 修复：B 复用语义地板（技能标签命中 ≠ 语义匹配）", () => {
@@ -261,7 +262,7 @@ describe("v0.4.13 修复：B 复用语义地板（技能标签命中 ≠ 语义�
     expect(evs).toContain("task#2 parse -> C:generate");
     expect(evs).toContain("channel=factory mint");
     expect(evs).not.toContain("channel=reuse notice-parser");
-  }, 120_000);
+  }, TT);
 
   test("高亲和 parse goal（54% 命中，演示场景）→ 仍 B:reuse notice-parser", () => {
     const ws = makeWorkspace("fix-route-floor-keep");
@@ -270,7 +271,7 @@ describe("v0.4.13 修复：B 复用语义地板（技能标签命中 ≠ 语义�
     expect(r.ok).toBe(true);
     const evs = fs.readFileSync(path.join(ws, "out-a/events.jsonl"), "utf-8");
     expect(evs).toContain("task#2 parse -> B:reuse");
-  }, 120_000);
+  }, TT);
 });
 
 // ============================================================================
@@ -312,7 +313,7 @@ describe("v0.4.17 修复：shell 传参卫生（sh_quote）", () => {
     const patchLine = subjects.find((s) => s.includes("patch record-validator -> 1.0.1"));
     expect(patchLine).toBeDefined();
     expect(patchLine).toContain("don't silently exclude");
-  }, 120_000);
+  }, TT);
 });
 
 describe("v0.4.17 修复：直连剧本自动发现 source 分相", () => {
@@ -327,7 +328,7 @@ describe("v0.4.17 修复：直连剧本自动发现 source 分相", () => {
     expect(r.stdout).toContain("占位剧本应答");
     // 会话账本正常落盘（直连治理链路零旁路）
     expect(exists(path.join(ws, "runtime/sessions/record-validator/default.jsonl"))).toBe(true);
-  }, 120_000);
+  }, TT);
 });
 
 describe("v0.4.17 修复：org demo 非默认工作区不覆写 dist/demo", () => {
@@ -340,5 +341,5 @@ describe("v0.4.17 修复：org demo 非默认工作区不覆写 dist/demo", () =
     expect(r.ok).toBe(true);
     expect(r.stdout).toContain("跳过 dist/demo 导出");
     fs.rmSync(tmpWs, { recursive: true, force: true });
-  }, 120_000);
+  }, TT);
 });

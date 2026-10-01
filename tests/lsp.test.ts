@@ -31,6 +31,7 @@
 //      result_summary 观测摘要 + native 块 jail 越界拒绝（只读模式可用）
 // 全部显式超时（spawn 类 60s，纯内存 30s；工具环 e2e 120s —— B-15 纪律）。
 // ============================================================================
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
@@ -849,7 +850,7 @@ describe("工具环 LSP/DAP 六工具 e2e（scripted 剧本 · 与 wiring2 同�
     expect(tr[3]).toMatch(/lsp_servers ok 可用 \d+\/7/);
     expect(tr[4]).toContain("debug_breakpoints ok 建议4处 ts top=1(entry)");
     expect(tr[5]).toContain("debug_plan ok 4断点 · 7步 · DAP消息4条");
-  }, 120_000);
+  }, TT);
 
   test("工具环 jail 铁律：debug_breakpoints 越界 file → error 摘要 + 越界文案（拒绝先于读盘）", () => {
     const fixture = makeFixture({
@@ -865,5 +866,5 @@ describe("工具环 LSP/DAP 六工具 e2e（scripted 剧本 · 与 wiring2 同�
     expect(tr.length).toBe(1);
     expect(tr[0]).toContain("debug_breakpoints error");
     expect(tr[0]).toContain("路径越界");
-  }, 120_000);
+  }, TT);
 });

@@ -11,6 +11,7 @@
 // 全部本地 mock（Bun.serve 随机端口）—— 不出网、确定性、毫秒级。
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterEach, beforeAll } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
@@ -360,7 +361,7 @@ describe("v0.5.0：chat 斜杠命令进程级冒烟", () => {
   beforeAll(() => {
     const ws = makeWorkspace("chat-slash");
     expect(runOrgRun(ws, path.join(ws, "out-a")).ok).toBe(true);
-  }, 120_000);
+  }, TT);
 
   test("/help 列出 v0.5.0 新增命令（审批 / 运行列表 / 评分卡 / 复核 / 治理 / fork / undo）", () => {
     const r = runChat(["/help", "/exit"], ["notice-parser", "--workspace", WS]);
@@ -368,7 +369,7 @@ describe("v0.5.0：chat 斜杠命令进程级冒烟", () => {
     for (const needle of ["/approvals", "/runs", "/score", "/review", "/keep", "/fork", "/undo"]) {
       expect(r.out).toContain(needle);
     }
-  }, 120_000);
+  }, TT);
 
   test("斜杠命令不得抛 ReferenceError（逐条真实执行）", () => {
     // 每条命令都会走一个独立分支；这里断言「没有任何 ReferenceError」，
@@ -380,11 +381,11 @@ describe("v0.5.0：chat 斜杠命令进程级冒烟", () => {
     expect(r.out).not.toContain("is not defined");
     expect(r.out).toContain("运行产物");
     expect(r.out).toContain("评分卡");
-  }, 120_000);
+  }, TT);
 
   test("/runs 与 /score 输出关键内容（与 CLI/TUI 同一数据源）", () => {
     const r = runChat(["/runs", "/score", "/exit"], ["notice-parser", "--workspace", WS]);
     expect(r.out).toContain("out-a");                  // 运行产物条目（runOrgRun 固定 out-a）
     expect(r.out).toContain("证据");                    // 评分卡证据计数
-  }, 120_000);
+  }, TT);
 });

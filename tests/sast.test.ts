@@ -19,6 +19,7 @@
 //   8. Web GET /api/govex/sast + 🛡 SAST 面板要素 + 本簇 JS 独立可解析
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
@@ -280,7 +281,7 @@ describe("sast：CLI 冒烟（org sast）", () => {
     expect(r.stdout).toContain("引擎链");
     expect(r.stdout).toContain("builtin-hardcoded-secret");
     expect(r.stdout).toContain("13 条高危");
-  }, 120_000);
+  }, TT);
 
   test("org sast 干净工作区（demo-ws 无代码文件）exit 0 + org sast --engine bad exit 2", () => {
     const clean = runOrg(["sast", "--workspace", path.join(ROOT, "demo-ws")]);
@@ -288,7 +289,7 @@ describe("sast：CLI 冒烟（org sast）", () => {
     expect(clean.stdout).toContain("未发现危险模式");
     const bad = runOrg(["sast", "x", "--engine", "nope", "--workspace", path.join(ROOT, "demo-ws")]);
     expect(bad.exitCode).toBe(2);
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 7. 工具环 e2e（sast_scan 只读零审批） ----------------------------------------
@@ -341,7 +342,7 @@ describe("sast：工具环 e2e（sast_scan）", () => {
     // 模型消费了发现（账本落最终答案）
     const ledger = fs.readFileSync(path.join(WS, "runtime/sessions/notice-parser/sast-e2e.jsonl"), "utf-8");
     expect(ledger).toContain("硬编码密钥");
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 8. Web GET /api/govex/sast + 🛡 面板 -----------------------------------------

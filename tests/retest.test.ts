@@ -16,6 +16,7 @@
 //   7. Web GET /api/govex/retest（plan/flaky 两动作）+ 🔁 面板要素
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
@@ -223,7 +224,7 @@ describe("retest：CLI 冒烟（org retest）", () => {
     const fo = runOrg(["retest", "plan", "--failed-only", "--workspace", emptyWs]);
     expect(fo.exitCode).toBe(2);
     expect(fo.stderr).toContain("台账为空");
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 6. 工具环 e2e（retest_plan 只读） ----------------------------------------------
@@ -280,7 +281,7 @@ describe("retest：工具环 e2e（retest_plan 只读 —— 计划不执行）"
     // 只读语义：台账未被改写（run 号仍是 2 —— plan 不记账）
     const { records } = readFlakyLedger(WSE);
     expect(records.length).toBe(2);
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 7. Web GET /api/govex/retest + 🔁 面板 ------------------------------------------

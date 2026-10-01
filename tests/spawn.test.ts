@@ -18,6 +18,7 @@
 // 逐例 120s 超时（B-15 纪律）。
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
@@ -111,7 +112,7 @@ describe("spawn：子生孙递归派生（agent_spawn 工具）", () => {
     const childEvents = eventsOf(path.join(childWs, "out-spawn"));
     const routed = childEvents.filter((e) => String((e.data as { detail?: string })?.detail ?? "").includes("task#2 parse -> B:reuse"));
     expect(routed.length).toBe(1);
-  }, 120_000);
+  }, TT);
 
   test("深度治理：ORG_SPAWN_MAX=0 全局关闭 → 拒绝且零派生", async () => {
     const fixture = spawnFixture();
@@ -141,7 +142,7 @@ describe("spawn：子生孙递归派生（agent_spawn 工具）", () => {
     expect(denied.length).toBe(1);
     // 零派生：子工作区不存在（拒绝先于执行，不烧预算）
     expect(fs.existsSync(path.join(WS, "spawn"))).toBe(false);
-  }, 120_000);
+  }, TT);
 
   test("档位降级：ORG_TOOLS=1（只读）→ agent_spawn 明确拒绝", async () => {
     const fixture = spawnFixture();
@@ -167,7 +168,7 @@ describe("spawn：子生孙递归派生（agent_spawn 工具）", () => {
       && String((e.data as { detail?: string })?.detail ?? "").startsWith("agent_spawn"));
     expect(denied.length).toBe(1);
     expect(fs.existsSync(path.join(WS, "spawn"))).toBe(false);
-  }, 120_000);
+  }, TT);
 
   test("参数校验：goal 缺失 → 明确错误（不派生）", async () => {
     const fixture = path.join(TEST_RUN, "spawn-noargs-fixture.json");
@@ -200,7 +201,7 @@ describe("spawn：子生孙递归派生（agent_spawn 工具）", () => {
       && String((e.data as { detail?: string })?.detail ?? "").includes("goal 必填"));
     expect(err.length).toBe(1);
     expect(fs.existsSync(path.join(WS, "spawn"))).toBe(false);
-  }, 120_000);
+  }, TT);
 });
 
 describe("spawn v0.5.11：预算继承 + 池化重档（agent_spawn 双重治理）", () => {
@@ -278,7 +279,7 @@ describe("spawn v0.5.11：预算继承 + 池化重档（agent_spawn 双重治理
     expect(results[0]).toContain("budget=100");
     expect(results[0]).toContain("tokens=");
     expect(results[0]).toContain("ok depth=1");
-  }, 120_000);
+  }, TT);
 
   test("B2 预算耗尽：ORG_SPAWN_BUDGET=0 → 明确拒绝且零派生", async () => {
     const fixture = multiTurnFixture([
@@ -294,7 +295,7 @@ describe("spawn v0.5.11：预算继承 + 池化重档（agent_spawn 双重治理
     // 零派生：拒绝先于执行（预算不烧）
     expect(spawnDirs().length).toBe(0);
     expect(fs.existsSync(path.join(WS, "spawn", "pool.json"))).toBe(false);
-  }, 120_000);
+  }, TT);
 
   test("B3 池化复用：同 goal 二连发 → 第二次零成本复用（reuse_count=1）", async () => {
     const goal = "抓取某站点近一周公告，输出结构化表格";
@@ -316,7 +317,7 @@ describe("spawn v0.5.11：预算继承 + 池化重档（agent_spawn 双重治理
     const pool = poolOf();
     expect(pool.records.length).toBe(1);
     expect(pool.records[0]!["reuse_count"]).toBe(1);
-  }, 120_000);
+  }, TT);
 
   test("B4 强制新派生：reuse:false → 绕过池命中（二个子目录）", async () => {
     const goal = "解析公告文件为结构化记录";
@@ -335,5 +336,5 @@ describe("spawn v0.5.11：预算继承 + 池化重档（agent_spawn 双重治理
     // 两个子目录 + 池两条记录
     expect(spawnDirs().length).toBe(2);
     expect(poolOf().records.length).toBe(2);
-  }, 120_000);
+  }, TT);
 });

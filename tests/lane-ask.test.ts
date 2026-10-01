@@ -17,6 +17,7 @@
 // mock 网关的请求永远无人应答（死锁实录：用例 100s 无输出假挂起）。
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
@@ -24,7 +25,7 @@ import * as path from "node:path";
 import { setDefaultTimeout } from "bun:test";
 import { ROOT, DHV, shPath } from "./helpers";
 
-setDefaultTimeout(120_000);
+setDefaultTimeout(TT);
 
 // 跨平台临时目录（CI 教训：硬编码 /tmp 在 Windows 必红 —— 文件写入失败
 // → 子进程空输出 → 断言读到 ""）

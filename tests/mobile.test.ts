@@ -34,6 +34,7 @@
 //      mobile_devices/mobile_logcat/mobile_plan 只读模式可用 + result_summary
 //      可观测；mobile_plan 非法平台 + mobile_logcat 多设备降级的错误摘要面。
 // ============================================================================
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
@@ -1032,7 +1033,7 @@ describe("移动端：CLI 冒烟（org mobile）", () => {
     const t = runOrg(["mobile", "self-test"]);
     expect(t.ok).toBe(true);
     expect(t.stdout).toContain("8/8 通过");
-  }, 120_000);
+  }, TT);
 
   test("org mobile plan both 白屏：双平台计划（Android chromium/CDP + iOS WKWebView/Safari）+ 步骤编号", () => {
     const r = runOrg(["mobile", "plan", "both", "白屏"]);
@@ -1045,7 +1046,7 @@ describe("移动端：CLI 冒烟（org mobile）", () => {
     const bad = runOrg(["mobile", "plan", "webos"]);
     expect(bad.ok).toBe(false);
     expect(bad.stderr).toContain("android/ios/both");
-  }, 120_000);
+  }, TT);
 
   test.skipIf(!POSIX)("org mobile devices：假 adb 注入 PATH → 4 台就绪 2 + 未授权诚实入列 + argv 观测面", () => {
     const r = runOrg(["mobile", "devices"], {
@@ -1058,7 +1059,7 @@ describe("移动端：CLI 冒烟（org mobile）", () => {
     expect(r.stdout).toContain("unauthorized");
     expect(r.stdout).toContain("devices -l");
     expect(r.stdout).toContain("iOS 面");
-  }, 120_000);
+  }, TT);
 
   test.skipIf(!POSIX)("org mobile logcat：--serial/--tag → 五元组渲染 + argv 形态", () => {
     const r = runOrg(["mobile", "logcat", "--serial", "SERIAL001", "--tag", "chromium", "--lines", "500"], {
@@ -1071,7 +1072,7 @@ describe("移动端：CLI 冒烟（org mobile）", () => {
     expect(r.stdout).toContain("chromium");
     expect(r.stdout).toContain("logcat -d -t 500");
     expect(r.stdout).toContain("-s chromium");
-  }, 120_000);
+  }, TT);
 
   test.skipIf(!POSIX)("org mobile apk：jail 越界 → exit 1 + 越界文案；假 aapt → badging 渲染", () => {
     const esc = runOrg(["mobile", "apk", "../../etc/passwd"]);
@@ -1091,7 +1092,7 @@ describe("移动端：CLI 冒烟（org mobile）", () => {
     } finally {
       fs.rmSync(ws, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, TT);
 
   test("org mobile 未知子命令 → exit 2 + 用法清单（七面）", () => {
     const r = runOrg(["mobile", "sideload"]);
@@ -1100,7 +1101,7 @@ describe("移动端：CLI 冒烟（org mobile）", () => {
     expect(r.stderr).toContain("probe");
     expect(r.stderr).toContain("forward");
     expect(r.stderr).toContain("self-test");
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 6. Web /api/govex/mobile 五动作 + GUI 区块 --------------------------------------
@@ -1117,7 +1118,7 @@ describe("移动端：Web /api/govex/mobile 端点", () => {
     server = startWebServer({ workspace: ws, port: 0, model: "scripted" });
     base = `http://127.0.0.1:${server.port}`;
     expect(server.port).toBeGreaterThan(1024);
-  }, 120_000);
+  }, TT);
 
   afterAll(() => {
     server.stop(true);
@@ -1251,7 +1252,7 @@ describe("移动端：工具环 e2e（mobile_* 三工具 · 只读模式可用�
     expect(tr[0]).toContain("mobile_devices ok 4台（就绪2） top=SERIAL001(device)");
     expect(tr[1]).toMatch(/^mobile_logcat ok 2条(（截断）)? 未匹配0 top=chromium \d+ms$/);
     expect(tr[2]).toContain("mobile_plan ok android crash 4步（纯函数保底）");
-  }, 120_000);
+  }, TT);
 
   test.skipIf(!POSIX)("mobile_plan 非法平台 + mobile_logcat 多设备降级：错误摘要面可观测（kind 进 result_summary）", () => {
     const WS = path.join(WS_ROOT, `t${String(++wsSeq).padStart(3, "0")}`);
@@ -1282,5 +1283,5 @@ describe("移动端：工具环 e2e（mobile_* 三工具 · 只读模式可用�
     expect(tr[0]).toContain("mobile_plan error");
     expect(tr[0]).toContain("android/ios/both");
     expect(tr[1]).toContain("mobile_logcat error [multi-device]");
-  }, 120_000);
+  }, TT);
 });

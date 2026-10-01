@@ -23,10 +23,11 @@
 // 环境兼容层挂载（受限内核 rmSync 降级链；详见 lib/fssafe.ts）
 import "../lib/fssafe-preload.ts";
 import { setDefaultTimeout } from "bun:test";
+import { TT, TEST_TIME_SCALE } from "./tt.ts";
 import * as path from "node:path";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 
-setDefaultTimeout(120_000);
+setDefaultTimeout(TT);
 
 export const ROOT = path.resolve(import.meta.dir, "..");
 export const DHV = path.join(ROOT, "toolchain/dhv-ts/src/main.ts");
@@ -37,6 +38,31 @@ export const TEST_RUN = path.join(ROOT, "demo-run-tests");
 /** 传给 bash 执行环境的路径统一正斜杠（与 CLI 同规则）。 */
 export function shPath(p: string): string {
   return p.replace(/\\/g, "/");
+}
+
+/**
+ * 反桥接夹具热身（v0.5.25.1 · iSH 实测驱动）：冷启动 + 高负载下，新起 HTTP
+ * 端点的首连可挂起数秒；且慢内核上 AbortSignal 定时器本身会被延迟到预算的
+ * 十倍以上（实测：1.5s 预算 → 17.2s 才触发 TimeoutError）。夹具交接前先等过
+ * 一次成功响应，把这段抖动一次性吸收；超时（默认 60s × 缩放）抛错 —— 诚实
+ * 失败，与「真坏」区分。
+ */
+export async function warmUpEndpoint(baseUrl: string, opts: { path?: string; deadlineMs?: number } = {}): Promise<void> {
+  const p = opts.path ?? "/json/version";
+  const deadlineMs = opts.deadlineMs ?? Math.round(60_000 * TEST_TIME_SCALE);
+  const deadline = Date.now() + deadlineMs;
+  let last = "";
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch(`${baseUrl}${p}`, { signal: AbortSignal.timeout(Math.max(8_000, Math.round(deadlineMs / 4))) });
+      if (r.ok) return;
+      last = `http ${r.status}`;
+    } catch (e: any) {
+      last = String(e?.name ?? e?.message ?? e);
+    }
+    await new Promise((res) => setTimeout(res, 250));
+  }
+  throw new Error(`端点热身超时（${deadlineMs}ms）：${baseUrl}${p} | ${last}`);
 }
 
 export interface RunResult {

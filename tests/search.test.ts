@@ -9,6 +9,7 @@
 //   5. 工具环：semantic_search（ReadOnly 模式 e2e）—— HSL 侧 ABI 内实现
 //      与 lib/search.ts 的 top-1 命中对拍（排序等价的实证）
 // ============================================================================
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
@@ -222,5 +223,5 @@ describe("工具环：semantic_search（ReadOnly 模式 e2e + 行为对拍）", 
     // 文档数对拍（语料面一致：模板语料 + 4 份新文档全部入索引）
     expect(summary).toContain(`docs=${lib.total_docs}`);
     expect(lib.total_docs).toBeGreaterThanOrEqual(4);
-  }, 120_000);
+  }, TT);
 });

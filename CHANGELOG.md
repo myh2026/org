@@ -1,5 +1,35 @@
 # CHANGELOG
 
+## v0.5.25.1（2026-10-01）—— 慢内核适配批：测试时间预算缩放 + DevTools 冷启动韧性（iSH 全量批实测驱动）
+
+iSH 分块全量批（v0.5.25 基线）暴露三类环境适配缺口，本批逐一闭环
+（断言标准一字不动 —— 只放大等待上限，B-15 纪律）：
+
+**① 测试时间预算缩放（tests/tt.ts 新模块）**
+- `TT = 120s × ORG_TEST_TIMEOUT_SCALE`（默认 1 = 历史行为完全一致）；38 个测试
+  文件共 250 处逐例超时 `}, 120_000);` → `}, TT);`；helpers.setDefaultTimeout(TT)；
+  lane-ask / turing 同步接入；性能护栏 `PERF(ms)` 缩放（audio「24 音 <10s」护栏）。
+- 驱动实据：check CLI 全量在 iSH 需 ~455s（120s 内限必超）、org demo 全叙事
+  ~200s（beforeAll 120s 必超）、dynamics 单例 127s（120s 边界刚过）—— 慢内核
+  统一以 `ORG_TEST_TIMEOUT_SCALE=6` 运行；CI/常规机器零变化。
+
+**② DevTools 端点半发现冷启动韧性（lib/devtools.ts）**
+- iSH 深潜实测：新起端点的首连在高负载下挂起数秒，且慢内核上 AbortSignal
+  定时器本身延迟严重（1.5s 预算实测 17.2s 才触发 TimeoutError）—— 旧逻辑
+  一次超时即误判「端点缺席」。
+- 修法：fetchCdpInfo 仅对 TimeoutError 单次重试（1.5s → 3s 预算）；拒绝连接
+  即时返回，「快速失败」语义不变；全链总预算仍有界。
+
+**③ 测试夹具热身（tests/helpers.ts warmUpEndpoint）**
+- devtools fixture 交接前先等过一次成功响应（60s × 缩放上界），把冷启动/
+  高负载首连抖动一次性吸收；超时诚实抛错（与「真坏」区分）。
+- 实测：冷启动探针复现 2/3 失败 → 热身+重试后 15 轮 14 净（剩余 1 例为 Bun
+  运行时极端负载偶发崩溃 ≈1/20，环境级已归档）；devtools.test.ts 全文件
+  6 fail → 1 fail（余 1 例为极端自竞争下内部 WS attach 预算超时，静置复跑验证）。
+
+**验证待办**：基线批（scale=1）继续分块采集全貌；受影响文件（check/demo/
+audio/dynamics/devtools）以 scale=6 静置复跑后合并 org main。
+
 ## v0.5.25（2026-10-01）—— 环境兼容批：受限内核 Bun rmSync 三级降级链（iSH 实弹驱动）
 
 新环境实弹（iSH · Alpine aarch64 · Bun 1.4.2，uv/ruff/node22/gcc14/rust1.83 全

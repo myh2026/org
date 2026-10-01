@@ -12,6 +12,7 @@
 //   6. Web GET /api/govex/spawn-decide：四态 + 参数贯通
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
@@ -145,7 +146,7 @@ describe("spawndecide：工具环 e2e", () => {
     // 决策内容回灌给模型（剧本第二轮的最终答案是对决策的消费）
     const ledger = fs.readFileSync(path.join(WS, "runtime/sessions/notice-parser/sd-e2e.jsonl"), "utf-8");
     expect(ledger).toContain("该派");
-  }, 120_000);
+  }, TT);
 
   test("agent_spawn 内嵌决策：trivial goal → self 拦截（零派生 + 事件 + 建议工具）", () => {
     const out = path.join(TEST_RUN, "out-sd", "self-block");
@@ -167,7 +168,7 @@ describe("spawndecide：工具环 e2e", () => {
     expect(JSON.stringify(results[0])).toContain("琐碎任务");
     // 零派生：子工作区不存在
     expect(fs.existsSync(path.join(WS, "spawn"))).toBe(false);
-  }, 120_000);
+  }, TT);
 
   test("agent_spawn 内嵌决策：force:true → self 被覆盖（模型显式判断，事件 force_overridden）", () => {
     const out = path.join(TEST_RUN, "out-sd", "force");
@@ -188,7 +189,7 @@ describe("spawndecide：工具环 e2e", () => {
     // 真派生：子工作区落盘（force 生效）
     const spawnDir = path.join(WS, "spawn");
     expect(fs.existsSync(spawnDir)).toBe(true);
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 5. CLI 冒烟 ------------------------------------------------------------------
@@ -199,14 +200,14 @@ describe("spawndecide：CLI 冒烟", () => {
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("SPAWN");
     expect(r.stdout).toContain("子预算");
-  }, 120_000);
+  }, TT);
 
   test("org spawn-decide：self 态渲染（建议工具）", () => {
     const r = runOrg(["spawn-decide", "--goal", "读一下 README.md 文件", "--workspace", WS]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("SELF");
     expect(r.stdout).toContain("fs_read");
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 6. Web 端点 --------------------------------------------------------------------
@@ -228,5 +229,5 @@ describe("spawndecide：Web GET /api/govex/spawn-decide", () => {
     } finally {
       srv.stop(true);
     }
-  }, 120_000);
+  }, TT);
 });

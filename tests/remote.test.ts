@@ -31,6 +31,7 @@
 // 形态不锁环境（cloud.test.ts v0.5.17.2 哲学）；rsync 沙箱+ubuntu/macos runner
 // 在场（windows runner 未必）→ 条件断言。
 // ============================================================================
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
@@ -373,7 +374,7 @@ describe.skipIf(!POSIX)("远程 Agent：假 ssh 车道（参数构造 + 输出�
     } finally {
       fs.rmSync(ws, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 3. 档案层（remote-hosts.json 读写 + 诚实校验矩阵）----------------------------
@@ -841,7 +842,7 @@ describe("远程 Agent：CLI 冒烟（org remote）", () => {
     const t = runOrg(["remote", "self-test"]);
     expect(t.ok).toBe(true);
     expect(t.stdout).toContain("27/27");
-  }, 120_000);
+  }, TT);
 
   test("org remote hosts：档案未创建 → 拒绝一切提示 + 创建指引；写入后表渲染 + 判定", () => {
     const ws = tmpWs("cli-hosts");
@@ -862,7 +863,7 @@ describe("远程 Agent：CLI 冒烟（org remote）", () => {
     } finally {
       fs.rmSync(ws, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, TT);
 
   test("org remote exec：host 不在档案 → exit 1 + host-not-found + 创建指引", () => {
     const ws = tmpWs("cli-exec");
@@ -875,7 +876,7 @@ describe("远程 Agent：CLI 冒烟（org remote）", () => {
     } finally {
       fs.rmSync(ws, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, TT);
 
   test("org remote exec：白名单外命令 → 白名单拒绝 + allow_full 指引（exit 1）", () => {
     const ws = tmpWs("cli-exec-deny");
@@ -888,7 +889,7 @@ describe("远程 Agent：CLI 冒烟（org remote）", () => {
     } finally {
       fs.rmSync(ws, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, TT);
 
   test("org remote plan deploy --mode container：计划渲染（摸底/部署/run 队列/回滚四段 + docker build）", () => {
     const r = runOrg(["remote", "plan", "deploy", "container"]);
@@ -897,7 +898,7 @@ describe("远程 Agent：CLI 冒烟（org remote）", () => {
     expect(r.stdout).toContain("docker build");
     expect(r.stdout).toContain("回滚");
     expect(r.stdout).toContain("ORG_WEB_HOST");
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 8. Web /api/govex/remote 四动作（probe/hosts/plan/ping）------------------------
@@ -914,7 +915,7 @@ describe("远程 Agent：Web /api/govex/remote 端点", () => {
     server = startWebServer({ workspace: ws, port: 0, model: "scripted" });
     base = `http://127.0.0.1:${server.port}`;
     expect(server.port).toBeGreaterThan(1024);
-  }, 120_000);
+  }, TT);
 
   afterAll(() => {
     server.stop(true);
@@ -1020,7 +1021,7 @@ describe("远程 Agent：工具环 e2e（remote_* 四工具）", () => {
     // 环境自适应：ssh（沙箱 ✗ / CI ✓）与 rsync（沙箱 ✓ / win runner 未必）锁形态不锁环境
     expect(tr[0]).toMatch(/remote_probe ok ssh=(✓|✗) rsync=(✓|✗) scp=(✓|✗)/);
     expect(tr[1]).toContain("remote_plan ok git 4段");
-  }, 120_000);
+  }, TT);
 
   test("remote_ping host 档案门 + remote_exec 审批在环（process_spawn 门放行后档案门仍拒绝 —— 双层治理）", () => {
     const WS = path.join(WS_ROOT, `t${String(++wsSeq).padStart(3, "0")}`);
@@ -1052,5 +1053,5 @@ describe("远程 Agent：工具环 e2e（remote_* 四工具）", () => {
     // remote_exec：审批放行（granted process_spawn）→ 档案门仍拒绝（lib 内部先判）
     expect(tr[1]).toContain("remote_exec error [host-not-found]");
     expect(tr[1]).toContain(REMOTE_HOSTS_FILE);
-  }, 120_000);
+  }, TT);
 });

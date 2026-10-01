@@ -18,6 +18,7 @@
 //   7. Web POST /api/govex/deps：probe/list/add 三动作 + 拒绝面 + 📦 面板要素
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
@@ -321,7 +322,7 @@ describe("deps：CLI 冒烟（org deps）", () => {
     const py = runOrg(["deps", "list", "--file", "pyproject.toml", "--workspace", WS]);
     expect(py.exitCode).toBe(0);
     expect(py.stdout).toContain("pydantic");
-  }, 120_000);
+  }, TT);
 
   test("org deps add：坏包名 exit 2（白名单拒绝面）+ 坏清单 exit 1 + 缺 --file exit 2", () => {
     const bad = runOrg(["deps", "add", "foo;rm", "--file", "package.json", "--workspace", WS]);
@@ -332,7 +333,7 @@ describe("deps：CLI 冒烟（org deps）", () => {
     const badmf = runOrg(["deps", "list", "--file", "requirements.txt", "--workspace", WS]);
     expect(badmf.exitCode).toBe(1);
     expect(badmf.stderr).toContain("不认识的清单类型");
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 6. 工具环 e2e（deps_probe 只读 + deps_install 门控） ---------------------------
@@ -387,7 +388,7 @@ describe("deps：工具环 e2e", () => {
     // e2e-app 的 package.json 未被改写（门先于任何 spawn）
     const pkg = JSON.parse(fs.readFileSync(path.join(WSE, "package.json"), "utf-8"));
     expect(pkg.dependencies).toEqual({ "left-pad": "^1.3.0" });
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 7. Web POST /api/govex/deps + 📦 面板 ------------------------------------------

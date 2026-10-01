@@ -30,6 +30,7 @@
 // 环境自适应：fixture server 用 bun 宿主（沙箱/CI 同在）；FAKE_MCP_* 变量
 // 快照/恢复（env-hygiene 哲学 —— 不留环境侧写）。
 // ============================================================================
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
@@ -607,7 +608,7 @@ describe("MCP：CLI 冒烟（org mcp）", () => {
     expect(r.ok).toBe(true);
     expect(r.stdout).toContain("MCP 协议层自检");
     expect(r.stdout).toMatch(/\d+\/\d+ 通过/);
-  }, 120_000);
+  }, TT);
 
   test("org mcp servers：档案缺席 → 指引 + 运行时探测；写入后表渲染", () => {
     const ws = tmpWs("cli-servers");
@@ -623,7 +624,7 @@ describe("MCP：CLI 冒烟（org mcp）", () => {
       expect(r2.stdout).toContain("fx");
       expect(r2.stdout).toContain("bun");
     } finally { fs.rmSync(ws, { recursive: true, force: true }); }
-  }, 120_000);
+  }, TT);
 
   test("org mcp tools：真 spawn fixture → 五工具表渲染", () => {
     const ws = tmpWs("cli-tools");
@@ -635,7 +636,7 @@ describe("MCP：CLI 冒烟（org mcp）", () => {
       expect(r.stdout).toContain("echo");
       expect(r.stdout).toContain("add");
     } finally { fs.rmSync(ws, { recursive: true, force: true }); }
-  }, 120_000);
+  }, TT);
 
   test("org mcp call：add 2 3 → 5 真算 + echo 回显", () => {
     const ws = tmpWs("cli-call");
@@ -648,7 +649,7 @@ describe("MCP：CLI 冒烟（org mcp）", () => {
       expect(e.ok).toBe(true);
       expect(e.stdout).toContain("CLI 桥接");
     } finally { fs.rmSync(ws, { recursive: true, force: true }); }
-  }, 120_000);
+  }, TT);
 
   test("org mcp call：server 不在档案 → exit 1 + 指引", () => {
     const ws = tmpWs("cli-ghost");
@@ -658,7 +659,7 @@ describe("MCP：CLI 冒烟（org mcp）", () => {
       expect(r.ok).toBe(false);
       expect(r.stderr).toContain("未在档案");
     } finally { fs.rmSync(ws, { recursive: true, force: true }); }
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 7. Web /api/govex/mcp ----------------------------------------------------
@@ -761,7 +762,7 @@ describe("MCP：工具环 e2e（mcp_servers / mcp_tools / mcp_call_tool）", () 
     expect(tr.length).toBe(1);
     expect(tr[0]).toMatch(/mcp_servers ok runtimes=/);
     fs.rmSync(WS, { recursive: true, force: true });
-  }, 120_000);
+  }, TT);
 
   test("mcp_tools：真 spawn fixture → echo 工具可观测（只读协议操作）", () => {
     const WS = path.join(WS_ROOT, `t${String(++wsSeq).padStart(3, "0")}`);
@@ -788,7 +789,7 @@ describe("MCP：工具环 e2e（mcp_servers / mcp_tools / mcp_call_tool）", () 
     expect(tr[0]).toContain("mcp_tools ok");
     expect(tr[0]).toContain("fx-ring");
     fs.rmSync(WS, { recursive: true, force: true });
-  }, 120_000);
+  }, TT);
 
   test("mcp_call_tool：process_spawn 门放行后档案门仍拒绝（双层治理）", () => {
     const WS = path.join(WS_ROOT, `t${String(++wsSeq).padStart(3, "0")}`);
@@ -819,7 +820,7 @@ describe("MCP：工具环 e2e（mcp_servers / mcp_tools / mcp_call_tool）", () 
     expect(tr[0]).toContain("mcp_call_tool error");
     expect(tr[0]).toContain("server-not-found");
     fs.rmSync(WS, { recursive: true, force: true });
-  }, 120_000);
+  }, TT);
 });
 
 // ---- 9. 会话池（v0.5.20 长连接复用：每操作一会话 → 池化常驻）-----------------------

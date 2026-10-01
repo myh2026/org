@@ -14,6 +14,7 @@
 //          journal.jsonl 非空时整体丢弃该镜像）。
 // ============================================================================
 
+import { TT } from "./tt.ts";
 import { describe, test, expect, beforeAll } from "bun:test";
 import * as path from "node:path";
 import * as fs from "node:fs";
@@ -42,7 +43,7 @@ beforeAll(() => {
   const r = runOrgRun(ws, path.join(ws, "out-a"));
   if (!r.ok) console.error(r.stdout + r.stderr);
   expect(r.ok).toBe(true);
-}, 120_000);
+}, TT);
 
 // ---------------------------------------------------------------------------
 // A. 复核范围与交互语义
@@ -191,7 +192,7 @@ describe("v0.4.17 修复：工厂闸门自解析工具链（DHV_TS 不再是隐�
     const entry = loadRegistryIndex(ws).find((m) => m.name === "record-validator");
     expect(entry).toBeDefined();
     expect(entry!.source).toBe("factory");
-  }, 120_000);
+  }, TT);
 });
 
 // ---------------------------------------------------------------------------
