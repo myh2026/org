@@ -30,7 +30,7 @@
 // 绝不 throw 穿透。git 子进程 60s 硬超时（超时强杀按失败降级）。
 // ============================================================================
 
-import * as fs from "node:fs";
+import * as fs from "./fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
 
 /** 插件根目录（工作区相对；与 .org/CODEOWNERS 同根 —— 工作区级 .org 约定）。 */

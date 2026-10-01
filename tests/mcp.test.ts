@@ -31,7 +31,7 @@
 // 快照/恢复（env-hygiene 哲学 —— 不留环境侧写）。
 // ============================================================================
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
 import * as path from "node:path";
 import {

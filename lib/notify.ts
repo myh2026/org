@@ -15,7 +15,7 @@
 //      桌面/存储/webhook 三通道互不影响（多重优雅降级）。
 // ============================================================================
 
-import * as fs from "node:fs";
+import * as fs from "./fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
 import * as os from "node:os";
 import { loadConfig } from "./config.ts";

@@ -9,8 +9,10 @@
 // 用法：bun tui/smoke.ts   （退出码 0 = 通过）
 // ============================================================================
 
+// 环境兼容层挂载（受限内核 rmSync 降级链；详见 lib/fssafe.ts）
+import "../lib/fssafe-preload.ts";
 import * as path from "node:path";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import { initialState, reducer, pushEngineEvent, cardMatchesFilter, parseFilterArg } from "./store.ts";
 import { renderFrame , ORG_VERSION } from "./frame.ts";
 import { Screen } from "./renderer.ts";

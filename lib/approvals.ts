@@ -14,7 +14,7 @@
 // 硬约束：已判定的请求不得重复决策（否则一次决策会被计成两次，且审计记录被覆盖）。
 // ============================================================================
 
-import * as fs from "node:fs";
+import * as fs from "./fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
 
 export interface ApprovalRequest {

@@ -12,8 +12,10 @@
 //      与超限跳过 / maxFiles 截断 / dirs 定向）+ 真实仓库 e2e（只断言跑通
 //      与预算 —— 仓库自带演示密钥与测试假样本，命中数不断言具体值）
 // ============================================================================
+// 环境兼容层挂载（受限内核 rmSync 降级链；详见 lib/fssafe.ts）
+import "../lib/fssafe-preload.ts";
 import { describe, test, expect } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
 import * as path from "node:path";
 import { SECRET_PATTERNS, scanText, scanWorkspace, maskLine } from "../lib/scan.ts";

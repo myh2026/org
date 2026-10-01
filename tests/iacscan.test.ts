@@ -12,8 +12,10 @@
 //   4. scanIac 工作区面：排除目录播种 · 二进制/超限跳过 · maxFiles 截断 ·
 //      dirs 定向 · 干净目录零命中 · 真实仓库 e2e 跑通不炸（不断言命中数）
 // ============================================================================
+// 环境兼容层挂载（受限内核 rmSync 降级链；详见 lib/fssafe.ts）
+import "../lib/fssafe-preload.ts";
 import { describe, test, expect } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
 import * as path from "node:path";
 import { IAC_RULES, scanIac } from "../lib/iacscan.ts";

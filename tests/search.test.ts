@@ -10,7 +10,7 @@
 //      与 lib/search.ts 的 top-1 命中对拍（排序等价的实证）
 // ============================================================================
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
 import { TEST_RUN, makeWorkspace, runDhv, runOrg, eventsOf } from "./helpers";
 import { tokenize, buildIndex, searchIndex, semanticSearch } from "../lib/search.ts";

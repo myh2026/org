@@ -20,9 +20,11 @@
 // 本模块也不受影响：它们本来就在毫秒级完成。
 // ============================================================================
 
+// 环境兼容层挂载（受限内核 rmSync 降级链；详见 lib/fssafe.ts）
+import "../lib/fssafe-preload.ts";
 import { setDefaultTimeout } from "bun:test";
 import * as path from "node:path";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 
 setDefaultTimeout(120_000);
 

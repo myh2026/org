@@ -16,7 +16,7 @@
 // ============================================================================
 
 import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
 import { makeWorkspace } from "./helpers";
 import { startWebServer } from "../web/entry.ts";

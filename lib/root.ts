@@ -9,7 +9,7 @@
 // payload 由 scripts/build-bin.ts 构建期生成（build/payload.json，随二进制嵌入）。
 // ============================================================================
 
-import * as fs from "node:fs";
+import * as fs from "./fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
 import * as path from "node:path";
 import payload from "../build/payload.json";

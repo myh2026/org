@@ -14,8 +14,10 @@
 // SUBPROC_TIMEOUT_MS 常量与 code review 锁定）。
 // ============================================================================
 
+// 环境兼容层挂载（受限内核 rmSync 降级链；详见 lib/fssafe.ts）
+import "../lib/fssafe-preload.ts";
 import { describe, test, expect, afterAll } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
 import * as path from "node:path";
 import { pdfEngines, readPdf } from "../lib/pdfread.ts";

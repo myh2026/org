@@ -8,8 +8,10 @@
 //      而非假红 —— CI 已装 ruff，本地裸跑 bun test 不炸）。
 // ============================================================================
 
+// 环境兼容层挂载（受限内核 rmSync 降级链；详见 lib/fssafe.ts）
+import "../lib/fssafe-preload.ts";
 import { describe, test, expect } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";

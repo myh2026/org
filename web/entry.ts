@@ -45,7 +45,9 @@
 //                          server.stop() 可停，CI 无残留进程）
 // ============================================================================
 
-import * as fs from "node:fs";
+// 环境兼容层挂载（受限内核 rmSync 降级链；详见 lib/fssafe.ts）
+import "../lib/fssafe-preload.ts";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
 import { ROOT, DEFAULT_WORKSPACE } from "../lib/root.ts";
 import {

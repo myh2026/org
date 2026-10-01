@@ -16,7 +16,7 @@
 // ============================================================================
 import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
 import { TEST_RUN } from "./helpers";
 import { dbDiagnose, DBDIAG_LIMITS } from "../lib/dbdiag.ts";

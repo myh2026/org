@@ -13,8 +13,10 @@
 // 环境按其 license 字段断言 —— 两种形态都锁定）。
 // ============================================================================
 
+// 环境兼容层挂载（受限内核 rmSync 降级链；详见 lib/fssafe.ts）
+import "../lib/fssafe-preload.ts";
 import { describe, test, expect, afterEach } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildSbom, renderSpdxJson, renderSpdxTagValue } from "../lib/sbom.ts";

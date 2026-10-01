@@ -488,3 +488,74 @@
 > 台账补录说明（v0.5.20.2 漂移治理批）：B-20/B-21/B-22 实录原仅存于
 > CHANGELOG v0.5.13/v0.5.14，BUGFIXES.md 台账止于 B-19 —— 三节按原格式
 > 补录归档，保持 B-xx 编号体系完整性（论文 bug 修复台账）。
+
+> 台账补录说明（v0.5.25 环境兼容批）：B-23~B-28 实录原仅存于 CHANGELOG
+> v0.5.21/v0.5.22，台账止于 B-22 —— 六节按原格式补录归档，保持 B-xx
+> 编号体系完整性（论文 bug 修复台账）。
+
+## B-23（ORG 修复，v0.5.21 · f4d9d5f）工具环解析器缺第 4 形态：deepseek 原生 DSML XML 工具调用
+
+- **现象**：真实车道（deepseek）模型以 DSML XML 标签形态请求工具调用，解析器只
+  认三种既有形态 → 标签被当纯文本、**零工具执行**（写诗/作曲类任务静默断流）。
+- **修复**：工具环解析器补第 4 形态；修复后真实车道 music.wav 23.54s 渲染成功。
+- **教训**：真实模型的原生协议形态是解析器的输入面，必须实测枚举。
+
+## B-24（ORG 修复，v0.5.22 · 99386cf）推理型模型空补全硬错误 + 预算适配
+
+- **现象**：推理型模型（deepseek 思考链）预算不足时返回空补全 → 网关硬错误。
+- **修复**：vendored dhv-ts v0.2.69 同步（观测记忆 llmReasoningFloor + 空补全
+  升档重试，cap 32768）+ org 侧 gateway.test.ts +3 例；真实车道复验成功。
+- **教训**：推理型模型与普通模型的预算曲线不同族 —— 「同一预算」是系统性欠配。
+
+## B-25（ORG 修复，v0.5.22 · df7d0cb）测试环境隔离铁律：真实配置劫持 scripted 测试
+
+- **现象**：用户真实 `~/.org/config.json` 劫持 scripted 测试 —— audio e2e 4 例
+  假红（195s 外联），测试结果依赖开发者机器状态。
+- **修复**：helpers 注入 ORG_CONFIG 隔离层 + 清空真实车道三件套；audio e2e
+  4 fail（195s）→ 29 pass（6.55s 确定性）。
+- **教训**：测试进程的环境面必须显式收口，否则「本机全绿」与「CI 全绿」是两件事。
+
+## B-26（ORG 修复，v0.5.22 · 73991b2 + 449a3c7）任务队列语义地板三处：长任务被 STOCK 流水线答非所问
+
+- **现象**：实测长任务（写诗/作曲）被 STOCK 公告流水线吞掉（71s/189s
+  model_calls=0）—— 任务语义与复用资产错配且静默成功。
+- **修复**：地板条件扩全模型 · hit≥2 护持加 ≤12 词元边界（0.15→0.042）·
+  救援地板 √(12/N) 自适应；端到端复验 135.4s 真实执行 music.wav 落盘；
+  rescue 15→17 例。
+- **教训**：复用命中率与语义正确性是两条曲线 —— 相似度地板必须随任务规模自适应。
+
+## B-27（ORG 修复，v0.5.22 · 159b681）config env 注入泄漏：未映射键落入 env[undefined]
+
+- **现象**：envNameOf 未映射键（gh_token/gh_api/desktop_notify/notify_webhook_*）
+  落入 `process.env[undefined]` —— config.gh_token 被写进 env["undefined"]、多未
+  映射键互相污染（先写者胜）。
+- **修复**：gh_token→ORG_GH_TOKEN / gh_api→ORG_GH_API 接入 env 注入（tracker
+  鉴权链 env 一侧对齐）；纯 config 键返回空串由 applyConfigToEnv 跳过；同批修
+  tests/config.test.ts 键计数漂移（12→14，CI 三连红根因）。
+- **教训**：动态映射表的「未命中」路径必须有显式归宿，任何「undefined 键」都是
+  隐性全局状态。
+
+## B-28（ORG 修复，v0.5.22 · 159b681）release verify 漏装 ruff：v0.5.22 tag 首发假红
+
+- **现象**：sast.test.ts 断言 ruff 在场（CI 契约：凡跑 bun test 的 job 均装
+  ruff），release.yml verify 与 ci.yml 同套门槛却漏装 → tag 首发假红
+  （binaries/publish 连锁 skip）。
+- **修复**：release verify 补 uv + ruff 安装步（与 ci.yml 同源）。
+- **教训**：CI 契约的「同套门槛」要在每个 job 显式落实 —— 缺一步 = 发布链断一步。
+
+## B-29（ORG 修复，v0.5.25）受限内核上 Bun 递归删除链全断：三级降级兼容层（iSH 实弹驱动）
+
+- **现象**：iSH/Alpine aarch64 沙盒（Bun 1.4.2）上 `fs.rmSync(recursive)` 对已
+  存在目录恒失败（1.1.45 EFAULT / 1.2.23 EACCES / 1.3.14 EFAULT / 1.4.2 EPERM
+  四版本逐一复现）；单项 unlink/rmdir、Node rmSync、busybox rm -rf 均正常。
+  影响：`org demo` 尾步 exportDist 崩溃、测试工作区二次清理全断（首建正常、
+  复用必炸 —— 失效形态极易误诊为产品缺陷）。
+- **修复**：lib/fssafe.ts 三级降级链（原生 → 手工遍历 → shell 兜底；语义保持
+  三不变量；仅五类可恢复错误触发）+ lib/fssafe-fs.ts 垫片（68 处调用点改指）
+  + preload/bunfig 双保险；tests/fssafe.test.ts 10 例。
+- **探针结论（决定选型）**：Bun 的 ESM 命名空间对内置模块做链接期快照且
+  configurable:false，require 面运行期改写对 `import * as fs` 消费者不可见 ——
+  故主面必须是垫片；`fs.promises` 为共享对象可原地修补。
+- **教训**：跨运行时（Bun/Node/busybox）对同一语义（递归删除）的实现路径各不
+  相同，产品要在「实现路径分裂」的地带布降级链 —— 一层不行两层，两层不行三层，
+  且降级必须语义保持 + 观测留痕 + 全败重抛原始错误。

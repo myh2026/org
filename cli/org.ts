@@ -24,7 +24,9 @@
 // HSL 侧的 DHV_TS 统一转正斜杠（bash -c 不吃反斜杠）。
 // ============================================================================
 
-import * as fs from "node:fs";
+// 环境兼容层挂载（受限内核 rmSync 降级链；详见 lib/fssafe.ts）
+import "../lib/fssafe-preload.ts";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { ROOT, DEFAULT_WORKSPACE } from "../lib/root.ts";

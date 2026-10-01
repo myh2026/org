@@ -32,7 +32,7 @@
 // 在场（windows runner 未必）→ 条件断言。
 // ============================================================================
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
 import * as path from "node:path";
 import {

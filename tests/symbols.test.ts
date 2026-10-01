@@ -22,7 +22,7 @@
 // 全部显式 30s 超时。
 // ============================================================================
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
 import { TEST_RUN } from "./helpers";
 import { indexSymbols, lookupDef, findRefs, type SymbolHit } from "../lib/symbols.ts";

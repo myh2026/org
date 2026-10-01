@@ -14,9 +14,11 @@
 //                不存在的目录 / 未知分支 internal 附 git 原文 /
 //                git 缺席（PATH 收窄）+ 参数校验 + 脏树拒并非冲突 internal
 // ============================================================================
+// 环境兼容层挂载（受限内核 rmSync 降级链；详见 lib/fssafe.ts）
+import "../lib/fssafe-preload.ts";
 import { describe, test, expect, afterAll } from "bun:test";
 import * as cp from "node:child_process";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
 import * as path from "node:path";
 import { gitMergeState, gitMerge, gitRebase, GIT_LIMITS } from "../lib/gitmerge.ts";

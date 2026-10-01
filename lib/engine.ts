@@ -10,7 +10,7 @@
 // 仅 node:fs / node:path —— Windows 兼容，零原生依赖。
 // ============================================================================
 
-import * as fs from "node:fs";
+import * as fs from "./fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
 import type { EngineEvent, RunMetrics } from "./events.ts";
 import {

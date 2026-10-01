@@ -12,8 +12,10 @@
 //      路径级/操作级参数去重合并 · security 覆盖（操作级空数组 = 显式公开）·
 //      suggestToolName 清洗 · 文件封装（round-trip / missing / >1MB 拒）
 // ============================================================================
+// 环境兼容层挂载（受限内核 rmSync 降级链；详见 lib/fssafe.ts）
+import "../lib/fssafe-preload.ts";
 import { describe, test, expect } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseOpenApiText, parseOpenApiFile, suggestToolName } from "../lib/openapi.ts";

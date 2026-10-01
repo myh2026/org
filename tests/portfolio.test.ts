@@ -19,7 +19,7 @@
 // ============================================================================
 
 import { describe, test, expect, beforeAll } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
 import { TEST_RUN, ROOT, runOrg, eventsOf } from "./helpers";
 import { wavInfo } from "../lib/audio.ts";

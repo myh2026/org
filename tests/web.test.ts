@@ -15,7 +15,7 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import * as path from "node:path";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import { TEST_RUN, runOrg, makeWorkspace, exists } from "./helpers";
 import { startWebServer, parseLedgerRaw, parseAskOut, parseWebArgv, renderMd } from "../web/entry.ts";
 import { snapshotEnv, clearEnv, restoreEnv, type EnvSnapshot } from "./env-hygiene";

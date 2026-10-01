@@ -13,8 +13,10 @@
 // 工作区全部为 tmp 一次性目录（不触碰真实仓库）。
 // ============================================================================
 
+// 环境兼容层挂载（受限内核 rmSync 降级链；详见 lib/fssafe.ts）
+import "../lib/fssafe-preload.ts";
 import { describe, test, expect, afterEach } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
 import * as path from "node:path";
 import { loadCodeowners, matchOwners, recommendReviewers } from "../lib/owners.ts";

@@ -22,7 +22,7 @@
 // ============================================================================
 
 import { describe, test, expect, beforeEach, afterAll } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
 import { TEST_RUN, runDhv, runOrg, eventsOf } from "./helpers";
 import { DEFAULT_RBAC_POLICY } from "../lib/rbac.ts";

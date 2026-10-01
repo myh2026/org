@@ -1,5 +1,73 @@
 # CHANGELOG
 
+## v0.5.25（2026-10-01）—— 环境兼容批：受限内核 Bun rmSync 三级降级链（iSH 实弹驱动）
+
+新环境实弹（iSH · Alpine aarch64 · Bun 1.4.2，uv/ruff/node22/gcc14/rust1.83 全
+工具链装机）暴露产品级可移植性缺口：该内核上 Bun 内建 `fs.rmSync(recursive)` 对
+已存在目录恒失败（**1.1.45 EFAULT / 1.2.23 EACCES / 1.3.14 EFAULT / 1.4.2 EPERM
+四版本逐一复现**；同为 Bun，`unlink`/`rmdir` 单项正常、Node rmSync 与 busybox
+`rm -rf` 正常 —— 不兼容仅存在于 Bun 的递归删除实现与内核之间）。影响面：
+`org demo` 尾步 exportDist 崩溃、全部测试工作区二次清理瘫痪（首建正常、复用必炸，
+极易误诊为产品缺陷）。
+
+**lib/fssafe.ts —— 三级降级链（多重优雅降级）**
+- 级 1 原生 rmSync → 级 2 手工遍历（readdir + unlink/rmdir；符号链接安全、悬空
+  链接不跟随、win32 只读文件去位重试）→ 级 3 shell 兜底（`execFileSync("rm",
+  ["-rf", "--", p])`：argv 直传零注入面，仅非 win32）。
+- **语义保持三不变量**：非递归删目录照旧抛错（不越权）；ENOENT/force 语义照旧；
+  三级全败**重抛原始错误**（不掩盖根因）。仅 EPERM/EACCES/EFAULT/EBUSY/ENOTEMPTY
+  五类可恢复错误触发接管 —— 常规内核零行为变化。
+- 观测与开关：FSSAFE_STATS 降级计数 + 最近错误留痕；ORG_FSSAFE_OFF=1 全关、
+  ORG_FSSAFE_VERBOSE=1 打日志；`rmrf(target, {forceLevel})` 供测试逐级注入。
+
+**接线：垫片主面 + 预载保险面（实测驱动的选型）**
+- 主面 **lib/fssafe-fs.ts**：re-export node:fs + 覆写 rmSync/rm/promises.rm；全仓
+  **68 处**删除调用点 fs 导入机械改指垫片（逐文件相对路径）。为什么垫片当主面而
+  不是运行期补丁：Bun 的 ESM 命名空间对内置模块做**链接期快照**
+  （configurable:false —— `require("node:fs")` 面改写对 `import * as fs` 消费者
+  不可见，v0.5.25 探针矩阵实锤）；`fs.promises` 为共享对象可原地修补（垫片保留）。
+- 保险面 lib/fssafe-preload.ts + bunfig.toml preload（顶层 + [test] 双段）+ 22 个
+  关键入口显式 import：幂等（Symbol 守卫），三层互为兜底。
+- tests/fssafe.test.ts 10 例：三级链实弹（原生/遍历/shell）· 补丁接管 · 语义三
+  不变量 · 悬空链接不跟随出树 · 幂等挂载 · 观测计数（受限挂载不支持符号链接时
+  子例按平台能力诚实跳过）。
+
+**本环境实测**：org check 48 模块全绿 · `org demo` 六相位全叙事跑通（修复前尾步
+exportDist 必炸）· tests/fssafe 9 pass + 1 skip · tests/degrade 2/3 → **3/3**
+（T3 降级全链）· tests/config 20/20（工作区二次清理）· 全量分块运行进行中。
+
+**文档治理**：CHANGELOG 补记 v0.5.24 段落（tag 已发、段落缺失）；BUGFIXES.md
+补录 B-23~B-28（台账止于 B-22）并入 B-29（本批）。
+
+## v0.5.24（2026-09-27）—— vendored 0.2.71 同步 + 版本卫生 + 真车道双关键修复 + 桌面控制台 v2
+
+（本条目为 v0.5.25 文档治理批补记 —— 此前 tag 已发、段落缺失。）
+
+**批次一 · vendored 工具链同步 + 版本卫生（e8b12d0）**
+- vendored dhv-ts 0.2.70 → 0.2.71（上游 issue #23 三层修回流：N-6 空分组 check 期
+  拦截（双端同码）+ native 桥构造期兜底 + Ok/Err/Some/None 垫片注入）；
+- org 语料交叉验证：N-6 三段模式误伤 org 工具环 IIFE 定式（72 处误报）→ 上游四段
+  修正（v0.2.71.1）→ org 闸门复绿；固化 scripts/sync-vendored-dhv.ts（整目录镜像 +
+  白名单排除 + 版本口径校验的机械同步）；
+- 版本单一来源修复：lib/version.ts 停留 0.5.20（v0.5.21~23 三批漏改）→ 0.5.24；
+  README 徽章三处漂移修复；ci.yml 补 workflow_dispatch（gho 类 token 的 push 不
+  触发 workflow 场景下的唯一远端 CI 通道）；测试 64 文件 1385/1385。
+
+**批次二 · 真车道双关键修复（925bac0）**
+- **缺陷一：真车道 user 消息恒空**（v0.5.3 统一 ask→ask_conv 时引入）：
+  `json_str(user)` 自带引号 + 模板再包一层 → turns_json 非法 → 回落空消息 →
+  任意任务被分解成 STOCK 公告管线（剧本车道全掩盖）。修法：模板占位符去引号；
+  回声网关截获实证修复前后。
+- **缺陷二：创作任务断流**：DECOMPOSE_PROMPT 技能词表缺 compose 族 → 写诗/作曲
+  子任务被路由 A:inline（机械读取通道）→ 交付物退化成使命回显。修法：词表补
+  compose/create/write/design/analyze/translate + 机械读取与内容生成显式区分。
+- 修复后实测闭环（DeepSeek 官方 API）：真澄清提问 → 铸新专家
+  qiyan-jueju-chan-composer → 三首真诗 + 古典音乐《夜曲·月光低语》29.5s WAV +
+  MIDI + 长程任务 SIGSTOP 真暂停全周期；回归 tests/lane-ask 3/3。
+
+**附带 · 桌面控制台 v2**：Next.js 独立沙盒 13 区操作页面（org web 4600 全接线 +
+HSL 实验场直驱 vendored dhv-ts + 能力矩阵防漂移守卫 + 作品集 13 产物）。
+
 ## v0.5.23（2026-09-22）—— 堆栈自动分析（#107 🟡→✅：✅127/150）
 
 「粘贴一段崩溃输出 → 拿回结构化诊断」：粘贴/日志文件 → 四语言帧解析 →

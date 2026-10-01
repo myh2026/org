@@ -11,8 +11,10 @@
 //   4. auditSummary 聚合数（events/tokens/ok/approvals/ledgerEntries）
 //   5. 文件名纪律：时间戳格式 · 同秒重复导出加序号不覆盖 · 自定义 out
 // ============================================================================
+// 环境兼容层挂载（受限内核 rmSync 降级链；详见 lib/fssafe.ts）
+import "../lib/fssafe-preload.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
 import * as path from "node:path";
 import { exportAudit, auditSummary } from "../lib/audit.ts";

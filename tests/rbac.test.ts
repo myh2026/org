@@ -13,8 +13,10 @@
 //            未知角色 / 决策日志单行 JSONL（可 parse + 字段齐 + 多次渲染
 //            差异仅在 ts）/ deny 优先人读原因 / 兜底策略形状锁定
 // ============================================================================
+// 环境兼容层挂载（受限内核 rmSync 降级链；详见 lib/fssafe.ts）
+import "../lib/fssafe-preload.ts";
 import { describe, test, expect, afterAll } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as os from "node:os";
 import * as path from "node:path";
 import {
