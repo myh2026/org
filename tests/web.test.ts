@@ -13,7 +13,7 @@
 // CI 无残留进程、无端口冲突（绝不用 3000/3030/5000/4600 固定端口）。
 // ============================================================================
 
-import { TT } from "./tt.ts";
+import { TT, PERF } from "./tt.ts";
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import * as path from "node:path";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
@@ -968,7 +968,7 @@ describe("Web providers：车道/服务商面板端点（v0.5.1）", () => {
     for (const name of ["deepseek", "openai", "anthropic", "gemini", "zhipu", "ollama"]) {
       expect(r.presets).toContain(name);
     }
-  }, 30_000);
+  }, PERF(30_000));
 
   test("POST /api/config preset/use/keys-add 链：建车道 → 设缺省 → 加 key", async () => {
     const p = (await (await fetch(`${b2}/api/config`, {
@@ -996,7 +996,7 @@ describe("Web providers：车道/服务商面板端点（v0.5.1）", () => {
       body: JSON.stringify({ action: "use", name: "nope" }),
     });
     expect(u.status).toBe(404);
-  }, 30_000);
+  }, PERF(30_000));
 
   test("POST /api/providers/test：scripted 车道即时 ok（不出网）", async () => {
     const r = (await (await fetch(`${b2}/api/providers/test`, {
@@ -1006,7 +1006,7 @@ describe("Web providers：车道/服务商面板端点（v0.5.1）", () => {
     expect(r.ok).toBe(true);
     expect(r.result.ok).toBe(true);
     expect(r.result.lane).toBe("scripted");
-  }, 30_000);
+  }, PERF(30_000));
 
   test("GUI 单页含 providers 面板要素 + 内联脚本可解析", async () => {
     const html = await (await fetch(`${b2}/`)).text();
@@ -1014,7 +1014,7 @@ describe("Web providers：车道/服务商面板端点（v0.5.1）", () => {
                           "function testProviderLane(", "/api/providers", "data-pvtest"]) {
       expect(html).toContain(needle);
     }
-  }, 30_000);
+  }, PERF(30_000));
 });
 
 // ============================================================================
@@ -1030,7 +1030,7 @@ describe("Web v0.5.9：音频工坊端点（audio-demo / audio .mid / --host）"
     ws2 = makeWorkspace("web-audio");
     srv = startWebServer({ workspace: ws2, port: 0, model: "scripted" });
     base = `http://127.0.0.1:${srv.port}`;
-  }, 30_000);
+  }, PERF(30_000));
 
   afterAll(() => {
     srv.stop(true);
@@ -1068,7 +1068,7 @@ describe("Web v0.5.9：音频工坊端点（audio-demo / audio .mid / --host）"
     const r3 = await fetch(`${base}/api/audio-demo?timbre=harpsichord&chords=pop&style=arp`);
     expect(r3.status).toBe(200);
     expect(Buffer.from(await r3.arrayBuffer()).toString("ascii", 0, 4)).toBe("RIFF");
-  }, 30_000);
+  }, PERF(30_000));
 
   test("GET /api/audio-demo：非法参数（大写/符号注入）→ 400", async () => {
     const bad1 = await fetch(`${base}/api/audio-demo?timbre=Strings`);

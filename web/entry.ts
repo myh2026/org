@@ -638,6 +638,16 @@ function sseRun(ws: string, req: { task: string; model: string }): Response {
           closed = true; // 客户端断开：运行继续（产物与注册表是事实源）
         }
       };
+      // 心跳保活（v0.5.25.3）：排队等待与重型阶段可 >10s 无帧 —— 每 8s 一行
+      // SSE 注释帧（客户端解析器已忽略注释行；连接不被误判空闲掐断）。
+      const hb = setInterval(() => {
+        if (closed) return;
+        try {
+          controller.enqueue(enc.encode(": hb\n\n"));
+        } catch {
+          closed = true;
+        }
+      }, 8_000);
       send("open", { task: req.task, model: req.model, queued: gate.busy, ticketId: ticket.id });
       try {
         await askSerialized(async () => {
@@ -681,6 +691,7 @@ function sseRun(ws: string, req: { task: string; model: string }): Response {
       } finally {
         abortRequested = false;
         gate.release(ticket);
+        clearInterval(hb);
         try {
           controller.close();
         } catch { /* 已关闭 */ }
@@ -721,6 +732,16 @@ function sseAsk(
           closed = true; // 客户端已断开：静默，运行继续（账本照写）
         }
       };
+      // 心跳保活（v0.5.25.3）：排队等待可 >10s 无帧（stage ticker 要到轮到才起）
+      // —— 每 8s 一行 SSE 注释帧保连接（见 sseRun 同款注释）。
+      const hb = setInterval(() => {
+        if (closed) return;
+        try {
+          controller.enqueue(enc.encode(": hb\n\n"));
+        } catch {
+          closed = true;
+        }
+      }, 8_000);
       send("open", { expert: req.expert, session: req.session, model: req.model, queued: gate.busy, ticketId: ticket.id });
       try {
         const outcome = await askSerialized(async () => {
@@ -753,6 +774,7 @@ function sseAsk(
       } finally {
         abortRequested = false;
         gate.release(ticket);
+        clearInterval(hb);
         try {
           controller.close();
         } catch { /* 已关闭 */ }
@@ -788,8 +810,16 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
       console.log("ℹ 已有 taskd 执行器在跑（Web 面板只读任务状态）");
     }
   }
+  // 连接保活（v0.5.25.3）：Bun.serve 默认 idleTimeout=10s —— SSE / 重型请求在慢
+  // 内核上事件间隙超 10s 即被掐断（iSH 实测 ECONNRESET：run-stream / 排队轮 /
+  // 重型非流端点）。缺省 255（Bun 上限）；ORG_WEB_IDLE_TIMEOUT 可覆盖。
+  const idleSecs = (() => {
+    const n = Number(process.env.ORG_WEB_IDLE_TIMEOUT ?? "255");
+    return Number.isFinite(n) && n > 0 ? Math.min(255, Math.floor(n)) : 255;
+  })();
   const server = Bun.serve({
     port: opts.port,
+    idleTimeout: idleSecs,
     hostname: opts.host ?? "127.0.0.1", // 默认只听回环；org web --host 0.0.0.0 / ORG_WEB_HOST 可远程（容器/云端浏览器 QA）
     async fetch(req): Promise<Response> {
       const url = new URL(req.url);

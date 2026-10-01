@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## v0.5.25.3（2026-10-01）—— Web 连接保活批：Bun.serve idleTimeout + SSE 心跳（iSH 全量复跑实弹）
+
+- 复跑期最后 7 红全部根因锁定：**Bun.serve 默认 idleTimeout=10s** —— 慢内核上
+  SSE 事件间隙 / 排队等待超 10s 即被掐断（实测告警 "Bun.serve() timed out a
+  request after 10 seconds" + ECONNRESET），run-stream / 排队轮预取消 / 重型
+  非流端点（audio-demo 40s）连锁失败（基线 6 红 + 复跑 7 红同根）。
+- 修法：① `idleTimeout` 缺省 255（Bun 上限；`ORG_WEB_IDLE_TIMEOUT` 覆盖）；
+  ② sseRun / sseAsk 每 8s 发 SSE 注释帧心跳（排队等待期同样保活；客户端解析器
+  本就忽略注释行）；两处 finally 正清心跳定时器。
+- 验收：web.test.ts 7 fail → 1 fail → **0 fail**（60/60）；六处 30s 端点上限
+  接 `PERF(30_000)`（常规环境行为不变，慢内核 ×缩放）。
+- 至此 13 个复跑文件（v0.5.25/.1/.2/.3 全部修复面）**全绿** —— 38 个基线失败
+  全部现场转绿，进入 org main 合并。
+
 ## v0.5.25.2（2026-10-01）—— 慢内核适配补遗：pdfread 子进程超时可环境覆盖
 
 - 基线与深潜实测：iSH 上单次 uv-pypdf 提取耗时 ~26–31s，恰好骑在 30s 硬超时
