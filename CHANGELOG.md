@@ -1,5 +1,26 @@
 # CHANGELOG
 
+## v0.5.26（2026-10-02）—— Web GUI v3：从零重建设计系统（Emil 动效规范 · 工具入侧栏 · 空态引导）
+
+以 emilkowalski/skills（Design Engineering）为设计准则，对 org web 界面做**从零重建**
+（非叠加皮肤）：51KB 旧 CSS 整体拆除，55KB 新设计系统重写；13 个 emoji 功能芯片
+→ 线性 SVG 图标工具组并**整体迁入侧栏**（顶栏收敛为品牌 / 工作区 / 统计，48→44px）；
+新增**新对话空态引导**（品牌 mark + 6 张建议卡 · 点击填入输入框 · 40ms 级联入场）。
+
+- **动效规范（Emil 常数）**：自定义缓动（`--ease-out: cubic-bezier(.23,1,.32,1)`；
+  `--ease-drawer: cubic-bezier(.32,.72,0,1)`）**全站零 ease-in**；按钮按压
+  `scale(.97)@140ms`；面板改**右侧滑板** 320ms 抽屉曲线 + 毛玻璃遮罩；层次用
+  半透明发丝线 + 柔和投影替代实边框；`prefers-reduced-motion` 降级；触屏卫生
+  （tap 高亮消除 / `touch-action: manipulation`）。
+- **布局**：44px 玻璃顶栏（少用顶栏）· 280px 侧栏（白色主按钮「+ 新会话」·
+  会话/专家/运行三区 + **工具网格区**）· 对话区（用户右侧中性气泡 / org 渐变
+  方点头像 + 15px 舒适正文）· 玻璃 composer（聚焦光环 + 白色「发送」）。
+- **契约保持**：8 项测试锁定字符串逐字保留（`[hidden] { display: none !important; }` ·
+  `.rchip[hidden] { display: none; }` · `.rsc-badge` · `.rsc-badge.deg` · `.t-bot.degraded` ·
+  `#0a0a0b` · `#d97706` · `#toolboxPane, #govexPane`）+ 单 `<script>` 结构保持。
+- **验证**：GUI 回归全绿 —— `web.test.ts` 整文件 **60/0** · approval / tasks /
+  wiring2 / directgate-D7 / vision GUI 各 1/0；可回滚备份 `/root/entry-v2-backup.ts`。
+
 ## v0.5.25.3（2026-10-01）—— Web 连接保活批：Bun.serve idleTimeout + SSE 心跳（iSH 全量复跑实弹）
 
 - 复跑期最后 7 红全部根因锁定：**Bun.serve 默认 idleTimeout=10s** —— 慢内核上
