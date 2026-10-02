@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## v0.5.29（2026-10-02）—— 统一入口 P1 切片：lane_decision 判定器观测事件（纯观测 · UI 未变）
+
+车道统一入口（方案 A）的 P1 第一切片 —— 「本输入被如何判定」事件化落地：
+
+- **新事件 `lane_decision`**（引擎桥注入，seq=0 先于一切解释器事件；与 audio_rendered 同模式）：
+  三态语义 —— `team`（直入团队：域内 / 显式剧本 / 真实车道）· `expert`（跨车道救援）·
+  `degrade`（域外零消耗降级）；载荷含 `because` 人读理由 + signals
+  （stockScore / rescueScore / laneKind / fixtureExplicit）。与现有 `lane_rescue`
+  （运行中改道）并存互补 —— 本行是「入口如何判定」，rescue 是「运行中如何改道」。
+- **runCards 契约扩展**：`classifyRunEvent` 新增 `laneDecision` fact —— TUI/Web 解析同源，
+  为 P2 的卡片头渲染（「本输入被如何判定 + 理由」）备好数据面；本批不消费（纯观测 · UI 未变）。
+- **测试**：rescue 扩 3 例 —— R4 增判 lane_decision{expert, seq=0} · R9 域内 team（signals 齐）·
+  R10 域外 degrade（事件齐 + 零消耗）。
+
 ## v0.5.28（2026-10-02）—— 文档与操作页面清欠批：diff Web 面补交（D1）· 矩阵改文（D3/D5）· README 修订（D4/D6/T2）
 
 消化 org-verify 审计的文档/入口级欠账（D 系列第一批），并补一块 Web 操作页面。

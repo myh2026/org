@@ -1317,6 +1317,36 @@ function laneRescueEvent(d: {
   };
 }
 
+/** lane_decision 引擎事件（v0.5.29 · 统一入口方案 A 的 P1 观测面）——
+ *  桥层注入，seq=0 先于一切解释器事件；描述「本输入被如何判定」：
+ *  team=直入团队（域内/显式剧本/真实车道）· expert=跨车道救援 ·
+ *  degrade=域外零消耗降级。与 lane_rescue（运行中改道）并存：本行是
+ *  「入口如何判定」，rescue 是「运行中如何改道」。 */
+function laneDecisionEvent(d: {
+  mode: "team" | "expert" | "degrade";
+  because: string;
+  expert?: string;
+  stockScore?: number;
+  rescueScore?: number;
+  laneKind?: "real" | "scripted";
+  fixtureExplicit?: boolean;
+}): EngineEvent {
+  const r2 = (x: number): number => Math.round(x * 100) / 100;
+  return {
+    kind: "unknown", seq: 0, ts: new Date().toISOString(), name: "lane_decision",
+    data: {
+      mode: d.mode,
+      because: d.because,
+      ...(d.expert ? { expert: d.expert } : {}),
+      ...(d.stockScore !== undefined ? { stockScore: r2(d.stockScore) } : {}),
+      ...(d.rescueScore !== undefined ? { rescueScore: r2(d.rescueScore) } : {}),
+      ...(d.laneKind ? { laneKind: d.laneKind } : {}),
+      ...(d.fixtureExplicit !== undefined ? { fixtureExplicit: d.fixtureExplicit } : {}),
+      floor: SEMANTIC_FLOOR,
+    },
+  };
+}
+
 // ---------- v0.5.14：直连车道语义地板（B-22） ----------
 
 export interface DirectAskGate {
@@ -1623,11 +1653,19 @@ export function startRun(opts: RunOptions): RunHandle {
             opts.expert = pick.expert;
             opts.session = opts.session ?? "default";
             rescued = true;
+            q.push(laneDecisionEvent({
+              mode: "expert", because: "域外任务：注册表命中域内专家，跨车道救援转直连",
+              expert: pick.expert, stockScore, rescueScore: pick.score, laneKind: preparedLane.kind,
+            }));
             q.push(laneRescueEvent({
               mode: "reroute", expert: pick.expert, score: pick.score, stockScore,
             }));
           } else {
             writeOutOfDomainRun(outDir, opts.task, stockScore);
+            q.push(laneDecisionEvent({
+              mode: "degrade", because: "域外任务且无救援专家：零消耗诚实降级（流水线未启动）",
+              stockScore, laneKind: preparedLane.kind,
+            }));
             q.push({ kind: "journal", seq: 1, ts: new Date().toISOString(),
               phase: "0:gate", actor: "kernel", action: "open", detail: opts.task });
             q.push(laneRescueEvent({ mode: "degrade", stockScore }));
@@ -1635,7 +1673,18 @@ export function startRun(opts: RunOptions): RunHandle {
             finish(true);
             return;
           }
+        } else {
+          q.push(laneDecisionEvent({
+            mode: "team", because: "域内任务（与团队剧本重合 ≥ 地板）：原团队流水线",
+            stockScore, laneKind: preparedLane.kind,
+          }));
         }
+      } else if (opts.entry === "org") {
+        q.push(laneDecisionEvent({
+          mode: "team",
+          because: opts.fixture ? "显式剧本直入（用户意图优先）" : "真实车道直入（域感知是模型的活）",
+          laneKind: preparedLane.kind, fixtureExplicit: Boolean(opts.fixture),
+        }));
       }
       const entryFile = opts.entry === "direct" ? DIRECT_ENTRY : HSL_ENTRY;
       // 直连剧本自动发现：导入 harness 自带占位剧本（manifest.fixture）——

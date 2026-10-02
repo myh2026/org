@@ -190,6 +190,9 @@ export type RunFact =
   /** v0.5.10：scripted 车道域外任务语义地板判定（引擎桥预检注入）：
    *  reroute = 跨车道救援转直连（专家/评分可见）；degrade = 零消耗诚实降级。 */
   | { t: "rescue"; mode: "reroute" | "degrade"; expert?: string; score: number; stockScore: number; floor: number }
+  /** v0.5.29：统一入口 P1 判定器观测 —— 「本输入被如何判定」（引擎桥预检注入）：
+   *  team=直入团队 / expert=跨车道救援 / degrade=零消耗诚实降级。 */
+  | { t: "laneDecision"; mode: "team" | "expert" | "degrade"; because: string; expert?: string; stockScore: number; rescueScore?: number; laneKind: string }
   | { t: "other"; name: string; action: string; detail: string };
 
 /**
@@ -256,6 +259,22 @@ export function classifyRunEvent(ev:
           score: Number(d["score"] ?? 0),
           stockScore: Number(d["stockScore"] ?? 0),
           floor: Number(d["floor"] ?? 0),
+        };
+      }
+      // v0.5.29：统一入口 P1 —— 判定器观测事件（与 lane_rescue 并存：
+      // 本行是「入口如何判定」，rescue 是「运行中如何改道」）
+      if (ev.name === "lane_decision") {
+        const d = (ev.data ?? {}) as Record<string, unknown>;
+        const raw = d["mode"];
+        const mode: "team" | "expert" | "degrade" = raw === "expert" || raw === "degrade" ? raw : "team";
+        return {
+          t: "laneDecision",
+          mode,
+          because: String(d["because"] ?? ""),
+          ...(d["expert"] !== undefined ? { expert: String(d["expert"]) } : {}),
+          stockScore: Number(d["stockScore"] ?? 0),
+          ...(d["rescueScore"] !== undefined ? { rescueScore: Number(d["rescueScore"]) } : {}),
+          laneKind: String(d["laneKind"] ?? ""),
         };
       }
       // v0.5.6：引擎桥收尾注入的音频渲染事实（notes.json → wav 开袋即食）

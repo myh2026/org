@@ -169,6 +169,13 @@ describe("v0.5.10 跨车道救援（e2e）", () => {
     expect(rescueEv).toBeDefined();
     const fact = classifyRunEvent(rescueEv as never);
     expect(fact).toMatchObject({ t: "rescue", mode: "reroute", expert: "composer" });
+    // v0.5.29：判定器观测事件 —— 本输入被如何判定（seq=0 先于一切解释器事件）
+    const decEv = evs.find((e) => e["kind"] === "unknown" && e["name"] === "lane_decision");
+    expect(decEv).toBeDefined();
+    expect(decEv!["seq"]).toBe(0);
+    const decFact = classifyRunEvent(decEv as never);
+    expect(decFact).toMatchObject({ t: "laneDecision", mode: "expert", expert: "composer", laneKind: "scripted" });
+    expect((decFact as { because: string }).because.length).toBeGreaterThan(0);
     // 救援轮次的回答进 directTurns（Web done 帧 / TUI 气泡的数据源）
     expect(res.directTurns).not.toBeNull();
     expect(res.directTurns!.length).toBeGreaterThanOrEqual(1);
@@ -245,4 +252,40 @@ describe("v0.5.27 R8 语义地板判据（生效车道：闸门只做 scripted �
   test("直连 entry → 不设闸（团队车道专属预检）", () => {
     expect(shouldApplySemanticFloor({ entry: "direct", fixtureExplicit: false, laneKind: "scripted" })).toBe(false);
   });
+});
+
+describe("v0.5.29 判定器观测：lane_decision 三态（startRun 事件流）", () => {
+  test("R9 域内任务 → lane_decision=team（直入团队 + signals 齐）", async () => {
+    const ws = makeWorkspace("rescue-dec-team");
+    const handle = startRun({
+      entry: "org", task: "抓取近一周公告并输出表格",
+      workspace: ws, model: "scripted",
+    });
+    const evs: Array<Record<string, unknown>> = [];
+    for await (const ev of handle.events) evs.push(ev as Record<string, unknown>);
+    const res = await handle.wait();
+    expect(res.ok).toBe(true);
+    const decEv = evs.find((e) => e["kind"] === "unknown" && e["name"] === "lane_decision");
+    expect(decEv).toBeDefined();
+    const decFact = classifyRunEvent(decEv as never);
+    expect(decFact).toMatchObject({ t: "laneDecision", mode: "team", laneKind: "scripted" });
+    expect((decFact as { stockScore: number }).stockScore).toBeGreaterThanOrEqual(0);
+  }, TT);
+
+  test("R10 域外无救援 → lane_decision=degrade（零消耗 + 事件齐）", async () => {
+    const ws = makeWorkspace("rescue-dec-degrade");
+    const handle = startRun({
+      entry: "org", task: "quantum braiding simulation",
+      workspace: ws, model: "scripted",
+    });
+    const evs: Array<Record<string, unknown>> = [];
+    for await (const ev of handle.events) evs.push(ev as Record<string, unknown>);
+    const res = await handle.wait();
+    expect(res.ok).toBe(true);
+    const decEv = evs.find((e) => e["kind"] === "unknown" && e["name"] === "lane_decision");
+    expect(decEv).toBeDefined();
+    const decFact = classifyRunEvent(decEv as never);
+    expect(decFact).toMatchObject({ t: "laneDecision", mode: "degrade" });
+    expect((decFact as { because: string }).because).toContain("零消耗");
+  }, TT);
 });
