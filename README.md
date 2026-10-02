@@ -5,7 +5,7 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.5.27_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Status](https://img.shields.io/badge/status-v0.5.28_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
 [![Tests](https://img.shields.io/badge/tests-1387_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.71-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
@@ -395,7 +395,7 @@ flowchart TB
 7. **第二次同类任务**（run B）：校验专家（已转正）直接复用（零工厂成本）；解析专家的日期归一化判定节点持续命中 memo（模型调用 5 → 1）；「覆盖不足」审查意见复发两次 → 自动升级为**补丁提案**，经 check + smoke 闸门合入 record-validator@1.0.1（git 留痕）；
 8. **第三次同类任务**（run C）：判定节点 5/5 全命中（**零模型调用**）；补丁版专家首验即收（**零返工**）——蓝绿发布生效，系统单位成本随使用递减。
 
-实测数据（scripted 模式，约 2.3s 全叙事）：model_calls 衰减 **5 → 1 → 0**，返工 **1 → 1 → 0**，git 注册表四个提交（template → mint → **keep（用户选取）** → patch）即资产层的增长率账本；另有多轮直连（2 轮问答、记账、会话账本、**每轮 `[ctx]` 上下文窗口计量条**）与暖移交（移交摘要 + 专家代答）两个通道产物。
+实测数据（scripted 模式全叙事）：model_calls 衰减 **5 → 1 → 0**，返工 **1 → 1 → 0**，git 注册表四个提交（template → mint → **keep（用户选取）** → patch）即资产层的增长率账本；另有多轮直连（2 轮问答、记账、会话账本、**每轮 `[ctx]` 上下文窗口计量条**）与暖移交（移交摘要 + 专家代答）两个通道产物。
 
 ## 🏭 专家工厂：mint 流水线
 
@@ -474,7 +474,7 @@ ORG 不要求生态迁移——外部智能体以**导入线**接入注册表（
 | **MCP**（Model Context Protocol） | MCP server manifest（name / instructions / tools） | `tools` + `instructions` | ✅ 导入登记 |
 | **A2A**（Agent2Agent） | agent card（name / description / skills / url） | `skills` + `url` | ✅ 导入登记 |
 
-v1 诚实边界：导入 = 注册表登记（manifest `source=import` + 能力标签 + 信封签名核对），每次导入是一条审计事件（知情权不可绕）；导入体的执行接线（协议翻译）是路线图项 —— 登记不等于在岗。
+v1 诚实边界：导入 = 注册表登记（manifest `source=import` + 能力标签 + 信封签名核对），每次导入是一条审计事件（知情权不可绕）；导入体的执行接线：MCP 协议翻译已于 v0.5.19 交付（lib/mcp.ts 客户端桥 + mcp_* 工具）；subagent/A2A 侧执行接线仍是路线图项 —— 登记不等于在岗。
 
 ## 💬 交互式聊天 REPL 与流式输出
 
@@ -895,10 +895,10 @@ git clone https://github.com/myh2026/org.git
 cd org
 bun install
 
-# 2) 结构闸门：校验 ORG 全部 HSL 源码（hsl/ 源码 + dist/ 铸出专家，34 模块）
+# 2) 结构闸门：校验 ORG 全部 HSL 源码（hsl/ 源码 + dist/ 铸出专家，约 50 模块）
 bun cli/org.ts check
 
-# 3) 全叙事演示（约 2.3s：铸专家 → 用户选取保留 → 复用+补丁+金丝雀 → 蓝绿验证
+# 3) 全叙事演示（铸专家 → 用户选取保留 → 复用+补丁+金丝雀 → 蓝绿验证
 #    → 多轮直连 → 暖移交；结束时自动导出 dist/demo）
 bun cli/org.ts demo
 
@@ -911,7 +911,8 @@ bun cli/org.ts chat
 ```bash
 bun cli/org.ts tui                                   # 终端驾驶舱（三区布局 + 事件卡片流）
 bun cli/org.ts web                                   # Web GUI（http://127.0.0.1:4600）
-bun test tests/                                      # 机制级测试（266 个；端到端用例已逐例声明 120s 超时）
+bun test tests/                                      # 机制级测试（1398 用例；端到端用例已逐例声明 120s 超时）
+#    慢设备（iSH/树莓派等）：先 export ORG_TEST_TIMEOUT_SCALE=6（时间预算缩放），并按文件分块运行
 bun cli/org.ts run --task "抓取某站点近一周公告，输出结构化表格"   # 团队模式派单
 bun cli/org.ts chat --model deepseek                 # 真实 LLM 流式对话（先配网关环境变量）
 ```
@@ -1134,7 +1135,7 @@ org chat       # 交互式 REPL（scripted 车道免环境）
 | **P8 固化管线（精确匹配档）** | 稳定观测 → 冻结 → 验收 → 降级监控 | P7 | ✅ 完成（实测 5→1→0；自动降级） |
 | **P9 影子晋升 / N 版本冗余 / 外部导入** | 金丝雀双跑 + 镜像派单 + adapters | P6, P7 | ✅ 完成 |
 | **P9.5 交互面 parity** | chat REPL + Token 流式 + Web SSE + 排队取消 | 无 | ✅ 完成（v0.4.15，对标 codex/opencode/zcode） |
-| **P10+ 重档池化 / 执行接线 / 联邦** | 私有记忆工作台 / adapters 协议翻译 / 多机注册表 | BNF v1.6 pool/session 语义 | 未开始 |
+| **P10+ 重档池化 / 执行接线 / 联邦** | 私有记忆工作台 / adapters 执行接线（MCP 已交付 v0.5.19；subagent/A2A 待接）/ 多机注册表 | BNF v1.6 pool/session 语义 | 进行中 |
 
 MVP（P0+P1+P2）已达成且超额：最小可演示闭环——一个任务在库中无专家时被现场生成、验收、使用并沉淀——**及其后的一切动力学（复用、补丁、固化、评分、金丝雀、冗余）都可以用 `org demo` 复现**。
 
@@ -1191,7 +1192,7 @@ scripted 是**确定性剧本车道**：`$host.fixture.next(track)` 按轨道名
 - **`check` 保结构不保行为**：行为验收依赖 fixture，mint_hsl 剧本与 `factory/stock/` 人工抽查存档逐字一致——「生成器同时出题又答题」的结构性风险由人工抽查机制兜底，抽检比例待定案；
 - **自生成验收判据弱**：mint_spec 的 acceptance 由模型自拟，覆盖结构不覆盖正确性；监督 review 对自报 coverage 1.00 过于宽松——建议后续引入用户金样本；
 - **minted 专家质量有生成方差**：词典覆盖参差，check/Exam 双闸门尽职拦截——闸门拒绝率是基座模型能力的真实度量（这本身是有价值的实测数据点）；
-- **adapters v1 仅导入线**：subagent / MCP / A2A 描述文件的导入 = 注册表登记 + 审计事件；协议翻译（把外部协议调用翻译为信封派单）是路线图项，登记不等于在岗；
+- **adapters v1 导入线 + MCP 协议翻译（v0.5.19 交付）**：subagent / MCP / A2A 描述文件的导入 = 注册表登记 + 审计事件；协议翻译的 MCP 半面已交付（lib/mcp.ts 客户端桥），subagent/A2A 半面是路线图项，登记不等于在岗；
 - **固化的语义等价判定为开放难题**：v1 仅精确匹配；观测账本跨运行持久化是冻结的必要条件；
 - **金丝雀样本规模有限**：影子对比的判卷依据是验收样本（小样本），对比一致 ≠ 全分布一致；
 - **评分卡裁判档权重 0.5**：影子对比得分的置信度受样本规模约束，结构性低于客观档（设计铁律 #6 的保守落地）；

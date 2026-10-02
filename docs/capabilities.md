@@ -36,7 +36,7 @@
 | 1 | CLI/TUI 交互式对话 | ✅ | `org chat`（REPL：流式/思考指示器/22 斜杠命令/↑↓历史）· `org tui`（三区驾驶舱） |
 | 2 | 非交互/脚本模式 | ✅ | `org run/ask/handoff`（单发子命令 + 退出码语义，CI 即脚本消费者） |
 | 3 | JSON/结构化输出 | ✅ | 产物层全结构化（run.json/events.jsonl/journal.jsonl/metrics.json/scorecard.json）；llm-ledger 台账 JSONL |
-| 4 | IDE/编辑器集成 | 🟡 | 上游 HSL 仓库有 IDE（vsix + 语法高亮 + LSP 客户端雏形）；org 本体未接（诚实边界：org 的 IDE 面经 HSL 仓库提供） |
+| 4 | IDE/编辑器集成 | 🟡 | 上游 HSL 有 IDE 扩展（vsix + 语法高亮 + 命令/诊断集成；无 LSP 客户端——核对更正）；org 本体未接（诚实边界：org 的 IDE 面经 HSL 仓库提供） |
 | 5 | Web/桌面入口 | ✅ | `org web`（4600 端口零依赖 GUI：对话/任务中心/审批/通知/车道/记忆/复核 八面板） |
 | 6 | 多轮对话 | ✅ | 直连多轮（磁盘会话账本 + 历史织入 + `--turns` 批量轮） |
 | 7 | 会话历史/恢复 | ✅ | `runtime/sessions/<expert>/<id>.jsonl` 跨进程持久 · `org sessions` · `--continue` · `/resume` · `org session fork` |
@@ -65,8 +65,8 @@
 | 25 | 图片/截图理解 | ✅ | v0.5.13 视觉入口：lib/vision.ts（z-ai SDK createVision · 多图 ≤4 · 魔数唤探防伪造 mime · prompt 超长诚实截断）→ Web 📷 按钮（分析→引用闭环：描述追加进输入框可编辑后派单）+ CLI org vision；401/凭据缺席降级 remedy（部署环境配好即全功能） |
 | 26 | LSP/DAP 协议集成 | ✅ | **v0.5.17** lib/lsp.ts 三层：①**协议层** JSON-RPC 2.0 分帧（Content-Length 头 + JSON body，LSP 与 DAP 共用；流式解码器处理粘包/半包/多字节字符字节边界 —— CJK 体按字节数计不按字符数；坏帧跳过计数不炸流）+ 构造器全家桶（request/response/notification/error + initialize→initialized→shutdown→exit 生命周期消息）—— 任何外部 LSP server 都能用这层对话；②**内置符号索引车道**（无外部 server 的主车道）：lspDefinition/lspReferences/lspHover 复用 lib/symbols.ts 索引，输出 LSP 规范形（file:// uri + 0 基 range）与人读形（1 基 file:line:column）双形，call/mention 分类 + 列号精确化；③**外部 server 车道**：detectLspServers（typescript-language-server/pylsp/pyright/gopls/rust-analyzer/clangd/bash-language-server 七家 which 探测，缺席诚实降级）+ spawnLspServer 真协议对话（LspClient：响应按 id 关联 · 超时诚实拒绝 · server 早夭不连坐 · shutdown→exit→kill 兜底全生命周期）。三端：CLI `org lsp definition/references/hover/servers/protocol` · 工具环 6 工具（lsp_definition/lsp_references/lsp_hover/lsp_servers 只读）· Web GET /api/govex/lsp（5 动作）+ 🐞 面板 Tab。诚实边界：真编辑器级会话（didOpen/didChange 增量同步/补全路由）是路线图；tests/lsp 41 例（含 echo 型假 server 全生命周期 + 工具环 e2e） |
 | 27 | AST、语法树与类型信息 | ✅ | **这是 HSL 的本体**：S1-S8 静态铁律 + 38 后端 AST 投射 + 语义对拍 |
-| 28 | 增量索引/跨仓搜索 | 🟡 | 静默更新检测 + N 版本冗余 + registry git 资产层；代码索引未做 |
-| 29 | 代码图谱/知识图谱 | 🟡 | graph 拓扑（G1-G6 校验 + node/edge 事件可观测）即程序结构图谱；知识图谱未做 |
+| 28 | 增量索引/跨仓搜索 | 🟡 | 索引资产层：静默更新检测 + N 版本冗余 + registry git 资产层（条目名如实：增量代码索引/跨仓搜索未做） |
+| 29 | 代码图谱/知识图谱 | 🟡 | graph 拓扑（机器校验 G-1~G-4 + G-8；G5/G6 为规范/观测概念 + node/edge 事件可观测）即程序结构图谱；知识图谱未做 |
 | 30 | 浏览器 DOM/页面上下文 | ✅ | **v0.5.16** lib/browser.ts 多引擎降级链（agent-browser → chromium → chrome，探活 + 级联 + 全败合并错误摘要）：`browserSnapshot`（标题/正文/链接 cap 100/图片 cap 50，剥 script·style）· `browserScreenshot`（整页 PNG，盘上字节校验非引擎自报）· 非 http(s) 协议拒绝。三端：CLI `org browser snapshot/screenshot` · 工具环 `browser_snapshot`（只读）/`browser_screenshot`（审批在环，PNG 落工作区）· Web 🌐 快照/截图表单；超时预算收敛引擎侧（1-60s 钳制，缺省 30s）；tests/browser 49 例中相关面已锁定 |
 
 ## 三、代码生成与理解（31–45）
@@ -79,10 +79,10 @@
 | 34 | 代码审查 | ✅ | 监督回路 review 阶段（四态裁决 + coverage 客观闸门 + 意见复发→补丁提案） |
 | 35 | Bug 定位 | 🟡 | 审查/复发计数/评分卡漂移告警提供定位信号；无专用调试器 |
 | 36 | Bug 修复 | ✅ | 补丁线（三级分类 + 金丝雀影子晋升 + 蓝绿回退可逆） |
-| 37 | 重构 | 🟡 | 工厂补丁的 flow 级变更（check+smoke+评测不回退三闸门）；无重命名级重构 |
+| 37 | 重构 | 🟡 | 工厂补丁的 flow 级变更（check+smoke+评测不回退三闸门）；重命名已交付（v0.5.16 · lib/rename.ts · #56），结构化重构（提取/内联等）未做 |
 | 38 | 代码迁移/翻译 | ✅ | **HSL 王牌**：一源 → 38 后端（python/ts/js/rust/go/…）；行为级对拍保证语义一致 |
 | 39 | 算法/数据结构实现 | ✅ | HSL 语言层全支持（Vec/HashMap/闭包/递归/模式匹配；ruff 语料含递归/闭包） |
-| 40 | SQL/Shell/正则生成 | 🟡 | LLM 生成面（deepseek 车道可生成任意文本；无专用验证闸门——shell 有执行白名单） |
+| 40 | SQL/Shell/正则生成 | 🟡 | LLM 生成面（任意车道可生成任意文本）；SQL 已有只读门/迁移回滚/EXPLAIN 诊断，regex 无专用验证闸门，shell 走执行白名单 |
 | 41 | 前端/UI 组件生成 | 🟡 | 同 40（文本生成可产出；无预览/验证环） |
 | 42 | API/接口契约设计 | ✅ | 信封契约（TaskSpec/StatusReport/Verdict 类型化接口 + 类型检查闸门） |
 | 43 | 数据库 Schema/迁移 | ✅ | **v0.5.15** lib/db.ts（bun:sqlite 零依赖）：`dbSchema`（表/列/索引/视图/行数抽查）+ `dbApplyMigration` 版本化迁移（_org_migrations 账本 + 伴车 .migrations.json 双写 · dry_run 事务回滚预演 · 坏 SQL 整体回滚 · 冲突诊断）。三端：CLI `org db schema/query/migrate/history` · 工具环 `db_schema/db_query/db_migrate`（写半环审批在环）· Web 🗄 工具箱；tests/db 24 例 |
@@ -100,12 +100,12 @@
 | 50 | patch 应用 | ✅ | merge_patch（三级分类 + 锚点编辑 + 版本归档 + 回退） |
 | 51 | 文件搜索/glob | ✅ | 工具环 fs_glob（\*\*/\* 模式 + 上限 200）+ fs_list |
 | 52 | 批量重命名/移动 | ✅ | **v0.5.15** 工具环 `fs_move {from,to}`：Full 模式 + 审批在环 + 工作区监狱（词法判定先行 + realpath 符号链实解析双层）+ 防自嵌套 + 目标父目录自动补建。诚实边界：单文件移动语义（批量 = 工具环多轮循环，模型侧自然批处理），无 glob 批量重命名语法；tests/tools2 e2e |
-| 53 | 冲突解决 | 🟡 | 补丁唯一锚点约束（多处命中即拒绝，不猜）；git 层冲突未接 |
+| 53 | 冲突解决 | 🟡 | 补丁唯一锚点约束（多处命中即拒绝，不猜）；git 层已接（v0.5.16 · lib/gitmerge.ts：冲突恒 abort+清单，不自动解决；tests/gitmerge 锁定） |
 | 54 | 撤销/回滚 | ✅ | `org revert`（版本回退本身可逆：当前源先归档）· 会话 fork 反悔通道 |
 | 55 | 检查点/快照 | ✅ | **git 作为资产层**（每次 mint/keep/patch 一 commit）+ N 版本冗余 + dist 快照 |
 | 56 | LSP 重命名/代码动作 | 🟡 | **v0.5.16 重命名半面 ✅**：lib/rename.ts `planRename/applyRename`（词法符号索引 + 行级词边界替换；拒绝面：找不到定义/目标名冲突/非法标识符附原因；dryRun 缺省预览 unified diff ≤5 文件，真写逐文件读→替换→复读校验失败即停）。三端：CLI `org rename <old> <new> [--apply]` · 工具环 `rename_symbol`（审批在环）· Web ✏️ 表单（真写可选）。**代码动作（quick fix/自动修复菜单）未做** —— 行整体按重命名交付 + 代码动作路线图定 🟡 |
 | 57 | 多仓库/多工作区 | 🟡 | --workspace 显式多区并行（任务队列天然多区）；跨仓联动未做 |
-| 58 | 文件监听/自动同步 | 🟡 | 上游 dhv-ts watch 模式；org 侧静默更新检测 + vendored 新鲜度守卫 |
+| 58 | 文件监听/自动同步 | 🟡 | 上游 dhv-ts watch 模式；org 侧静默更新检测 + vendored 新鲜度守卫（org 未接线 watch——如实） |
 | 59 | 编码、换行、权限处理 | ✅ | vendored fs 层 CRLF 归一化重试 + PYTHONUTF8 + UTF-8 全链（三平台 CI 实证） |
 | 60 | 编辑预览/干跑模式 | ✅ | **v0.5.15** fs_write/fs_edit `preview:true` 干跑：不落盘返回 unified diff（stats + 16KB diff 面）；fs_edit 预览同样要求锚点唯一命中（预览语义 = 执行语义）。叠加：org review --dry-run + 工厂补丁 classify 三闸门；tests/tools2 e2e 锁定「预览不落盘」承诺 |
 
@@ -138,7 +138,7 @@
 | 78 | 分支管理 | 🟡 | shell_run git 白名单内可达；org 无专用分支面（资产层用 main 单线 + git-chain） |
 | 79 | 提交/amend | ✅ | 注册表自动提交 + 留痕（sh_quote POSIX 转义防注入） |
 | 80 | merge/rebase | ✅ | **v0.5.16** lib/gitmerge.ts：`gitMerge`（--no-ff/自定义 message）· `gitRebase` · `gitMergeState` 只读探测（分支/上游/ahead-behind/分叉/脏树/stash，git 缺席降级不炸）。**冲突哲学：绝不自动解决** —— 冲突即自动 abort 回滚 + 冲突清单；每命令 30s 超时 + 输出 64KB 截断；仓外零执行（repoGuard）。三端：CLI `org merge/rebase/mergestate` · 工具环 `git_merge/git_rebase`（审批在环 + repo 工作区监狱）· Web 🌿 面板；tests/gitmerge 19 例（真 clone 含冲突 abort 后工作区干净验证） |
-| 81 | 冲突处理 | 🟡 | 同 53 |
+| 81 | 冲突处理 | 🟡 | 同 #53（git 层已接：合并冲突恒 abort 回滚 + 清单；「自动解决」刻意不做） |
 | 82 | 创建 PR/MR | ✅ | **v0.5.21** lib/tracker.ts `prCreate/prList/prView`（GitHub REST 真集成：head/base 校验 + diff 8KB 截断 + diff 失败降级仅元数据）。三端：CLI `org pr list/view/create` · 工具环 `pr_list/pr_view`（只读）+ `pr_create`（file_write 门 + 审批在环）· Web 📋 面板；tests/tracker 18 例（mock GitHub API 零外联）。诚实边界：merge/review 评论是路线图；GHE 经 ORG_GH_API 兼容 |
 | 83 | PR 审查 | ✅ | **监督回路 review 是 org 的核心**（四态 + 复发检测 + 补丁提案 + 金丝雀） |
 | 84 | 变更影响分析 | ✅ | 补丁 flow 级闸门（评测分不回退）+ 评分卡漂移 + 影子对比 |
@@ -164,7 +164,7 @@
 | 99 | 静态分析 | ✅ | 同 97/98（+ 交叉语法校验 py_compile/bun 转译/bash -n） |
 | 100 | 性能/基准测试 | 🟡 | 耗时计量全链（run.json elapsed/ms 事件）+ 评分卡；专用基准未做 |
 | 101 | 契约测试 | ✅ | 信封契约类型化 + P 投射铁律 |
-| 102 | 快照/视觉回归 | 🟡 | dist/demo 入库快照再生（CI 对拍）；视觉回归未做 |
+| 102 | 快照/视觉回归 | 🟡 | dist/demo 入库快照再生 + 变更回写（CI 逐字节校验门在合并侧；「对拍红门」如实：无）；视觉回归未做 |
 | 103 | 模糊/属性/突变测试 | 🟡 | 上游 HSL fuzz 用例；org 侧故障注入即突变测试的运行时形态 |
 | 104 | flaky 管理/测试选择 | ✅ | **v0.5.22** lib/retest.ts 单一实现三端消费 —— ① tests/*.test.ts 发现 ② 三选择器（--file glob/子串 · --name → bun test -t · --failed-only 台账最新失败集）③ flaky 台账（runtime/flaky.jsonl append-only：file::name 键跨文件不混账 · 连续 2 败标记 flaky · 再 pass 解除 · 坏行容忍）④ 命令生成（--timeout 120000 B-15 纪律）。三端：CLI `org retest plan/run` · 工具环 `retest_plan`（只读——计划生成不执行）· Web 🔁 重跑面板；tests/retest 13 例 |
 | 105 | 测试数据管理 | ✅ | fixtures 目录 + 剧本变体 fixtureVariant + makeWorkspace 隔离工作区 |
@@ -195,7 +195,7 @@
 |:--|:--|:--|:--|
 | 121 | 插件系统 | 🟡 | `org import`（用户 harness 导入 + check 闸门 + 即刻复用）+ 工厂 stock；无动态加载。**v0.5.16 补插件包市场半面**（lib/plugins.ts 事务性安装/清单/移除，见 #132 —— 只装不执行，动态加载是路线图） |
 | 122 | MCP 支持 | ✅ | **v0.5.19 协议翻译半面交付**：lib/mcp.ts MCP 客户端桥 —— <ws>/mcp-servers.json 档案（秘密键只收 $env:VAR 引用，值永不入档）→ spawn 外部 server（stdio 换行分帧 JSON-RPC）→ initialize 握手 + 能力协商（tools/resources/prompts 三面独立，缺席诚实 unsupported）→ tools/list 分页跟进 / tools/call（isError 双层语义）/ resources list+read / prompts/list。三端：CLI `org mcp` 七子命令 · 工具环 mcp_servers/mcp_tools（只读）+ mcp_call_tool（process_spawn 门 + 审批在环）· Web GET /api/govex/mcp 只读五动作 + 🔌 面板。与 adapters/bridge.hsl 外部 subagent 登记互补：登记 → 真握手真调用。诚实边界：会话粒度=每操作一会话（长连接复用/采样/roots 订阅是路线图）；协议层由 fixture server 实弹锁定（真 spawn 真握手真调用 51 例） |
-| 123 | 自定义命令 | ✅ | 斜杠命令 22 个 + TUI `:命令` + Web 面板动作（三端同权） |
+| 123 | 自定义命令 | ✅ | 斜杠命令 33 个（含别名）× TUI `:命令` + Web 面板动作（三端同权） |
 | 124 | 工作流编排 | ✅ | **HSL graph**（node/edge/guard + G 拓扑校验）+ 监督回路四阶段 + 工厂管线 |
 | 125 | 多模型切换 | ✅ | 21 服务商车道 + key 池 + 降级链 + `/model`/`:model`/Web 段控热切换 |
 | 126 | 本地模型/API 模型 | ✅ | ollama/lmstudio/vllm 预设免 key 即用 + OpenAI 兼容一条协议打天下 |

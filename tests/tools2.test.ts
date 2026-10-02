@@ -373,6 +373,21 @@ describe("Web 工具箱 API（/api/toolbox/*）", () => {
       const esc = await get("/api/toolbox/db?file=../../etc/passwd");
       expect(esc.ok).toBe(false);
 
+      // v0.5.28（D1 清欠）：diff 预览面 —— unified 输出 + 全新增 + 越界拒绝
+      fs.writeFileSync(path.join(WS, "data", "v1.txt"), "alpha\nbeta\ngamma\n");
+      fs.writeFileSync(path.join(WS, "data", "v2.txt"), "alpha\nbeta changed\ngamma\ndelta\n");
+      const df = await post("/api/toolbox/diff", { a: "data/v1.txt", b: "data/v2.txt" });
+      expect(df.ok).toBe(true);
+      expect(String(df.unified)).toContain("@@");
+      expect(String(df.unified)).toContain("-beta");
+      expect(String(df.unified)).toContain("+beta changed");
+      expect(String(df.unified)).toContain("+delta");
+      expect(String(df.stats)).toContain("+2");
+      const dfNew = await post("/api/toolbox/diff", { a: "data/absent.txt", b: "data/v2.txt" });
+      expect(dfNew.ok).toBe(true);
+      const dfEsc = await post("/api/toolbox/diff", { a: "../../etc/passwd", b: "data/v2.txt" });
+      expect(dfEsc.ok).toBe(false);
+
       const rev = await post("/api/toolbox/review", { files: ["src/app.hsl"] });
       expect(rev.ok).toBe(true);
     } finally {

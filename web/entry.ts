@@ -132,6 +132,7 @@ import {
   type LedgerTurn,
 } from "../lib/sessions.ts";
 import { prepareLlmEnv, readLedger, poolView, budgetWatermark } from "../lib/router.ts"; // 车道环境准备（v0.5.1 · 池状态/预算水位 v0.5.5）
+import { diffFiles, renderUnified, renderStats } from "../lib/diff.ts"; // v0.5.28（D1 清欠）：diff 预览 Web 面（与 CLI org diff 同源）
 import { loadConfig, applyPreset, setConfigValue, unsetConfigValue, setLaneValue,
          removeLane, useLane, addApiKey, autoFromEnv } from "../lib/config.ts";
 import { PROVIDER_NAMES, discoverEnvLanes, resolveModelFlag, providerRows, testLane } from "../lib/providers.ts";
@@ -1300,6 +1301,31 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
           if (files.length === 0) return json({ ok: false, error: "files 必填" }, 400);
           const r = recommendReviewers(readWorkspaceOf(ws), files);
           return json({ ok: true, ...r, codeowners: loadCodeowners(readWorkspaceOf(ws)).file });
+        }
+        // v0.5.28（D1 清欠）：diff 预览 Web 面 —— 与 CLI org diff / 工具环干跑同源（lib/diff.ts）
+        if (route === "POST /api/toolbox/diff") {
+          const body = (await req.json().catch(() => ({}))) as { a?: string; b?: string; context?: number };
+          const a = typeof body.a === "string" ? body.a.trim() : "";
+          const b = typeof body.b === "string" ? body.b.trim() : "";
+          if (!a || !b) return json({ ok: false, error: "a/b 必填（工作区相对路径）" }, 400);
+          const wsRoot = readWorkspaceOf(ws);
+          const inJail = (p: string): string | null => {
+            const abs = path.resolve(wsRoot, p);
+            const rel = path.relative(wsRoot, abs);
+            return rel.startsWith("..") || path.isAbsolute(rel) ? null : abs;
+          };
+          const absA = inJail(a);
+          const absB = inJail(b);
+          if (!absA || !absB) return json({ ok: false, error: "路径越界（仅限工作区内相对路径）" }, 400);
+          const r = diffFiles(absA, absB, { context: typeof body.context === "number" ? body.context : undefined });
+          if (!r.ok) return json({ ok: false, error: r.error, kind: r.kind });
+          return json({
+            ok: true, a, b,
+            hunks: r.result.hunks, adds: r.result.adds, dels: r.result.dels,
+            truncated: r.result.truncated, identical: r.result.identical,
+            stats: renderStats(r.result),
+            unified: renderUnified(r.result, a, b),
+          });
         }
         // v0.5.16 治理与扩展面板（🛡 govex）：IaC 扫描 / 插件 / RBAC / OpenAPI /
         // 浏览器 / dbdiag / 补全 / 重命名 / git —— 与 CLI、工具环同源 lib。
@@ -4214,6 +4240,7 @@ header { height: 44px; }                    /* 少用顶栏：更瘦 */
       <button class="tbtab" id="tbTabSym" type="button" role="tab" onclick="tbTab('sym')">🔎 符号</button>
       <button class="tbtab" id="tbTabScan" type="button" role="tab" onclick="tbTab('scan')">🛡 密钥扫描</button>
       <button class="tbtab" id="tbTabGov" type="button" role="tab" onclick="tbTab('gov')">📦 治理件</button>
+      <button class="tbtab" id="tbTabDiff" type="button" role="tab" onclick="tbTab('diff')">🧾 Diff 预览</button>
     </div>
   </div>
 
@@ -4253,6 +4280,15 @@ header { height: 44px; }                    /* 少用顶栏：更瘦 */
         <button type="button" onclick="tbOwners()">👥 评审推荐</button>
       </div>
       <div class="tbout" id="tbGovOut"><div class="schempty">治理三件套：审计导出（events/journal/审批台账/LLM 台账 → 零依赖 zip + 摘要）· SBOM（org + 运行时依赖 + vendored 组件清单）· 评审人推荐（.org/CODEOWNERS 规则）。</div></div>
+    </section>
+
+    <section class="tbsec" id="tbSecDiff" hidden>
+      <div class="tbbar">
+        <input id="tbDiffA" type="text" placeholder="旧文件（工作区相对路径；不存在 = 全新增）" autocomplete="off" aria-label="旧文件">
+        <input id="tbDiffB" type="text" placeholder="新文件（工作区相对路径）" autocomplete="off" aria-label="新文件">
+        <button type="button" onclick="tbDiff()">🧾 生成 unified diff</button>
+      </div>
+      <div class="tbout" id="tbDiffOut"><div class="schempty">diff 预览（v0.5.28 · #49/D1 清欠）：与 CLI org diff / 工具环 fs_write 干跑同源（lib/diff.ts · 与 GNU diff -u 对拍一致）。旧文件允许不存在（新文件首演预览）；路径限工作区内。</div></div>
     </section>
   </div>
 
@@ -6214,12 +6250,29 @@ function closeToolbox() {
   document.getElementById("toolboxScrim").classList.remove("on");
 }
 function tbTab(sec) {
-  for (const k of ["Db", "Sym", "Scan", "Gov"]) {
+  for (const k of ["Db", "Sym", "Scan", "Gov", "Diff"]) {
     document.getElementById("tbTab" + k).classList.toggle("on", k.toLowerCase() === sec.replace("db", "db").replace("sym", "sym").replace("scan", "scan").replace("gov", "gov"));
     document.getElementById("tbSec" + (k === "Db" ? "Db" : k)).hidden = (k.toLowerCase() !== sec);
   }
 }
 function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+function tbDiff() {
+  const a = document.getElementById("tbDiffA").value.trim();
+  const b = document.getElementById("tbDiffB").value.trim();
+  const out = document.getElementById("tbDiffOut");
+  if (!a || !b) { out.innerHTML = '<div class="schempty">先填两个工作区相对路径（旧 / 新）</div>'; return; }
+  out.innerHTML = '<div class="schempty">生成中…</div>';
+  fetch("/api/toolbox/diff", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ a: a, b: b }) })
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error || "生成失败") + "</div>"; return; }
+      if (j.identical) { out.innerHTML = '<div class="schempty">✓ 无差异（' + esc(a) + " ≡ " + esc(b) + "）</div>"; return; }
+      let h = '<div class="tbmeta">' + esc(a) + " → " + esc(b) + " · " + esc(j.stats) + "</div>";
+      h += '<div style="white-space:pre-wrap;text-align:left;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;max-height:420px;overflow:auto;padding:8px 0">' + esc(j.unified) + "</div>";
+      out.innerHTML = h;
+    })
+    .catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
 function tbDbSchema() {
   const file = document.getElementById("tbDbFile").value.trim();
   const out = document.getElementById("tbDbOut");
