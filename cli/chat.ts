@@ -316,7 +316,7 @@ async function handleSlash(state: ChatOpts, rl: readline.Interface, command: str
     case "?":
       console.log(`${bold("命令")}：
   /help                本帮助
-  /model [m]           查看/切换模型（scripted | deepseek）
+  /model [m]           查看/切换模型（任意车道名或模型 id · 例：scripted / zhipu）
   /expert [name]       查看/切换专家（无参列出注册表）
   /new [id]            新会话（缺省 s-<时间戳>）
   /sessions            列出本专家全部会话（轮次 · tokens · 最近问题）

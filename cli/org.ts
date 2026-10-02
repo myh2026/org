@@ -36,7 +36,7 @@ import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          latestHarnessRunDir, reviewCandidates, applyReview,
          forkSession, revertExpert, archivedVersions, renameSession, deleteSession } from "../lib/engine.ts";
 import { readCostTimeline, renderCostTimeline, latestScorecardDir } from "../lib/engine.ts";
-import { stockAffinityOf, rescueExpertOf, writeOutOfDomainRun, SEMANTIC_FLOOR } from "../lib/engine.ts"; // v0.5.10 语义地板（B-19）
+import { stockAffinityOf, rescueExpertOf, writeOutOfDomainRun, SEMANTIC_FLOOR, shouldApplySemanticFloor } from "../lib/engine.ts"; // v0.5.10 语义地板（B-19）· v0.5.27 共享判据
 import { directAskGateOf, directDegradeAnswer, writeDirectDegradeRun, prependAskRescueEvent } from "../lib/engine.ts"; // v0.5.14 直连语义地板（B-22）
 import { scanAndRenderArtifacts } from "../lib/audio.ts"; // v0.5.6 音频产物通道（CLI 车道）
 import { semanticSearch } from "../lib/search.ts"; // v0.5.8 语义检索（capabilities #19/#22）
@@ -347,13 +347,16 @@ async function cmdRun(a: Args): Promise<number> {
   if (a.spawnDepth > 0) env.ORG_SPAWN_DEPTH = String(a.spawnDepth);
   // v0.5.11：递归派生预算透传（子预算 = floor(父预算 × DECAY)；off = 关闭治理）
   if (Number.isFinite(a.spawnBudget)) env.ORG_SPAWN_BUDGET = a.spawnBudget === -1 ? "off" : String(a.spawnBudget);
-  // v0.5.10：scripted 团队车道域外任务语义地板（B-19，与 lib/engine.ts
-  // startRun 预检同构 —— Web/TUI 走 startRun，CLI run 在此）。仅 scripted +
-  // 未显式指定 fixture 时介入：域内放行 / 注册表专家跨车道救援转直连 /
-  // 零消耗诚实降级（不套用域外剧本答非所问）。
+  // v0.5.10：scripted 团队车道域外任务语义地板（B-19）；v0.5.27 与 lib/engine.ts
+  // 共用 shouldApplySemanticFloor 判据（生效车道 ≠ real + 未显式 fixture 才介入）：
+  // 域内放行 / 注册表专家跨车道救援转直连 / 零消耗诚实降级（不套用域外剧本答非所问）。
   let entry = HSL_ENTRY;
   let fixture = a.fixture;
-  if (a.model === "scripted" && !a.fixtureExplicit) {
+  if (shouldApplySemanticFloor({
+    entry: "org",
+    fixtureExplicit: a.fixtureExplicit,
+    laneKind: resolveModelFlag(a.model).kind,
+  })) {
     const stockScore = stockAffinityOf(a.task, STOCK_FIXTURE);
     if (stockScore < SEMANTIC_FLOOR) {
       const pick = rescueExpertOf(a.task, a.workspace);
@@ -729,7 +732,7 @@ async function cmdAsk(a: Args): Promise<number> {
     const found = expertFixtureOf(a.workspace, expert);
     if (found) {
       fixture = found;
-      console.log(`ℹ 使用导入剧本 ${path.relative(a.workspace, found)}（占位应答 · --model deepseek 换真实回答）`);
+      console.log(`ℹ 使用导入剧本 ${path.relative(a.workspace, found)}（占位应答 · --model <你的车道名> 换真实回答）`);
     }
   }
   // v0.5.14：B-22 直连语义地板（与 Web askOnce/askStreamOnce 同规则；仅
@@ -801,7 +804,7 @@ async function cmdHandoff(a: Args): Promise<number> {
     const found = expertFixtureOf(a.workspace, expert);
     if (found) {
       fixture = found;
-      console.log(`ℹ 使用导入剧本 ${path.relative(a.workspace, found)}（占位应答 · --model deepseek 换真实回答）`);
+      console.log(`ℹ 使用导入剧本 ${path.relative(a.workspace, found)}（占位应答 · --model <你的车道名> 换真实回答）`);
     }
   }
   const r = await runHsl(HANDOFF_ENTRY, {
@@ -854,7 +857,7 @@ async function cmdImport(a: Args): Promise<number> {
     console.log(`  能力：${r.capabilities.join(", ")}`);
     console.log(`  入库：${path.relative(process.cwd(), r.file)}（source=import · retained=true · B 路径即刻可复用）`);
     console.log(`  剧本：${path.relative(process.cwd(), r.fixture)}（scripted 占位应答 · org ask ${r.name} "…" 零参数直连）`);
-    console.log("  下一步：org status 查看 · org ask " + r.name + ' "…" 直连（占位剧本 · --model deepseek 换真实回答） · org drop ' + r.name + " 取消保留");
+    console.log("  下一步：org status 查看 · org ask " + r.name + ' "…" 直连（占位剧本 · --model <你的车道名> 换真实回答） · org drop ' + r.name + " 取消保留");
     return 0;
   } catch (err) {
     console.error(`✗ 导入失败：${(err as Error).message}`);
@@ -4772,7 +4775,7 @@ export async function orgMain(): Promise<number> {
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
 用法：
-  org run --task "..." [--workspace DIR] [--model scripted|deepseek] [--fixture FILE]
+  org run --task "..." [--workspace DIR] [--model <车道名|模型 id>] [--fixture FILE]
        [--approval] [--approve-capability]
       团队模式派单：分解 → 路由 → 派单 → 审查 → 汇总 → 资产沉淀
   org demo [--workspace DIR]
@@ -4858,6 +4861,9 @@ export async function orgMain(): Promise<number> {
       VLM 图片理解（多图 ≤4 · png/jpeg/gif/webp/bmp · 魔数唤探；无参显示状态）
   org spawn [prune --failed | --all [--dry-run]]
       派生池观测与清理（登记 + 目录 + 孤儿；dry-run 预览）
+  org spawn-decide --goal "…" [--depth N] [--max N] [--budget N]
+      派生决策器（v0.5.22 · #129 深化）：该不该派四态判定（deny/self/reuse/
+      spawn）+ 信号归因（词元/多步/工具替代/池相似度）· 与 agent_spawn 内嵌同源
   org voice
       语音服务状态探测 + 声音清单（🎤 转写 / 🔊 朗读需要 SDK 凭据）
   org db <schema|tables|query|migrate|history> --file x.db [--sql "SELECT…"]
@@ -4950,6 +4956,13 @@ export async function orgMain(): Promise<number> {
       @mention 自动抽取 + 会话账本桥（单用户账本 → 团队可见，只镜像不
       改写，幂等）· 身份 runtime/collab/collab-user（ORG_COLLAB_USER 覆盖）
       · 诚实边界：本地文件协议，多进程强并发不在面内
+  org issue [list|get|create|comment|close|reopen] --repo <owner/repo>
+      工单系统（v0.5.21 · #86）：GitHub REST 真集成 —— 只读 list/get +
+      写动作 create/comment/close/reopen（审批在环）· token 解析：ORG_GH_TOKEN
+      > config.gh_token > GH_TOKEN · GHE 端点 ORG_GH_API
+  org pr [list|view|create] --repo <owner/repo>
+      PR/MR 车道（v0.5.21 · #82）：list/view 只读（diff 8KB 截断）· create
+      写动作（head/base 校验 + 审批在环）
   org providers [ledger]
       服务商健康面板：全部注册预设 + 命名车道 + 环境变量发现状态 +
       调用台账（key 轮换归因 · 失败统计）

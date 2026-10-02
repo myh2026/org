@@ -20,6 +20,8 @@
 //   R5 e2e degrade（CLI）：量子任务 → 零消耗 + report/run.json 诚实
 //   R6 域内零影响（CLI）：公告任务 → STOCK 原行为（3/3 收货，无 lane_rescue）
 //   R7 显式 fixture 零影响：--fixture 显式传参跳过预检（用户意图优先）
+//   R8 语义地板判据（v0.5.27 车道清欠）：生效车道 ≠ real + 未显式 fixture 才设闸
+//      —— shouldApplySemanticFloor 共享函数四态定标（engine 与 cmdRun 同源）
 // ============================================================================
 import { TT } from "./tt.ts";
 import { describe, test, expect } from "bun:test";
@@ -32,6 +34,7 @@ import {
   stockAffinityOf,
   rescueExpertOf,
   startRun,
+  shouldApplySemanticFloor,
 } from "../lib/engine.ts";
 import { classifyRunEvent } from "../lib/runCards.ts";
 
@@ -227,4 +230,19 @@ describe("v0.5.10 跨车道救援（e2e）", () => {
     // 走了团队流水线（STOCK decompose 的任务树可见）
     expect(r.stdout).toContain("task#1 fetch");
   }, TT);
+});
+
+describe("v0.5.27 R8 语义地板判据（生效车道：闸门只做 scripted 的兜底）", () => {
+  test("scripted 车道 + 未显式 fixture → 设闸（B-19 原语义）", () => {
+    expect(shouldApplySemanticFloor({ entry: "org", fixtureExplicit: false, laneKind: "scripted" })).toBe(true);
+  });
+  test("真实车道 → 不前置否决（域感知是模型的活）", () => {
+    expect(shouldApplySemanticFloor({ entry: "org", fixtureExplicit: false, laneKind: "real" })).toBe(false);
+  });
+  test("显式 fixture → 不设闸（用户意图优先）", () => {
+    expect(shouldApplySemanticFloor({ entry: "org", fixtureExplicit: true, laneKind: "scripted" })).toBe(false);
+  });
+  test("直连 entry → 不设闸（团队车道专属预检）", () => {
+    expect(shouldApplySemanticFloor({ entry: "direct", fixtureExplicit: false, laneKind: "scripted" })).toBe(false);
+  });
 });

@@ -5,7 +5,7 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.5.25.3_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Status](https://img.shields.io/badge/status-v0.5.27_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
 [![Tests](https://img.shields.io/badge/tests-1387_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.71-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)

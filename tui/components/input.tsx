@@ -72,7 +72,7 @@ export function renderHelp(state: TuiState, theme: Theme, width: number, height:
     [":filter [类]", "事件流过滤：任务/分解/工厂/裁决/直连/汇总/动态"],
     [":score [axis]", "模型评分卡（证据归因）"],
     [":theme dark|light|paper", "切换主题"],
-    [":model scripted|deepseek", "切换模型（下一轮派单生效）"],
+    [":model <车道>", "切换模型/车道（下一轮派单生效）"],
     [":status", "刷新工作区快照"],
     [":clear", "清空当前线程（Ctrl+L 同效）"],
     [":quit", "退出（Ctrl+C 同效）"],

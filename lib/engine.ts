@@ -37,6 +37,20 @@ const VENDORED_MAIN = path.join(ROOT, "toolchain/dhv-ts/src/main.ts");
 
 // ---------- 公共类型（规格书 §4） ----------
 
+/**
+ * v0.5.27 语义地板判据（车道清欠批）：闸门只做「生效车道为 scripted」时的兜底 ——
+ * 真实车道不前置否决（域感知是模型的活）。B-19/B-22/B-26 三次教训的收敛：
+ * 判据必须与「实际执不执行剧本」一致，而不是与用户传入的模型旗标字面值一致。
+ * 注：engine 在 prepareLlmEnv 之后按解析车道调用；CLI cmdRun 按 resolveModelFlag 调用。
+ */
+export function shouldApplySemanticFloor(input: {
+  entry: string;
+  fixtureExplicit: boolean;
+  laneKind: "real" | "scripted";
+}): boolean {
+  return input.entry === "org" && !input.fixtureExplicit && input.laneKind !== "real";
+}
+
 export interface RunOptions {
   entry: "org" | "direct";        // org.hsl / pool/direct.hsl
   task: string;
@@ -616,8 +630,8 @@ export async function importHarness(
 
   // 剧本联动（导入即能用）：占位剧本 direct:<name>（3 轮）+ handoff:<name>（1 轮）
   // 轨道 —— scripted 模式 org ask/handoff 立即可问答（记账/会话账本/ctx meter
-  // 全链路可验证）；真实回答切 --model deepseek（fixture 不参与真实模式）。
-  const placeholder = `[imported harness ${name}] 占位剧本应答（导入时自动生成，供 scripted 链路验证）。真实回答请 --model deepseek。`;
+  // 全链路可验证）；真实回答切到已配置的真实车道（fixture 不参与真实模式）。
+  const placeholder = `[imported harness ${name}] 占位剧本应答（导入时自动生成，供 scripted 链路验证）。真实回答请 --model <你配置的车道>。`;
   const fixtureRel = `registry/harnesses/${name}.fixture.json`;
   fs.writeFileSync(
     path.join(ws, fixtureRel),
@@ -1586,21 +1600,21 @@ export function startRun(opts: RunOptions): RunHandle {
       // 车道环境准备（v0.5.1）：--model 车道名/裸模型 id → 解析 → 注入
       // DHV_LLM_* → 按需启动本地路由器（key 池轮换/降级链/预算）。
       // scripted 与未知名零影响（幂等，测试环境零外联不变）。
-      await prepareLlmEnv(opts.model, opts.workspace);
+      const preparedLane = await prepareLlmEnv(opts.model, opts.workspace); // v0.5.27：捕获解析车道（语义地板判据 = 生效车道）
       fs.mkdirSync(outDir, { recursive: true });
-      // v0.5.10：scripted 团队车道域外任务语义地板（B-19）。团队 entry +
-      // 未显式指定 fixture 时介入；预检通过改写 opts（entry/expert/fixture）
-      // 实现跨车道救援 —— 下游（args 组装 / env / finish 的 readDirectTurns）
-      // 全部自动正确。
-      // v0.5.22（B-26）：地板条件从「仅 scripted」扩展到全模型 —— 实测
-      // （org task submit · model=deepseek）真实车道下团队回路同样消费
-      // STOCK 剧本（fixture 缺省兜底），模型根本不在环（71s 跑完 parse/
-      // summarize 流水线 · model_calls=0 · 域外任务答非所问）——「真实
-      // LLM 动态分解天然域感知」的前提（模型被调用）不成立。B-19/B-22
-      // 之后任务队列是第三个复发入口：同一缺陷在平行车道入口逐一复发
-      // （B-22 教训），地板必须长在共享闸门上。域内任务零影响（原流水线）。
+      // v0.5.10：scripted 团队车道域外任务语义地板（B-19）；v0.5.22（B-26）
+      // 曾扩至全模型，v0.5.27 收敛为「生效车道判据」（车道清欠批）——闸门
+      // 只做 scripted 的兜底：真实车道不前置否决（域感知是模型的活；未配
+      // key 的显式车道由车道层诚实报错）。判据与 cli cmdRun 共用
+      // shouldApplySemanticFloor（消灭第三份条件漂移）。预检通过改写 opts
+      // （entry/expert/fixture）实现跨车道救援 —— 下游自动正确。域内任务
+      // 零影响（原流水线）；B-19/B-22/B-26 三次复发入口至此收口。
       let rescued = false;
-      if (opts.entry === "org" && !opts.fixture) {
+      if (shouldApplySemanticFloor({
+        entry: opts.entry,
+        fixtureExplicit: Boolean(opts.fixture),
+        laneKind: preparedLane.kind,
+      })) {
         const stockScore = stockAffinityOf(opts.task, STOCK_FIXTURE);
         if (stockScore < SEMANTIC_FLOOR) {
           const pick = rescueExpertOf(opts.task, opts.workspace);

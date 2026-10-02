@@ -4,7 +4,7 @@
 //   tui/main.tsx          独立执行入口（import.meta.main 守卫）
 //   cli/org.ts cmdTui     org tui 子命令（进程内 import 本文件）
 // 解析规则：
-//   --workspace/-w DIR · --model/-m scripted|deepseek · --print [--demo]
+//   --workspace/-w DIR · --model/-m <车道名|模型 id> · --print [--demo]
 //   位置参数 = 启动后立即执行的命令（":demo" / ":replay out-a" / 任务文本）
 // ============================================================================
 

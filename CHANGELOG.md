@@ -1,5 +1,30 @@
 # CHANGELOG
 
+## v0.5.27（2026-10-02）—— 车道清欠批：语义地板共享判据（生效车道）· Web 车道过滤器修复 · deepseek 残留清理 · help 补齐
+
+车道统一入口（方案 A）的 **P0 清欠**，无 UX 破坏；消化 org-verify / org-team-mode
+两份审计的 D1-D7 中第一批。
+
+- **语义地板共享判据**（B-19/B-22/B-26 三次复发入口收口）：新增
+  `lib/engine.ts shouldApplySemanticFloor({entry, fixtureExplicit, laneKind})` ——
+  闸门只做「生效车道为 scripted」时的兜底；**真实车道不再前置否决**（域感知
+  是模型的活）。`startRun` 按 `prepareLlmEnv` 解析车道调用；`cli cmdRun` 按
+  `resolveModelFlag` 同源调用（消灭第三份平行条件漂移）。scripted 行为零变化。
+- **Web 车道过滤器修复**（B-33）：`/api/status` 双白名单（scripted/deepseek）
+  吞掉 `org web --model <任意车道>` → 改为接受任意生效车道 + 按钮组动态补齐
+  当前车道按钮（全量车道选择器是 P2）。
+- **deepseek 残留清理（用户面）**：`/help` 模型行 · org 顶层帮助 usage ·
+  Web 启动横幅 · 占位剧本文案 ×3 · 导入提示 · tui 提示/文档 —— 全部泛化为
+  「车道名/模型 id」；`--model <你配置的车道>` 指引替代硬编码 deepseek。
+- **CLI help 补齐**（org-verify D6）：`org spawn-decide` / `org issue` /
+  `org pr` 三条已交付命令补发现性入口。
+- **测试**：新增 R8 判据定标 4 例（scripted/real/fixture/entry 四态）；受影响
+  三文件全绿 —— rescue **21/0** · chat+tasks **39/0** · web **60/0**（scale=6 ·
+  iSH 实弹）。全量分块在合并主仓前另行执行。
+
+> 备注：本批为 lab 先行；联动项（hsl side `model.hsl:48` 特判、z-ai SDK 独家
+> 回落清理、modelSeg 全量车道列表、provider 第二批）归 P1/P2 批。
+
 ## v0.5.26（2026-10-02）—— Web GUI v3：从零重建设计系统（Emil 动效规范 · 工具入侧栏 · 空态引导）
 
 以 emilkowalski/skills（Design Engineering）为设计准则，对 org web 界面做**从零重建**

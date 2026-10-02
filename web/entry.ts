@@ -1,7 +1,7 @@
 // ============================================================================
 // org/web/entry.ts — Web GUI 入口（Bun.serve 零依赖）
 // ----------------------------------------------------------------------------
-//   org web [--port N] [--workspace DIR] [--model scripted|deepseek]
+//   org web [--port N] [--workspace DIR] [--model <车道名|模型 id>]
 //     Bun.serve 起轻量 HTTP（默认端口 4600，避开本机 3000/3030/5000 服务），
 //     单页内联 HTML（无静态文件 / 无第三方依赖），原生 fetch 交互。
 //
@@ -2893,7 +2893,7 @@ export async function webMain(argv: string[]): Promise<number> {
   console.log(`  工单系统   GET/POST /api/govex/tracker（v0.5.21 #86/#82：GitHub issue/PR REST 真集成 —— list/get/pr_list/pr_view 只读 + create/comment/close/reopen/pr_create 写动作；无 token 诚实指引）`);
   console.log(`  堆栈分析   GET/POST /api/govex/debug（v0.5.23 #107：action=stack —— 四语言帧解析（TS/JS·PY·Rust·HSL）→ 符号化 → 外部分类 → 根因提示；GET file= 工作区日志 / POST text= 粘贴文本 + stack-selftest 自检）`);
   console.log(`  安全/依赖   GET /api/govex/sast · POST /api/govex/deps · GET /api/govex/retest（v0.5.22 #146/#65/#104：SAST 多引擎降级链 ruff→bandit→内置规则永远有产出；七工具探测 + 白名单安装车道；选择性重跑计划 + flaky 台账（只读））`);
-  console.log(`  模型       ${p.model}（GUI 可切 scripted/deepseek，请求体可逐次覆盖）`);
+  console.log(`  模型       ${p.model}（GUI 可切车道，请求体可逐次覆盖）`);
   // v0.4.13：网关三件套可见性 —— 直连服务商（DeepSeek 等）的鉴权/模型/超时
   // 经环境变量注入（spawn 车道继承 process.env），横幅回显防「配了没生效」。
   const llmModel = process.env.DHV_LLM_MODEL ?? "";
@@ -8240,7 +8240,7 @@ function showCost() {
       '<span class="h">轨道</span><span class="h">次数</span><span class="h">耗时</span>';
     if (t.calls.length === 0) {
       h += '</div><div class="rvempty">本次运行没有模型调用记录 —— scripted 剧本车道不经过网关，' +
-        '故无 llm_stream_done（用 --model deepseek 才有真实用量）</div></div>';
+        '故无 llm_stream_done（用真实车道才有真实用量）</div></div>';
     } else {
       t.byTrack.forEach(function (x) {
         h += '<span class="n">' + esc(x.track) + '</span><span>' + x.calls +
@@ -8956,7 +8956,7 @@ document.getElementById("reviewScrim").onclick = closeReview;
 document.getElementById("approvalBtn").onclick = openApprovals;
 document.getElementById("approvalScrim").onclick = closeApprovals;
 
-// 模型切换（scripted / deepseek）
+// 车道切换（scripted + 动态车道按钮 · v0.5.27）
 document.getElementById("modelSeg").addEventListener("click", function (e) {
   var b = e.target.closest("button");
   if (!b || state.running) return;
@@ -9050,7 +9050,18 @@ api("/api/status").then(function (r) {
   state.experts = r.experts || [];
   state.usages = r.usages || [];
   state.workspace = r.workspace || "";
-  if (r.model === "scripted" || r.model === "deepseek") state.model = r.model;
+  // v0.5.27 车道清欠：不再双白名单过滤 —— 接受服务端任意生效车道（此前
+  // scripted/deepseek 过滤会吞掉 org web --model <任意车道>），并在按钮组
+  // 补齐当前车道按钮（数据驱动 · 全量车道选择器是 P2）。
+  if (typeof r.model === "string" && r.model.length > 0) {
+    state.model = r.model;
+    var segEl = document.getElementById("modelSeg");
+    if (segEl && r.model !== "scripted" && !segEl.querySelector('[data-model="' + r.model + '"]')) {
+      var mb = document.createElement("button");
+      mb.type = "button"; mb.dataset.model = r.model; mb.textContent = r.model;
+      segEl.appendChild(mb);
+    }
+  }
   document.getElementById("wsPath").textContent = r.workspace || "";
   renderTop(); renderExperts(); renderSeg(); renderStatusbar(); renderMode();
   refreshReviewChip();

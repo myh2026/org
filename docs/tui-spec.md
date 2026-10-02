@@ -79,7 +79,7 @@ export interface RunOptions {
   entry: "org" | "direct";        // org.hsl / pool/direct.hsl
   task: string;
   workspace: string;              // 默认 <repo>/demo-run
-  model: "scripted" | "deepseek";
+  model: string（任意车道名/模型 id · v0.5.27 泛化）;
   fixture?: string;               // 默认 fixtures/run-notices.json
   outDir?: string;                // 默认 <workspace>/out-<ts>
   expert?: string;                // direct 模式必填
