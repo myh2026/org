@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-v0.5.31_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
 [![Tests](https://img.shields.io/badge/tests-1387_passing-brightgreen.svg)](#-测试与验证状态)
-[![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.71-blue.svg)](https://github.com/myh2026/harness-specification-language)
+[![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.72-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
 [![Platforms](https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-teal.svg)](#-三平台单二进制分发)
 [![CI](https://github.com/myh2026/org/actions/workflows/ci.yml/badge.svg)](https://github.com/myh2026/org/actions/workflows/ci.yml)

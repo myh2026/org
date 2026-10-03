@@ -13,6 +13,9 @@
   桥层 lane_decision/lane_rescue 此前只进 SSE 流、不进文件（回放面丢徽章/丢救援卡）；现于
   finish 收尾统一补写（按行去重，杜绝与降级手写路径重复）。rescue R9/R10 增「文件可见」断言。
 - 附：该批为「样式越做越细」起点 —— 徽标样式随卡头语言（发丝边框/11px/悬停可解释）。
+- 附（同日 follow-up · vendored 同步）：`toolchain/dhv-ts` 0.2.71 → **0.2.72**（含上游 v0.2.72.1
+  H1 修复回流）—— org 运行时获得 `vec![expr; n]` 重复形态修复；org 核心源码门复验 20/20 模块 0 error；
+  README 徽章对齐。`bun scripts/sync-vendored-dhv.ts --src /root/hsl` 机械同步（3 文件）。
 
 ## v0.5.30（2026-10-03）—— provider 第二批（切片 1）：注册表 +9 家（国内第二批 + 海外三家）
 
