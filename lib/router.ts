@@ -67,10 +67,16 @@ export async function ensureRouter(lane: ResolvedLane, workspace: string): Promi
   }
   const cfg = loadConfig();
   const budget = (cfg.budget_requests ?? "").trim();
+  // v0.5.32：附加头联动 —— 用户扩展头 / 注册表附加头存在时也强制走 router
+  // （直连路径（dhv-ts host）不消费 ORG_LLM_EXTRA_HEADERS；router 是唯一消费方）
+  const userHeaders = Object.keys(lane.extraHeaders ?? {}).length > 0;
+  const registryHeaders = lane.provider ? Object.keys(PROVIDERS[lane.provider]?.extraHeaders ?? {}).length > 0 : false;
   const beneficial =
     process.env.ORG_ROUTER === "1" ||
     lane.keys.length > 1 ||
     lane.fallbacks.length > 0 ||
+    userHeaders ||
+    registryHeaders ||
     budget.length > 0;
   if (!beneficial || lane.kind !== "real" || !lane.explicit) return null;
   active = await startRouter(lane, workspace);
@@ -359,6 +365,7 @@ async function startRouter(lane: ResolvedLane, workspace: string): Promise<Route
               "Content-Type": "application/json",
               ...(a.key ? { Authorization: `Bearer ${a.key}` } : {}),
               ...(spec?.extraHeaders ?? {}),
+              ...(a.lane.extraHeaders ?? {}), // v0.5.32：用户扩展头（同名覆盖注册表）
             },
             body: JSON.stringify(forward),
             signal: ctrl.signal,
@@ -381,7 +388,7 @@ async function startRouter(lane: ResolvedLane, workspace: string): Promise<Route
               delete forward.stream_options;
               const retry = await fetch(`${a.lane.gateway.replace(/\/+$/, "")}/chat/completions`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json", ...(a.key ? { Authorization: `Bearer ${a.key}` } : {}), ...(spec?.extraHeaders ?? {}) },
+                headers: { "Content-Type": "application/json", ...(a.key ? { Authorization: `Bearer ${a.key}` } : {}), ...(spec?.extraHeaders ?? {}), ...(a.lane.extraHeaders ?? {}) },
                 body: JSON.stringify(forward),
                 signal: ctrl.signal,
               });

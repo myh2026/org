@@ -1480,6 +1480,7 @@ async function cmdConfig(a: Args): Promise<number> {
       gateway: "网关端点", api_key: "鉴权密钥", model: "模型名",
       thinking: "思考档位", timeout_ms: "超时(ms)", default_lane: "缺省车道",
       api_keys: "key 池", fallbacks: "降级链", budget_requests: "日预算(次)",
+      extra_headers: "扩展请求头",
     };
     for (const k of CONFIG_KEYS) {
       const { value, source } = effectiveValue(k, cfg);
@@ -1563,7 +1564,7 @@ async function cmdConfig(a: Args): Promise<number> {
     }
     if (sub === "set") {
       if (!name || !field || value === undefined) {
-        console.error('用法：org config lane <name> set <field> <value>（field：gateway/api_key/model/thinking/timeout_ms/provider/api_keys/fallbacks）');
+        console.error('用法：org config lane set <name> <field> <value>（field：gateway/api_key/model/thinking/timeout_ms/provider/api_keys/fallbacks/extra_headers）');
         return 2;
       }
       const n = setLaneValue(name, field, Array.isArray(value) ? value.join(",") : value);

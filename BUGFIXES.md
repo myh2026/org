@@ -625,3 +625,14 @@
 - **修复**：finish 收尾统一补写 `laneFileEvents`（pushLane 收集；按 JSON 行去重防御降级手写路径重复）；
   reroute/team/real 分支全覆盖；degrade 分支仅补 laneDecision（rescue 已由 writeOutOfDomainRun 手写）。
 - **教训**：「流可见 ≠ 盘可见」—— 双通道（SSE + 产物文件）事件必须各有一条写路径，缺一条只在回放面暴露。
+
+## B-36（ORG 修复，v0.5.32）附加头静默丢失：单 key 车道直连不经 router / ORG_LLM_EXTRA_HEADERS 无消费方
+
+- **现象**：`ORG_LLM_EXTRA_HEADERS` 由 providers 写入，但全链无读者（dhv-ts host 直连
+  不消费、router 只读注册表 spec）—— 单 key anthropic 车道（OpenAI 兼容端点）直连时
+  缺 `anthropic-version` 头，必 4xx。
+- **根因**：附加头唯一实际消费方 = org 本地路由器（转发合并）；而 router 启动条件
+  只含 多 key/降级链/预算 —— 单 key 车道永远直连，附加头自然丢。
+- **修复**：ensureRouter 条件 +`userHeaders || registryHeaders`；转发两处合并
+  `lane.extraHeaders`（用户覆盖注册表）；用户扩展头配置面同步落地（见 CHANGELOG v0.5.32）。
+- **教训**：「写进去 ≠ 有人读」—— 环境变量/配置注入点必须与消费方成对出现并测试锁定。

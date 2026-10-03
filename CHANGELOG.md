@@ -1,5 +1,22 @@
 # CHANGELOG
 
+## v0.5.32（2026-10-03）—— provider 第二批切片 2a：自定义请求头全链（用户 extra_headers）
+
+「支持所有主流 API key 模式」补协议层第一块 —— 扩展请求头从「注册表写死」升级为
+「用户可配 + 全链贯通」：
+
+- **配置面**：`LaneConfig.extra_headers`（JSON 对象或 `k:v,k2:v2` 列表）——
+  `org config lane <n> set extra_headers '{"X-K":"v"}'`；装载与设值双重防线
+  （头名 token / 值非空 / 拒绝 CRLF 头注入；坏值返回 null 不落盘）。
+- **贯通面**：`laneFromConfig` → `ResolvedLane.extraHeaders` → applyLaneToEnv
+  与注册表附加头合并注入 `ORG_LLM_EXTRA_HEADERS`；**路由器转发时合并进请求头**
+  （用户键覆盖同名注册表键）。
+- **联动修复（B-36）**：`ensureRouter` 启动条件扩展 —— 用户扩展头 / 注册表附加头
+  存在即强制走 router（此前**单 key 车道直连不经 router，附加头静默丢失**：
+  anthropic-version 直连必失败、ORG_LLM_EXTRA_HEADERS 写入后无人消费）。
+- **测试**：providers 扩 2 例（用户头贯通 + 单 key anthropic-version 贯通，mock 断言）；
+  config 扩 3 例（双形态解析 / 四条防线 / 装载清洗）。
+
 ## v0.5.31（2026-10-03）—— 统一入口 P2 切片：lane_decision 卡片徽标（判定面开始被消费）
 
 把 v0.5.29 的判定器观测面带进 UI —— 运行卡头新增「本输入被如何判定」徽标：

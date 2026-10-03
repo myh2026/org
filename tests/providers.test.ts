@@ -514,6 +514,63 @@ describe("router：key 池轮换 / 降级链 / 预算 / 台账（端到端）", 
     r1!.stop();
   });
 
+  test("v0.5.32：用户扩展头贯通（lane.extra_headers → router 合并 → mock 收到）", async () => {
+    let seenHeader: string | null = null;
+    upstream = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        seenHeader = req.headers.get("x-org-test");
+        const body = (await req.json()) as Record<string, unknown>;
+        return Response.json({ choices: [{ message: { content: `ok:${String(body.model)}` } }] });
+      },
+    });
+    const cfg = loadConfig();
+    cfg.lanes.primary = {
+      gateway: `http://127.0.0.1:${upstream.port}/v1`, api_key: "sk-a", model: "m-primary",
+      thinking: "", timeout_ms: "10000", api_keys: [], fallbacks: [], provider: "",
+      extra_headers: { "X-Org-Test": "hello-42" },
+    };
+    saveRaw(cfg);
+    const lane = resolveModelFlag("primary");
+    // 单 key / 无降级 / 无预算 —— 仅凭「扩展头」也应启动 router（v0.5.32 条件扩展）
+    const router = await ensureRouter(lane, wsDir);
+    expect(router).not.toBeNull();
+    const res = await fetch(`${router!.url}/chat/completions`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "m-primary", messages: [{ role: "user", content: "ping" }] }),
+    });
+    expect(res.status).toBe(200);
+    expect(seenHeader).toBe("hello-42");
+  });
+
+  test("v0.5.32：注册表附加头单 key 也走 router（anthropic-version 贯通）", async () => {
+    let seenVer: string | null = null;
+    upstream = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        seenVer = req.headers.get("anthropic-version");
+        const body = (await req.json()) as Record<string, unknown>;
+        return Response.json({ choices: [{ message: { content: `ok:${String(body.model)}` } }] });
+      },
+    });
+    const cfg = loadConfig();
+    cfg.lanes.primary = {
+      gateway: `http://127.0.0.1:${upstream.port}/v1`, api_key: "sk-a", model: "claude-test",
+      thinking: "", timeout_ms: "10000", api_keys: [], fallbacks: [], provider: "anthropic",
+      extra_headers: {},
+    };
+    saveRaw(cfg);
+    const lane = resolveModelFlag("primary");
+    const router = await ensureRouter(lane, wsDir);
+    expect(router).not.toBeNull();
+    const res = await fetch(`${router!.url}/chat/completions`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "claude-test", messages: [{ role: "user", content: "ping" }] }),
+    });
+    expect(res.status).toBe(200);
+    expect(seenVer).toBe("2023-06-01");
+  });
+
   test("keyFingerprint 脱敏（不落原值）", () => {
     expect(keyFingerprint("sk-1234567890abcdef", 0)).toBe("k1(sk-…ef)");
     expect(keyFingerprint("short", 2)).toBe("k3(****)");

@@ -18,7 +18,7 @@ import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级�
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-  normalizeKey, configPath, loadConfig, saveConfig, setConfigValue,
+  normalizeKey, configPath, loadConfig, saveConfig, setConfigValue, setLaneValue,
   unsetConfigValue, applyPreset, effectiveValue, applyConfigToEnv,
   envNameOf, maskSecret, PRESETS, CONFIG_KEYS,
 } from "../lib/config.ts";
@@ -212,5 +212,39 @@ describe("config：生效归因与脱敏", () => {
     expect(maskSecret("sk-848e25504f854db4")).toBe("sk-…4db4");
     expect(maskSecret("short")).toBe("****");
     expect(maskSecret("")).toBe("");
+  });
+});
+
+// ---- v0.5.32：车道扩展请求头（extra_headers）set / 装载 / 防线 -----------------
+
+describe("config：lane extra_headers（v0.5.32）", () => {
+  test("setLaneValue：JSON 形态 + k:v 列表形态 + 清空", () => {
+    expect(setLaneValue("probe", "gateway", "https://api.example.com/v1")).toBe("probe");
+    expect(setLaneValue("probe", "extra_headers", '{"X-A":"1","X-B":"two"}')).toBe("probe");
+    let lane = loadConfig().lanes["probe"]!;
+    expect(lane.extra_headers).toEqual({ "X-A": "1", "X-B": "two" });
+    expect(setLaneValue("probe", "extra_headers", "X-C:3, X-D: four")).toBe("probe");
+    lane = loadConfig().lanes["probe"]!;
+    expect(lane.extra_headers).toEqual({ "X-C": "3", "X-D": "four" });
+    expect(setLaneValue("probe", "extra_headers", "")).toBe("probe");
+    expect(loadConfig().lanes["probe"]!.extra_headers).toEqual({});
+  });
+  test("防线：坏 JSON / 坏头名 / 空值 / CRLF 一律拒绝（返回 null 不落盘）", () => {
+    expect(setLaneValue("bad1", "extra_headers", "{not json")).toBeNull();
+    expect(setLaneValue("bad1", "extra_headers", "Bad Header:x")).toBeNull();
+    expect(setLaneValue("bad1", "extra_headers", "X-A:")).toBeNull();
+    expect(setLaneValue("bad1", "extra_headers", "X-A:v\r\nInjected: y")).toBeNull();
+    expect(Object.keys(loadConfig().lanes).includes("bad1")).toBe(false);
+  });
+  test("装载防线：手改文件坏值在装载期清洗（坏头名/CRLF 丢弃）", () => {
+    const cfg = loadConfig();
+    cfg.lanes["hand"] = {
+      gateway: "https://x/v1", api_key: "", model: "m", thinking: "", timeout_ms: "",
+      api_keys: [], fallbacks: [], provider: "",
+      extra_headers: { "X-Good": "ok", "Bad Name": "drop", "X-Crlf": "a\r\nb" } as Record<string, string>,
+    };
+    saveConfig(cfg);
+    const lane = loadConfig().lanes["hand"]!;
+    expect(lane.extra_headers).toEqual({ "X-Good": "ok" });
   });
 });

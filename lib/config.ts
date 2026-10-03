@@ -61,10 +61,12 @@ export interface LaneConfig {
   api_keys: string[];
   fallbacks: string[];
   provider: string;
+  /** v0.5.32：用户扩展请求头（k→v）—— 与注册表附加头合并后经路由器转发。 */
+  extra_headers: Record<string, string>;
 }
 
 export function emptyLane(): LaneConfig {
-  return { gateway: "", api_key: "", model: "", thinking: "", timeout_ms: "", api_keys: [], fallbacks: [], provider: "" };
+  return { gateway: "", api_key: "", model: "", thinking: "", timeout_ms: "", api_keys: [], fallbacks: [], provider: "", extra_headers: {} };
 }
 
 /** 键归一：连字符/别名 → 规范键（CLI 输入容错）。 */
@@ -149,6 +151,38 @@ function parseStringArray(v: unknown): string[] {
   return [];
 }
 
+/** v0.5.32：扩展请求头输入解析（JSON 对象 或 k:v,k2:v2 列表）→ 归一 map；非法返回 null。
+ *  防线：头名 token 字符集（RFC 7230 token 子集）/ 值非空 / 拒绝 CRLF（头注入）。 */
+function parseExtraHeadersInput(value: string): Record<string, string> | null {
+  const t = value.trim();
+  if (t.length === 0) return {};
+  let raw: Record<string, unknown>;
+  if (t.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(t) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+      raw = parsed as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  } else {
+    raw = {};
+    for (const part of t.split(",")) {
+      const i = part.indexOf(":");
+      if (i <= 0) return null;
+      raw[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+    }
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    const kk = k.trim();
+    const vv = typeof v === "string" ? v.trim() : typeof v === "number" ? String(v) : "";
+    if (!/^[A-Za-z0-9-]+$/.test(kk) || vv.length === 0 || /[\r\n]/.test(vv)) return null;
+    out[kk] = vv;
+  }
+  return out;
+}
+
 /** 读配置（文件缺失/损坏 → 空配置，不炸主流程）。 */
 export function loadConfig(file?: string): UserConfig {
   const p = file ?? configPath();
@@ -181,6 +215,16 @@ export function loadConfig(file?: string): UserConfig {
         }
         lane.api_keys = parseStringArray(l.api_keys);
         lane.fallbacks = parseStringArray(l.fallbacks);
+        // v0.5.32：用户扩展头装载（头名 token / 值非空且无换行 —— 注入防线）
+        const eh = l.extra_headers;
+        if (eh && typeof eh === "object") {
+          const out: Record<string, string> = {};
+          for (const [hk, hv] of Object.entries(eh as Record<string, unknown>)) {
+            const vv = typeof hv === "string" ? hv.trim() : typeof hv === "number" ? String(hv) : "";
+            if (/^[A-Za-z0-9-]+$/.test(hk) && vv.length > 0 && !/[\r\n]/.test(vv)) out[hk] = vv;
+          }
+          lane.extra_headers = out;
+        }
         if (name.trim().length > 0) cfg.lanes[name.trim()] = lane;
       }
     }
@@ -308,6 +352,13 @@ export function setLaneValue(name: string, field: string, value: string, file?: 
     }
     case "api_keys": lane.api_keys = value.split(",").map((s) => s.trim()).filter((s) => s.length > 0); break;
     case "fallbacks": lane.fallbacks = value.split(",").map((s) => s.trim()).filter((s) => s.length > 0); break;
+    // v0.5.32：用户扩展请求头 —— JSON 对象（{"X-K":"v"}）或 k:v 列表（X-K:v,X-B:w）
+    case "extra_headers": {
+      const parsed = parseExtraHeadersInput(value);
+      if (parsed === null) return null; // 非法（坏 JSON / 坏头名 / 空值 / 含换行）→ 调用方报错
+      lane.extra_headers = parsed;
+      break;
+    }
     default: return null;
   }
   cfg.lanes[n] = lane;
