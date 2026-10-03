@@ -158,14 +158,14 @@
 | 93 | E2E 测试生成 | ✅ | web SSE 全链 + demo 六相位叙事 + 真实模型工具环实测 |
 | 94 | 运行测试 | ✅ | dhv_run_gate（嵌套解释器真实执行）+ bun test 消费 |
 | 95 | 覆盖率分析 | 🟡 | 评分卡 evidence_count / confidence 归因；行覆盖率未做 |
-| 96 | mock/stub/fixture | ✅ | **Fixture v2 多轨道剧本**（scripted 确定性模型）+ 故障注入 Gauntlet v2（error/deny/empty/corrupt/slow 五类） |
+| 96 | mock/stub/fixture | ✅ | **Fixture v2 多轨道剧本**（scripted 确定性模型）+ 故障注入 Gauntlet v2（error/deny/empty/corrupt/slow 五类；**org 侧回归接线 v0.5.34**：tests/gauntlet 定向注入实弹） |
 | 97 | lint/format | ✅ | dhv check（S/G/P/N 规则）+ ruff 门禁（python 产物全规则全绿） |
 | 98 | 类型检查 | ✅ | S 严格性（零隐式转换/穷尽 match/未使用即错误）+ 12 整型域静态检查 |
 | 99 | 静态分析 | ✅ | 同 97/98（+ 交叉语法校验 py_compile/bun 转译/bash -n） |
 | 100 | 性能/基准测试 | 🟡 | 耗时计量全链（run.json elapsed/ms 事件）+ 评分卡；专用基准未做 |
 | 101 | 契约测试 | ✅ | 信封契约类型化 + P 投射铁律 |
 | 102 | 快照/视觉回归 | 🟡 | dist/demo 入库快照再生 + 变更回写（CI 逐字节校验门在合并侧；「对拍红门」如实：无）；视觉回归未做 |
-| 103 | 模糊/属性/突变测试 | 🟡 | 上游 HSL fuzz 用例；org 侧故障注入即突变测试的运行时形态 |
+| 103 | 模糊/属性/突变测试 | 🟡 | 上游 HSL fuzz 用例；org 侧故障注入（Gauntlet v2）**已接线回归**（v0.5.34 tests/gauntlet 定向注入 + 对照组）—— 运行时形态 → 测试化 |
 | 104 | flaky 管理/测试选择 | ✅ | **v0.5.22** lib/retest.ts 单一实现三端消费 —— ① tests/*.test.ts 发现 ② 三选择器（--file glob/子串 · --name → bun test -t · --failed-only 台账最新失败集）③ flaky 台账（runtime/flaky.jsonl append-only：file::name 键跨文件不混账 · 连续 2 败标记 flaky · 再 pass 解除 · 坏行容忍）④ 命令生成（--timeout 120000 B-15 纪律）。三端：CLI `org retest plan/run` · 工具环 `retest_plan`（只读——计划生成不执行）· Web 🔁 重跑面板；tests/retest 13 例 |
 | 105 | 测试数据管理 | ✅ | fixtures 目录 + 剧本变体 fixtureVariant + makeWorkspace 隔离工作区 |
 
@@ -187,7 +187,7 @@
 | 117 | 移动端调试 | ✅ | **v0.5.18**：lib/mobile.ts —— 多重优雅降级全链：devices 三层（adb 缺席→无设备→未授权，devices -l 多设备/offline 诚实入列 + iOS idevice 面）/ logcat 五元组 dump（-d 快照，tag/级别/包名三重过滤）/ forward 四层（adb→设备→/proc/net/unix socket 发现→CDP /json 页面清单，本地 9222 探测）/ apk 两层（aapt badging→PK 魔数）/ plan 纯函数保底（平台×症状矩阵步骤化计划，零外部依赖永远可用）+ mobileSelfTest 自检。三端：CLI `org mobile probe/devices/logcat/forward/apk/plan/self-test` · 工具环 `mobile_devices/mobile_logcat/mobile_plan`（全只读）· Web 📱 面板；tests/mobile 60 例。真机实测是诚实边界（沙箱无真机；外部车道全用假脚本锁定） |
 | 118 | 分布式追踪 | 🟡 | trace 概念在事件 seq/ts 全链贯通；无 APM 接入 |
 | 119 | 监控告警关联 | 🟡 | 漂移告警 + 预算水位 + 通知中心；外部监控未接 |
-| 120 | 故障复现/最小化 | ✅ | scripted 剧本即「可复现的模型响应录制」+ 故障注入第五类 slow/corrupt |
+| 120 | 故障复现/最小化 | ✅ | scripted 剧本即「可复现的模型响应录制」+ 故障注入第五类 slow/corrupt（v0.5.34 起 org 侧回归锁定：tests/gauntlet） |
 
 ## 九、扩展与集成（121–135）
 

@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## v0.5.34（2026-10-03）—— 文档批收尾（D6/D2）：README 单一状态块 + Gauntlet org 侧回归接线
+
+- **D6 · README 单一「当前状态」**：六个历史遗留的「当前状态」块（v0.5.18/.20/.24/.25/.25.3/.26）
+  全部转「历史状态」；新增 v0.5.34 唯一当前状态段（八连批弧线摘要）——「当前」语义从此单义。
+- **D2 · Gauntlet 故障注入接线**（审计休眠能力处置）：探查确认真实注入点后，新增
+  `tests/gauntlet.test.ts` **org 侧回归两例** —— fixture faults 定向注入
+  `fixture.next:direct:notice-parser`（kind:error）→ `fault_injected` 落盘 +
+  FIXTURE_EXHAUSTED 优雅失败（不挂死、可诊断）；对照组（无 faults）零误伤。
+  矩阵 #96/#103/#120 口径同步修订（休眠 → 已接线）。
+- 说明：机制本体在 vendored 宿主（FaultSpec 五类 error/deny/empty/corrupt/slow，
+  注入口在宿主 API 边界）；本批补齐「org 侧使用面 + 回归锁定」——突变测试形态从纸面变测试化。
+
 ## v0.5.33（2026-10-03）—— 「每功能一页」收官：PDF 读取 Web 面（#24 清欠）
 
 completion-matrix 遗留的最后一块模块级操作页面 —— 工具箱新增 📖 PDF 读取 Tab：
