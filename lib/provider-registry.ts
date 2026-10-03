@@ -3,11 +3,12 @@
 // ----------------------------------------------------------------------------
 // 独立模块（无内部依赖）：被 lib/config.ts（预设）与 lib/providers.ts（车道
 // 解析）共同引用，避免两者互相 import 的初始化环。
-// 「支持所有主流 API key 模式」的单一事实来源：21 家服务商的 OpenAI 兼容
+// 「支持所有主流 API key 模式」的单一事实来源：30 家服务商的 OpenAI 兼容
 // 端点、缺省模型、key 的环境变量名、附加头。国内主流（DeepSeek/智谱/月之
-// 暗面/通义/MiniMax/硅基流动）与海外主流（OpenAI/Anthropic/Gemini/
-// OpenRouter/Groq/Mistral/xAI/Together/Fireworks/Cerebras/Perplexity/
-// DeepInfra）全覆盖，本地推理（Ollama/LM Studio/vLLM）即开即用。
+// 暗面/通义/MiniMax/硅基流动 + v0.5.30 扩容：文心/混元/火山方舟/星火/零一/
+// 阶跃）与海外主流（OpenAI/Anthropic/Gemini/OpenRouter/Groq/Mistral/xAI/
+// Together/Fireworks/Cerebras/Perplexity/DeepInfra + GitHub Models/HF/NVIDIA）
+// 全覆盖，本地推理（Ollama/LM Studio/vLLM）即开即用。
 // ============================================================================
 
 // ---- 服务商注册表 -----------------------------------------------------------
@@ -156,6 +157,70 @@ export const PROVIDERS: Record<string, ProviderSpec> = {
     model: "MiniMax-Text-01",
     envKeys: ["MINIMAX_API_KEY"],
     note: "api_key 必填（platform.minimaxi.com）",
+  },
+  // ---- v0.5.30 扩容批：国内第二批 + 海外三家（全部 OpenAI 兼容 Bearer）----
+  baidu: {
+    label: "百度文心（千帆 v2 · OpenAI 兼容）",
+    gateway: "https://qianfan.baidubce.com/v2",
+    model: "ernie-4.0-turbo-8k",
+    envKeys: ["BAIDU_API_KEY", "QIANFAN_API_KEY"],
+    note: "api_key 必填（console.bce.baidu.com/qianfan）；v2 OpenAI 兼容端点",
+  },
+  hunyuan: {
+    label: "腾讯混元",
+    gateway: "https://api.hunyuan.cloud.tencent.com/v1",
+    model: "hunyuan-turbos-latest",
+    envKeys: ["HUNYUAN_API_KEY", "TENCENT_HUNYUAN_API_KEY"],
+    note: "api_key 必填（console.cloud.tencent.com/hunyuan）",
+  },
+  volcengine: {
+    label: "火山方舟（豆包 Ark）",
+    gateway: "https://ark.cn-beijing.volces.com/api/v3",
+    model: "doubao-pro-32k",
+    envKeys: ["ARK_API_KEY", "VOLC_API_KEY"],
+    note: "api_key 必填（console.volcengine.com/ark）；model 可填控制台接入点 ID",
+  },
+  spark: {
+    label: "讯飞星火（OpenAI 兼容端点）",
+    gateway: "https://spark-api-open.xf-yun.com/v1",
+    model: "4.0Ultra",
+    envKeys: ["SPARK_API_KEY", "XFYUN_API_KEY"],
+    note: "api_key 必填（console.xfyun.cn）；部分账号需 APIKey:APISecret 拼接",
+  },
+  yi: {
+    label: "零一万物 Yi",
+    gateway: "https://api.lingyiwanwu.com/v1",
+    model: "yi-lightning",
+    envKeys: ["YI_API_KEY", "LINGYIWANWU_API_KEY"],
+    note: "api_key 必填（platform.lingyiwanwu.com）",
+  },
+  stepfun: {
+    label: "阶跃星辰 StepFun",
+    gateway: "https://api.stepfun.com/v1",
+    model: "step-2-16k",
+    envKeys: ["STEPFUN_API_KEY", "STEP_API_KEY"],
+    note: "api_key 必填（platform.stepfun.com）",
+  },
+  github: {
+    label: "GitHub Models",
+    gateway: "https://models.github.ai/inference",
+    model: "openai/gpt-4o-mini",
+    envKeys: ["GITHUB_MODELS_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"],
+    note: "需 GitHub PAT（含 models 权限）；docs.github.com/github-models",
+  },
+  huggingface: {
+    label: "HuggingFace Router",
+    gateway: "https://router.huggingface.co/v1",
+    model: "meta-llama/Llama-3.3-70B-Instruct",
+    envKeys: ["HF_TOKEN", "HUGGINGFACE_API_KEY", "HUGGINGFACEHUB_API_TOKEN"],
+    note: "需 HF token（huggingface.co/settings/tokens）",
+  },
+  nvidia: {
+    label: "NVIDIA NIM",
+    gateway: "https://integrate.api.nvidia.com/v1",
+    model: "meta/llama-3.3-70b-instruct",
+    envKeys: ["NVIDIA_API_KEY", "NGC_API_KEY"],
+    note: "api_key 必填（build.nvidia.com）",
   },
   ollama: {
     label: "Ollama 本地推理",

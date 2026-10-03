@@ -126,7 +126,7 @@
 | 71 | CI/CD 流水线执行 | ✅ | 本仓库 CI（verify 三平台矩阵 + 单二进制冒烟 + ruff 门禁 + dist 回写）+ release 五目标交叉编译 |
 | 72 | K8s/Terraform | ✅ | **v0.5.17** lib/cloud.ts：probeK8s（kubectl version --client + cluster-info 集群可达 5s）/probeTerraform 同型 → k8sRun **白名单子命令**（get/describe/apply/logs/rollout/top/config…；delete/edit/scale/exec/drain 永不在内，拒绝先于 spawn）+ apply -f 路径过 pathjail（-f - stdin 拒绝）→ 降级车道：k8sManifestFor 五族生产级模板（Deployment 带资源限额/双探针/securityContext/亲和性 · Service/Ingress/ConfigMap/PVC）+ terraformPlan main.tf 骨架（provider+变量校验+输出，密钥铁律注释）。三端：CLI org cloud k8s/manifest/terraform · 工具环 cloud_k8s · Web ☁ 面板。诚实注：沙箱无集群可实测，真实集群车道已实现、模板车道为主交付 |
 | 73 | 数据库迁移/操作 | ✅ | **v0.5.15** lib/db.ts 查询半环 `dbQuery`：**双层只读门**（词法白名单：单语句 + SELECT/WITH/EXPLAIN/PRAGMA table_info 前导 + 内核 readonly 连接兜底 —— WITH…INSERT 漏网句实测被内核拦截零写入）+ 行帽 200（上限 1000）+ 256MB 文件帽 + 工作区监狱。三端同 #43；tests/db 24 例 |
-| 74 | 云服务/云 CLI | ✅ | **v0.5.17** lib/cloud.ts cloudCliRegistry：10 家注册表（aws/gcloud/az/gh/vercel/flyctl/railway/heroku/doctl/oci，每家 {cmd, probeFlag, installHint, docsUrl}）+ probeCloudClis 批量探测（which + 版本旗标各带 5s 超时，缺席即不 spawn）+ **cloudProvidersOverview 与 21 家模型服务商注册表口径打通**（推理面 21 + 基建面 10 = 31 面 provider 全景）+ cloudProbeAll 统一探测总入口（docker/ssh/k8s/tf/clis 五键，Web/CLI/工具环三端共用防口径漂移）。三端：CLI org cloud clis/overview · 工具环 cloud_probe/cloud_clis · Web ☁ 面板（绿/灰 + installHint tooltip） |
+| 74 | 云服务/云 CLI | ✅ | **v0.5.17** lib/cloud.ts cloudCliRegistry：10 家注册表（aws/gcloud/az/gh/vercel/flyctl/railway/heroku/doctl/oci，每家 {cmd, probeFlag, installHint, docsUrl}）+ probeCloudClis 批量探测（which + 版本旗标各带 5s 超时，缺席即不 spawn）+ **cloudProvidersOverview 与模型服务商注册表口径打通**（v0.5.30 扩容后：推理面 30 + 基建面 10 = 40 面 provider 全景）+ cloudProbeAll 统一探测总入口（docker/ssh/k8s/tf/clis 五键，Web/CLI/工具环三端共用防口径漂移）。三端：CLI org cloud clis/overview · 工具环 cloud_probe/cloud_clis · Web ☁ 面板（绿/灰 + installHint tooltip） |
 | 75 | 发布/部署/回滚 | ✅ | auto-release 打 tag + release 发布 + sha256 + 版本单一来源守卫（org 资产层的发布回滚：revert + 金丝雀 + 蓝绿） |
 
 ## 六、Git 与协作（76–90）
@@ -197,7 +197,7 @@
 | 122 | MCP 支持 | ✅ | **v0.5.19 协议翻译半面交付**：lib/mcp.ts MCP 客户端桥 —— <ws>/mcp-servers.json 档案（秘密键只收 $env:VAR 引用，值永不入档）→ spawn 外部 server（stdio 换行分帧 JSON-RPC）→ initialize 握手 + 能力协商（tools/resources/prompts 三面独立，缺席诚实 unsupported）→ tools/list 分页跟进 / tools/call（isError 双层语义）/ resources list+read / prompts/list。三端：CLI `org mcp` 七子命令 · 工具环 mcp_servers/mcp_tools（只读）+ mcp_call_tool（process_spawn 门 + 审批在环）· Web GET /api/govex/mcp 只读五动作 + 🔌 面板。与 adapters/bridge.hsl 外部 subagent 登记互补：登记 → 真握手真调用。诚实边界：会话粒度=每操作一会话（长连接复用/采样/roots 订阅是路线图）；协议层由 fixture server 实弹锁定（真 spawn 真握手真调用 51 例） |
 | 123 | 自定义命令 | ✅ | 斜杠命令 33 个（含别名）× TUI `:命令` + Web 面板动作（三端同权） |
 | 124 | 工作流编排 | ✅ | **HSL graph**（node/edge/guard + G 拓扑校验）+ 监督回路四阶段 + 工厂管线 |
-| 125 | 多模型切换 | ✅ | 21 服务商车道 + key 池 + 降级链 + `/model`/`:model`/Web 段控热切换 |
+| 125 | 多模型切换 | ✅ | 30 服务商车道 + key 池 + 降级链 + `/model`/`:model`/Web 段控热切换 |
 | 126 | 本地模型/API 模型 | ✅ | ollama/lmstudio/vllm 预设免 key 即用 + OpenAI 兼容一条协议打天下 |
 | 127 | Webhook/API 调用 | ✅ | 路由器 fetch 全链 + **v0.5.5 出站 webhook**（`notify_webhook_url` 三通道：存储/桌面/webhook 互不影响，5s 超时静默降级，事件过滤 `notify_webhook_events`）+ 工具环 shell/net。诚实边界：入站 webhook 服务端未做（org 是发起方不是接收方） |
 | 128 | 定时任务 | ✅ | **v0.5.5 定时触发器**：lib/schedule.ts 五段 cron + @every 区间 + UTC 语义 + misfire 策略（skip/run）+ 到期自动入队 TaskRunner；CLI `org schedule list/add/rm/on/off/test` + Web ⏰ 面板 + previewNext 预览；v055.test.ts 33 例锁定 |

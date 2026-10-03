@@ -87,6 +87,18 @@ describe("providers：服务商注册表（v0.5.1）", () => {
     }
   });
 
+  test("v0.5.30 扩容批：国内第二批 + 海外三家入册（+9 → 30 家）", () => {
+    for (const name of ["baidu", "hunyuan", "volcengine", "spark", "yi", "stepfun", "github", "huggingface", "nvidia"]) {
+      expect(PROVIDERS[name]).toBeDefined();
+      expect(PROVIDERS[name]!.gateway.startsWith("http")).toBe(true);
+      expect(PROVIDERS[name]!.envKeys.length).toBeGreaterThan(0);
+    }
+    expect(PROVIDER_NAMES.length).toBeGreaterThanOrEqual(30);
+    expect(PROVIDERS.baidu!.envKeys).toContain("QIANFAN_API_KEY");
+    expect(PROVIDERS.github!.envKeys).toContain("GITHUB_TOKEN");
+    expect(PROVIDERS.huggingface!.envKeys).toContain("HF_TOKEN");
+  });
+
   test("云端服务商都有 env 变量名（key 自动发现的前提）", () => {
     for (const [name, spec] of Object.entries(PROVIDERS)) {
       if (spec.local) continue;

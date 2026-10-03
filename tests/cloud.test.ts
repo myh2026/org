@@ -450,12 +450,12 @@ describe("云生态：云 CLI 注册表与全景联动", () => {
     }
   }, 30_000);
 
-  test("cloudProvidersOverview：模型服务商 21 家 + 云 CLI 10 家全景联动（#74 口径）", () => {
+  test("cloudProvidersOverview：模型服务商 30 家 + 云 CLI 10 家全景联动（#74 口径）", () => {
     const o = withEmptyPath(() => cloudProvidersOverview());
-    expect(o.modelProviders).toBe(21);
+    expect(o.modelProviders).toBe(30);
     expect(o.cloudClis).toBe(10);
-    expect(o.total).toBe(31);
-    expect(o.providers.length).toBe(21);
+    expect(o.total).toBe(40);
+    expect(o.providers.length).toBe(30);
     expect(o.providers.some((p) => p.name === "deepseek")).toBe(true);
     expect(o.providers.some((p) => p.local === true)).toBe(true); // ollama/lmstudio/vllm
     expect(o.clis.length).toBe(10);

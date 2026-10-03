@@ -4826,7 +4826,7 @@ export async function orgMain(): Promise<number> {
       127.0.0.1，容器/远程场景可 0.0.0.0）：专家卡 + 会话侧栏 + 对话
       视图（观测元数据 tokens/耗时/ctx 窗口计量；scripted 占位剧本秒回）
   org config [list|get|set|unset|preset|presets|lane/use/keys/auto|path|test]
-      用户模型/API 配置（~/.org/config.json，跨版本持久）：21 家服务商
+      用户模型/API 配置（~/.org/config.json，跨版本持久）：30 家服务商
       预设（deepseek/openai/anthropic/gemini/openrouter/groq/mistral/xai/
       zhipu/moonshot/dashscope/…）· 命名车道 + key 池（429 自动轮换）+
       降级链 + 日预算 · 环境变量自动发现（OPENAI_API_KEY 等即刻可用）·
@@ -4972,7 +4972,7 @@ export async function orgMain(): Promise<number> {
       拒绝）· dockerfile <node|bun|python|rust> / compose / plan 五意图 ·
       ssh <host> "<cmd>"（host 须在 <ws>/ssh-hosts.allow）· ssh-template ·
       manifest <deployment|service|ingress|configmap|pvc> · terraform ·
-      clis（10 家云 CLI 探测表）· overview（21 模型商 + 10 云 CLI 全景）
+      clis（10 家云 CLI 探测表）· overview（30 模型商 + 10 云 CLI 全景）
   org iac [parse|plan|graph] <main.tf> · generate <manifest.json> · probe · validate [dir]
       IaC 深度实现（v0.5.18 · #44，与 iacscan 扫描面互补）：内置 HCL 子集
       解析器（block/label/属性/插值/heredoc/注释 —— 行号级诚实报错）→ 资源

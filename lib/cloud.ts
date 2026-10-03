@@ -1212,7 +1212,7 @@ export function probeCloudClis(): CloudCliProbe[] {
 
 /**
  * cloudProvidersOverview（#74 与 provider-registry 口径打通）：「模型服务商
- * 21 家 + 云 CLI 10 家」的全景 —— 两种生态都算 provider 面（推理面 + 基建面）。
+ * 30 家 + 云 CLI 10 家」的全景 —— 两种生态都算 provider 面（推理面 + 基建面）。
  */
 export function cloudProvidersOverview(): {
   modelProviders: number;

@@ -4469,7 +4469,7 @@ header { height: 44px; }                    /* 少用顶栏：更瘦 */
     <section class="tbsec" id="gxSecCloud" hidden>
       <div class="tbbar">
         <button type="button" onclick="gxCloudProbe()">☁ 全景探测</button>
-        <button type="button" onclick="gxCloudOverview()">21 模型商 + 10 云 CLI 全景</button>
+        <button type="button" onclick="gxCloudOverview()">30 模型商 + 10 云 CLI 全景</button>
         <span class="tbmeta" id="gxCloudMeta"></span>
       </div>
       <div class="tbout" id="gxCloudOut" style="margin-bottom:10px"><div class="schempty">云生态探测（#67/#68/#72/#74）：docker（CLI + 守护进程）· ssh · kubectl（CLI + 集群）· terraform · 10 家云 CLI —— 缺席即诚实降级（绿 ✓ 在场 / 灰 ⬜ 缺席，悬停看安装指引），模板车道始终可用。CLI 同款 org cloud probe。</div></div>
@@ -8110,7 +8110,7 @@ function renderProvidersPane() {
     '<button id="pvKeyClear">清空池</button>' +
     "</div>" +
     '<div class="pvtest" style="color:var(--dim)">已注册 ' + providersState.presets.length +
-    " 家服务商（OpenAI 兼容协议 · deepseek/openai/anthropic/gemini/groq/zhipu/qwen/…）</div></div>" +
+    " 家服务商（OpenAI 兼容协议 · deepseek/openai/anthropic/gemini/zhipu/qwen/文心/豆包/…）</div></div>" +
     ledgerHtml();
 
   var el;

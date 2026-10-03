@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## v0.5.30（2026-10-03）—— provider 第二批（切片 1）：注册表 +9 家（国内第二批 + 海外三家）
+
+「支持所有主流 API key 模式」扩容 —— 注册表 21 → **30 家**（全部 OpenAI 兼容 Bearer，零协议层改动）：
+
+- **国内第二批（+6）**：百度文心（千帆 v2）· 腾讯混元 · 火山方舟（豆包 Ark）· 讯飞星火 ·
+  零一万物 Yi · 阶跃星辰 StepFun —— 每家含缺省模型 + key 环境变量名（含别名）+ 获取指引。
+- **海外三家（+3）**：GitHub Models（PAT）· HuggingFace Router（HF token）· NVIDIA NIM。
+- **联动（单一事实来源自动跟随）**：环境变量自动发现 / `org config preset` / `org config auto` /
+  Web ⚙ 车道面板 / cloud overview（推理面 30 + 基建面 10 = 40 面）；用户面文案与能力矩阵口径同步。
+- **测试**：providers 扩「扩容批 9 家入册」断言；cloud overview 口径 21/31 → 30/40 同步。
+- 诚实边界：Azure OpenAI（api-key 头 / deployments / query）与自定义请求头属协议层，归切片 2；
+  OAuth 订阅制不属 API key 架构，声明不支持。
+
 ## v0.5.29（2026-10-02）—— 统一入口 P1 切片：lane_decision 判定器观测事件（纯观测 · UI 未变）
 
 车道统一入口（方案 A）的 P1 第一切片 —— 「本输入被如何判定」事件化落地：
