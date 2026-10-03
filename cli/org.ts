@@ -35,7 +35,7 @@ import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
          importHarness, listContextUsage, renderContextMeter, expertFixtureOf,
          latestHarnessRunDir, reviewCandidates, applyReview,
          forkSession, revertExpert, archivedVersions, renameSession, deleteSession } from "../lib/engine.ts";
-import { readCostTimeline, renderCostTimeline, latestScorecardDir } from "../lib/engine.ts";
+import { readCostTimeline, renderCostTimeline, latestScorecardDir, reconcileRealUsage } from "../lib/engine.ts"; // v0.5.36（F2）：用量归集
 import { stockAffinityOf, rescueExpertOf, writeOutOfDomainRun, SEMANTIC_FLOOR, shouldApplySemanticFloor } from "../lib/engine.ts"; // v0.5.10 语义地板（B-19）· v0.5.27 共享判据
 import { directAskGateOf, directDegradeAnswer, writeDirectDegradeRun, prependAskRescueEvent } from "../lib/engine.ts"; // v0.5.14 直连语义地板（B-22）
 import { scanAndRenderArtifacts } from "../lib/audio.ts"; // v0.5.6 音频产物通道（CLI 车道）
@@ -392,7 +392,12 @@ async function cmdRun(a: Args): Promise<number> {
     workspace: a.workspace, task: entry === DIRECT_ENTRY ? `(direct) ${a.task}` : a.task, model: a.model,
     fixture, out, env,
   });
-  process.stdout.write(r.out);
+  // v0.5.36（F2 计量归集）：真实车道用量从 llm_stream_done 归集回 metrics.json，
+  // 控制台成本行换真实值（scripted 无网关调用 → 恒等 no-op，输出原样）。
+  let output = r.out;
+  const rec = reconcileRealUsage(out);
+  if (rec) output = output.replace(/model_calls \d+ · revises (\d+)/g, `model_calls ${rec.calls} · revises $1`);
+  process.stdout.write(output);
   // 运行收尾：把「本次产出的候选怎么处置」交回用户（工厂产物默认候选，
   // 不选取就不会进 B 路径自动复用 —— 这一步不提示就等于资产白铸）。
   printReviewHint(a.workspace, out);

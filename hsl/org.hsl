@@ -15,7 +15,7 @@
 
 import { TaskSpec, StatusReport, Verdict, COVERAGE_BAR, DEFAULT_BUDGET_TOKENS, DEFAULT_MAX_REVISES, normalize_note } from "./contracts/contract.hsl";
 import { OrgError } from "./types/errors.hsl";
-import { SubTask, OrgState, OrgReport, RoutePath, Asset, RECURRENCE_PATCH_THRESHOLD } from "./types/state.hsl";
+import { SubTask, OrgState, OrgReport, RoutePath, Asset, Acceptance, RECURRENCE_PATCH_THRESHOLD } from "./types/state.hsl";
 import { ExpertManifest, Registry, json_escape } from "./registry/manifest.hsl";
 import { NoticeParser } from "./registry/experts/notice-parser.hsl";
 import { Pool, POOL_CONCURRENCY_CAP } from "./pool/lifecycle.hsl";
@@ -132,7 +132,7 @@ export graph Org(mission: String) -> Result<OrgReport, OrgError> {
                 // 节点按引用传递（journal/registry/pool/policy 的登记与留痕
                 // 必须写回内核节点 —— 克隆传递会静默丢失注册事实与期刊条目）
                 let mut report = execute(decision.clone(), spec.clone(), subtask.clone(),
-                                         journal, registry, pool, policy, String::new()).await?;
+                                         journal, registry, pool, policy, state.accepted.clone(), String::new()).await?;
                 // 解析实际专家名（minted 专家名由工厂决定，供复发计数与补丁寻址）
                 let resolved = resolve_expert_name(decision.clone(), registry.clone(), subtask.clone());
                 match resolved {
@@ -230,7 +230,7 @@ export graph Org(mission: String) -> Result<OrgReport, OrgError> {
                                     format!("task#{} revise #{}: {}", subtask.id, fresh_revises + 1, norm));
                                 spec = spec.with_feedback(norm);
                                 report = execute(decision.clone(), spec.clone(), subtask.clone(),
-                                                 journal, registry, pool, policy, String::new()).await?;
+                                                 journal, registry, pool, policy, state.accepted.clone(), String::new()).await?;
                                 let resolved_again = resolve_expert_name(decision.clone(), registry.clone(), subtask.clone());
                                 match resolved_again {
                                     Some(name) => { expert_name = name; },
@@ -260,7 +260,7 @@ export graph Org(mission: String) -> Result<OrgReport, OrgError> {
                                     format!("task#{} {} -> {}", subtask.id, subtask.role, decision.clone().label()));
                                 spec = spec.with_feedback(format!("rejected: {}", reason));
                                 report = execute(decision.clone(), spec.clone(), subtask.clone(),
-                                                 journal, registry, pool, policy, expert_name.clone()).await?;
+                                                 journal, registry, pool, policy, state.accepted.clone(), expert_name.clone()).await?;
                                 let resolved_re = resolve_expert_name(decision.clone(), registry.clone(), subtask.clone());
                                 match resolved_re {
                                     Some(name) => { expert_name = name; },
@@ -573,7 +573,7 @@ fn note_expert_use(name: String) {
 
 async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
                  mut journal: Journal, mut registry: Registry, mut pool: Pool,
-                 mut policy: CapabilityPolicy, exclude: String) -> Result<StatusReport, OrgError> {
+                 mut policy: CapabilityPolicy, accepted: Vec<Acceptance>, exclude: String) -> Result<StatusReport, OrgError> {
     // 能力核对（编排模式：缺席授权，天花板管缺席）
     let _ = policy.decide(String::from("llm_call"), AccessMode::Orchestrated)?;
     journal.log(String::from("pool"), String::from("dispatch"),
@@ -631,7 +631,7 @@ async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
             if m.entry_path.ends_with(String::from(".hsl")) {
                 // 嵌套解释器车道（磁盘专家：蓝绿加载最新版）
                 let mut full = spec.clone();
-                full.payload = prepare_payload(subtask.clone());
+                full.payload = prepare_payload(subtask.clone(), accepted.clone());
                 // N 版本冗余（ORG_REDUNDANCY >= 2 启用）：向实现来源多样的专家对
                 // 镜像派单 —— 产出一致置信度加成，分歧记健康度事件（产出只计分）
                 redundancy_check(registry.clone(), subtask.clone(), full.clone(), journal).await?;
@@ -662,7 +662,7 @@ async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
             } else {
                 // 进程内车道（静态专家：池装配 + 信封调用）
                 let mut full = spec.clone();
-                full.payload = prepare_payload(subtask.clone());
+                full.payload = prepare_payload(subtask.clone(), accepted.clone());
                 let report = pool.dispatch(m.clone(), full.clone()).await?;
                 Ok(report)
             }
@@ -692,7 +692,7 @@ async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
                     // 样本此前纯靠模型想象格式（实测单引号伪 JSON），minted 专家
                     // 按真实载荷格式解析必挂自己的闸门。预览即 prepare_payload
                     // 的真实产物（与正式派单同一物料的形态）。
-                    let preview = prepare_payload(subtask.clone());
+                    let preview = prepare_payload(subtask.clone(), accepted.clone());
                     let fresh = match Factory::run(subtask.goal.clone(), subtask.skills.clone(), preview).await {
                         Ok(m) => m,
                         Err(e) => {
@@ -719,7 +719,7 @@ async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
             note_expert_use(minted.name.clone());
             // 派单：嵌套解释器执行（磁盘专家从磁盘加载 = 蓝绿）
             let mut full = spec.clone();
-            full.payload = prepare_payload(subtask.clone());
+            full.payload = prepare_payload(subtask.clone(), accepted.clone());
             let out = run_expert(minted.name.clone(), full.clone(), String::from("work-out"));
             if out.ok == false {
                 // v0.5.7 优雅降级（与 v0.4.12 mint-failed 同构）：minted 专家
@@ -758,7 +758,7 @@ async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
                     note_expert_use(m.name.clone());
                     if m.entry_path.ends_with(String::from(".hsl")) {
                         let mut full = spec.clone();
-                        full.payload = prepare_payload(subtask.clone());
+                        full.payload = prepare_payload(subtask.clone(), accepted.clone());
                         let out = run_expert(m.name.clone(), full.clone(), String::from("work-out"));
                         if out.ok == false {
                             // v0.5.7 优雅降级（同 mint-run-failed）：暖移交磁盘
@@ -784,7 +784,7 @@ async fn execute(decision: RoutePath, spec: TaskSpec, subtask: SubTask,
                         Ok(read_report_artifact(full.task_id))
                     } else {
                         let mut full = spec.clone();
-                        full.payload = prepare_payload(subtask.clone());
+                        full.payload = prepare_payload(subtask.clone(), accepted.clone());
                         let report = pool.dispatch(m, full).await?;
                         Ok(report)
                     }
@@ -840,7 +840,11 @@ fn read_redundancy() -> u32 {
 /// v0.4.13 前无条件读 raw/notices.txt：任意任务都拿演示样本（实测情感
 /// 分析任务解析出 5 条旧公告 —— minted harness 词典法本身质量很好，
 /// 纯数据路由断了）。
-fn prepare_payload(subtask: SubTask) -> String {
+/// v0.5.36 扩充（F1 交付物对齐）：⓪ depends_on 上游交付物优先 —— 依赖任务
+/// 已收货的真实交付物是第一材料（将原创七绝写入 poem.md 的子任务此前被
+/// input=workspace 惯例劫持为 raw/notices.txt：写文件专家只见公告 → 落盘
+/// 《公告纪事》而非上游《秋思》；真实车道首演 F1 实测）。
+fn prepare_payload(subtask: SubTask, accepted: Vec<Acceptance>) -> String {
     if subtask.role == String::from("validate") {
         let upstream: String = native typescript {
             try {
@@ -851,6 +855,22 @@ fn prepare_payload(subtask: SubTask) -> String {
         };
         upstream
     } else {
+        // ⓪ depends_on 上游交付物优先（v0.5.36）：真实交付物形态（"(" 开头
+        // 的占位/失败标注不转移，回落既有物料路由）
+        let mut upstream: Vec<String> = Vec::new();
+        for dep in subtask.depends_on.iter() {
+            for a in accepted.iter() {
+                if a.task_id == dep.clone() {
+                    let d = a.report.clone().deliverable.trim().to_string();
+                    if d.len() > 0 && d.starts_with("(") == false {
+                        upstream.push(d);
+                    }
+                }
+            }
+        }
+        if upstream.len() > 0 {
+            return upstream.join("\n\n");
+        }
         let mission: String = native typescript {
             return String($host.config.task || "");
         };

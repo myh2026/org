@@ -832,6 +832,60 @@ export function readMetrics(outDir: string): RunMetrics | null {
   }
 }
 
+/** v0.5.36（F2 计量归集）：真实车道用量归集 —— llm_stream_done（events.jsonl
+ *  逐调用真源）→ metrics.json（机器面）+ report.md 成本行（人工面）。
+ *  背景（真实车道首演 F2）：27 次真实调用全部只进事件流，metrics.json 的
+ *  tokens_total/model_calls_total 恒 0（铸造专家不设自报 model_calls），
+ *  只有 org cost 消费了真源；报告 / 派生回填 / 派生池登记全盲。
+ *  口径：网关实计与自报取较大值（同一批调用不重复计）。scripted 车道不经过
+ *  网关 → 零 llm_stream_done → 恒等 no-op（演示/测试语义不变）。幂等。 */
+export function reconcileRealUsage(outDir: string): { calls: number; tokens: number } | null {
+  try {
+    const evFile = path.join(outDir, "events.jsonl");
+    if (!fs.existsSync(evFile)) return null;
+    let calls = 0;
+    let tokens = 0;
+    for (const line of fs.readFileSync(evFile, "utf-8").split("\n")) {
+      if (line.indexOf("llm_stream_done") < 0) continue;
+      try {
+        const ev = JSON.parse(line) as { name?: string; data?: { usage?: { total_tokens?: unknown } } };
+        if (ev.name !== "llm_stream_done") continue;
+        calls += 1;
+        const t = Number(ev.data?.usage?.total_tokens);
+        if (Number.isFinite(t)) tokens += t;
+      } catch { /* 行级容错：坏行不阻断归集 */ }
+    }
+    if (calls === 0) return null;
+    const mFile = path.join(outDir, "metrics.json");
+    if (!fs.existsSync(mFile)) return null;
+    const m = JSON.parse(fs.readFileSync(mFile, "utf-8")) as Record<string, unknown>;
+    const prevCalls = Number(m.model_calls_total) || 0;
+    const prevTokens = Number(m.tokens_total) || 0;
+    const newCalls = Math.max(prevCalls, calls);
+    const newTokens = Math.max(prevTokens, tokens);
+    if (newCalls === prevCalls && newTokens === prevTokens && m.llm_calls !== undefined) {
+      return { calls: newCalls, tokens: newTokens };
+    }
+    m.model_calls_total = newCalls;
+    m.tokens_total = newTokens;
+    m.llm_calls = calls;     // 网关实计口径（与自报口径双留痕）
+    m.llm_tokens = tokens;
+    fs.writeFileSync(mFile, JSON.stringify(m));
+    try {
+      const rFile = path.join(outDir, "report.md");
+      if (fs.existsSync(rFile)) {
+        const r = fs.readFileSync(rFile, "utf-8");
+        const patched = r.replace(/tokens=(\d+) revises=(\d+) model_calls=(\d+)/,
+          (_s: string, _t: string, rev: string) => `tokens=${newTokens} revises=${rev} model_calls=${newCalls}`);
+        if (patched !== r) fs.writeFileSync(rFile, patched);
+      }
+    } catch { /* 人工面增强：失败不影响计量面 */ }
+    return { calls: newCalls, tokens: newTokens };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 向产物目录的 events.jsonl 追加一条桥侧事件（append-only 契约）。
  * 音频渲染（audio_rendered）等增强通道使用：解释器进程已退出，桥层
@@ -1620,6 +1674,9 @@ export function startRun(opts: RunOptions): RunHandle {
         }
       } catch { /* 留痕是增强通道：失败不影响 run 语义 */ }
     }
+    // v0.5.36（F2 计量归集）：真实车道用量归集（scripted 恒等 no-op）——
+    // result.metrics / 下游消费面（web 卡片 / 派生回填）随之为真实值。
+    reconcileRealUsage(outDir);
     const runJson = readRunJson(outDir);
     const metrics = readMetrics(outDir);
     const turns = opts.entry === "direct"

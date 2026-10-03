@@ -1,3 +1,21 @@
+## v0.5.36（2026-10-03）—— 真实车道首演 F1/F2 修复：交付物对齐 + 计量归集
+
+- **F1 · 交付物对齐（B-38）**：写文件子任务被物料路由劫持 —— 分解器已正确声明
+  `task#2 write depends_on=[1] / input=workspace`，但 `prepare_payload` 无视 depends_on，
+  「input=workspace → raw/notices.txt」惯例把五条公告当载荷塞给写文件专家（工厂铸造
+  预览同源）→ 现场铸出的专家落盘《公告纪事》覆盖 poem.md，compose 的原创《秋思》被吞。
+  修复：**depends_on 上游交付物优先**（仅真实交付物形态转移；「(」占位/失败标注回落
+  既有物料路由 —— 公告演示 fetch→parse 链语义不变）。证据：decompose 输出 + 三处
+  poem.md 对照 + 铸造脚本硬编码文本 + journal 全链。
+- **F2 · 计量归集（B-39）**：真实车道 27 次调用（llm_stream_done 逐调用真源）未入账，
+  metrics.json `model_calls_total / tokens_total` 恒 0，报告 / 派生回填 / 派生池登记全盲。
+  修复：宿主侧 `reconcileRealUsage` —— 运行收尾把 llm_stream_done 计数与 usage 归集回
+  metrics.json（+ `llm_calls`/`llm_tokens` 实计双留痕）与 report.md 成本行；网关实计与
+  自报取较大值（不重复计）；scripted 零 no-op、幂等。接线：CLI run（控制台成本行换真实值）
+  / engine startRun（web · 任务 · agent_spawn 回填同链）。
+- **回归**：reconcile 单测 5 例（归集 / 幂等 / 取大 / no-op / 缺席容错）；hsl/org.hsl
+  过 dhv check（20 模块）；demo/check 既有套件复跑（scripted 语义零变化）。
+
 # CHANGELOG
 
 ## v0.5.35（2026-10-03）—— 长程任务机制实测 + CLI 优先级面修复（B-37）

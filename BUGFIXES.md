@@ -647,3 +647,30 @@
   + 空态提示补旗标；tasks.test 新增 CLI 优先级回归（P0 / P99→P10）。
 - **教训**：库能力 ≠ CLI 能力——「旗标接线」是独立盲区，需端到端冒烟锁定；
   数值解析里 0 是经典假值地雷（`||` 默认值语法慎用于可为 0 的参数）。
+
+## B-38（ORG 修复，v0.5.36）写文件子任务交付物错位：载荷路由无视 depends_on → 落盘非上游产物
+
+- **现象**：真实车道首演 —— 「写诗并保存 poem.md」accepted 2/2、compose 产出《秋思》，
+  但工作区 poem.md 被写成《公告纪事》（引用 raw/notices.txt 五条公告），交付物对齐失败。
+- **根因**：分解器声明 task#2 write `depends_on=[1] input=workspace`；`prepare_payload`
+  只做 role=validate 的上游编接，其余按 input 惯例路由 —— raw/notices.txt 存在即优先
+  （公告演示约定）→ 载荷 = 五条公告；工厂以该载荷预览铸出「公告诗」专家，其脚本把
+  canned 文本写进工作区根 poem.md（work-out 的 fs.write 解析到工作区根）。
+- **修复**：`prepare_payload` 增加 ⓪ 级判据 —— depends_on 上游**真实交付物**优先
+  （「(」开头占位/失败标注不具转移价值，回落既有路由；公告演示 fetch→parse 零变化）；
+  execute 签名贯通 accepted 快照（6 个 prepare 调用点 + 3 个 execute 调用站）。
+- **教训**：「依赖声明 ≠ 数据到达」—— 拓扑依赖必须伴随载荷编接；最毒的是它“看起来能跑”
+  且通过一切机械闸门（覆盖率 1.00、格式齐全），只有语义对齐面能抓住。
+
+## B-39（ORG 修复，v0.5.36）真实车道用量不入账：llm_stream_done 真源 → metrics 恒 0
+
+- **现象**：真实车道运行 27 次调用（11,441 行流事件），metrics.json / 报告显示
+  `model_calls 0 · tokens 0`；只有 `org cost` 能从事件流看到逐次调用。
+- **根因**：metrics 的 tokens/model_calls 只汇总子任务报告的自报值（铸造专家不设），
+  网关级 llm_stream_done 仅成本面板一个消费者；报告打印 / 派生回填 / 派生池登记全盲。
+- **修复**：宿主 `reconcileRealUsage`（finish 收尾）：llm_stream_done 计数 + usage 归集 →
+  metrics.json（model_calls_total/tokens_total 取 max 防重复计 + llm_calls/llm_tokens
+  实计双留痕）+ report.md 成本行；CLI run 控制台成本行同步换真实值；startRun 链路
+  （web / tasks / agent_spawn 回填）随 result.metrics 生效。scripted 零 no-op、幂等。
+- **教训**：「有真源 ≠ 有归集」—— 每新增一条数据出口都要检查核心账本同步；
+  双口径（自报/实计）并存用 max 语义并显式双留痕，不给重复计留后门。
