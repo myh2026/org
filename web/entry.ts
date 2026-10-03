@@ -133,6 +133,7 @@ import {
 } from "../lib/sessions.ts";
 import { prepareLlmEnv, readLedger, poolView, budgetWatermark } from "../lib/router.ts"; // 车道环境准备（v0.5.1 · 池状态/预算水位 v0.5.5）
 import { diffFiles, renderUnified, renderStats } from "../lib/diff.ts"; // v0.5.28（D1 清欠）：diff 预览 Web 面（与 CLI org diff 同源）
+import { readPdf } from "../lib/pdfread.ts"; // v0.5.33：「每功能一页」收官 —— PDF 读取 Web 面（与 CLI org read 同源）
 import { loadConfig, applyPreset, setConfigValue, unsetConfigValue, setLaneValue,
          removeLane, useLane, addApiKey, autoFromEnv } from "../lib/config.ts";
 import { PROVIDER_NAMES, discoverEnvLanes, resolveModelFlag, providerRows, testLane } from "../lib/providers.ts";
@@ -1326,6 +1327,18 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
             stats: renderStats(r.result),
             unified: renderUnified(r.result, a, b),
           });
+        }
+        // v0.5.33（「每功能一页」收官）：PDF 读取 Web 面 —— 与 CLI org read / 工具环 read_pdf 同源（lib/pdfread.ts）
+        if (route === "POST /api/toolbox/pdfread") {
+          const body = (await req.json().catch(() => ({}))) as { file?: string; maxPages?: number };
+          const file = typeof body.file === "string" ? body.file.trim() : "";
+          if (!file) return json({ ok: false, error: "file 必填（工作区相对路径）" }, 400);
+          const wsRoot = readWorkspaceOf(ws);
+          const abs = path.resolve(wsRoot, file);
+          const rel = path.relative(wsRoot, abs);
+          if (rel.startsWith("..") || path.isAbsolute(rel)) return json({ ok: false, error: "路径越界（仅限工作区内相对路径）" }, 400);
+          const r = await readPdf(abs, { maxPages: typeof body.maxPages === "number" && body.maxPages > 0 ? Math.max(1, Math.floor(body.maxPages)) : 50 });
+          return json({ ...r, file });
         }
         // v0.5.16 治理与扩展面板（🛡 govex）：IaC 扫描 / 插件 / RBAC / OpenAPI /
         // 浏览器 / dbdiag / 补全 / 重命名 / git —— 与 CLI、工具环同源 lib。
@@ -4246,6 +4259,7 @@ header { height: 44px; }                    /* 少用顶栏：更瘦 */
       <button class="tbtab" id="tbTabScan" type="button" role="tab" onclick="tbTab('scan')">🛡 密钥扫描</button>
       <button class="tbtab" id="tbTabGov" type="button" role="tab" onclick="tbTab('gov')">📦 治理件</button>
       <button class="tbtab" id="tbTabDiff" type="button" role="tab" onclick="tbTab('diff')">🧾 Diff 预览</button>
+      <button class="tbtab" id="tbTabPdf" type="button" role="tab" onclick="tbTab('pdf')">📖 PDF 读取</button>
     </div>
   </div>
 
@@ -4294,6 +4308,15 @@ header { height: 44px; }                    /* 少用顶栏：更瘦 */
         <button type="button" onclick="tbDiff()">🧾 生成 unified diff</button>
       </div>
       <div class="tbout" id="tbDiffOut"><div class="schempty">diff 预览（v0.5.28 · #49/D1 清欠）：与 CLI org diff / 工具环 fs_write 干跑同源（lib/diff.ts · 与 GNU diff -u 对拍一致）。旧文件允许不存在（新文件首演预览）；路径限工作区内。</div></div>
+    </section>
+
+    <section class="tbsec" id="tbSecPdf" hidden>
+      <div class="tbbar">
+        <input id="tbPdfFile" type="text" placeholder="PDF 文件（工作区相对路径，如 docs/paper.pdf）" autocomplete="off" aria-label="PDF 文件">
+        <input id="tbPdfPages" type="text" placeholder="页帽（缺省 50）" style="max-width:110px" autocomplete="off" aria-label="页数上限">
+        <button type="button" onclick="tbPdf()">📖 提取文本</button>
+      </div>
+      <div class="tbout" id="tbPdfOut"><div class="schempty">PDF 文本提取（v0.5.33 · #24 清欠）：三层降级链 pdftotext → uv+pypdf → 诚实指引；与 CLI org read / 工具环 read_pdf 同源。扫描件（无文本层）会诚实说明。</div></div>
     </section>
   </div>
 
@@ -6266,7 +6289,7 @@ function closeToolbox() {
   document.getElementById("toolboxScrim").classList.remove("on");
 }
 function tbTab(sec) {
-  for (const k of ["Db", "Sym", "Scan", "Gov", "Diff"]) {
+  for (const k of ["Db", "Sym", "Scan", "Gov", "Diff", "Pdf"]) {
     document.getElementById("tbTab" + k).classList.toggle("on", k.toLowerCase() === sec.replace("db", "db").replace("sym", "sym").replace("scan", "scan").replace("gov", "gov"));
     document.getElementById("tbSec" + (k === "Db" ? "Db" : k)).hidden = (k.toLowerCase() !== sec);
   }
@@ -6285,6 +6308,22 @@ function tbDiff() {
       if (j.identical) { out.innerHTML = '<div class="schempty">✓ 无差异（' + esc(a) + " ≡ " + esc(b) + "）</div>"; return; }
       let h = '<div class="tbmeta">' + esc(a) + " → " + esc(b) + " · " + esc(j.stats) + "</div>";
       h += '<div style="white-space:pre-wrap;text-align:left;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;max-height:420px;overflow:auto;padding:8px 0">' + esc(j.unified) + "</div>";
+      out.innerHTML = h;
+    })
+    .catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });
+}
+function tbPdf() {
+  const file = document.getElementById("tbPdfFile").value.trim();
+  const out = document.getElementById("tbPdfOut");
+  if (!file) { out.innerHTML = '<div class="schempty">先填工作区内的 PDF 路径</div>'; return; }
+  out.innerHTML = '<div class="schempty">提取中…（大文件 / 首次 uv 拉取可能较慢）</div>';
+  var pages = parseInt(document.getElementById("tbPdfPages").value, 10);
+  fetch("/api/toolbox/pdfread", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file: file, maxPages: isNaN(pages) ? undefined : pages }) })
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      if (!j.ok) { out.innerHTML = '<div class="schempty">✗ ' + esc(j.error || "提取失败") + (j.hint ? "<br>" + esc(j.hint) : "") + "</div>"; return; }
+      let h = '<div class="tbmeta">' + esc(j.file || file) + " · engine=" + esc(j.engine) + " · " + String(j.pages == null ? "?" : j.pages) + " 页 · " + String(j.ms || 0) + "ms" + (j.hint ? " · " + esc(j.hint) : "") + "</div>";
+      h += '<div style="white-space:pre-wrap;text-align:left;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;max-height:420px;overflow:auto;padding:8px 0">' + esc(j.text || "（空文本：可能是扫描件，无文本层）") + "</div>";
       out.innerHTML = h;
     })
     .catch(function () { out.innerHTML = '<div class="schempty">✗ 请求失败</div>'; });

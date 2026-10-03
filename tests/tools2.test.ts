@@ -325,7 +325,7 @@ describe("v0.5.15 工具环扩展 e2e（scripted 剧本驱动）", () => {
 // ---- Web 工具箱面板 API（v0.5.15：「每个功能都有对应操作页面」的 Web 面） ----
 
 describe("Web 工具箱 API（/api/toolbox/*）", () => {
-  test("七个端点全通 + 越界拒绝 + 写语句拒绝", async () => {
+  test("工具箱端点全通（db/symbols/scan/audit/sbom/review/diff/pdfread）+ 越界拒绝 + 写语句拒绝", async () => {
     const { startWebServer } = await import("../web/entry.ts");
     // 播种：db + 符号源 + CODEOWNERS
     fs.mkdirSync(path.join(WS, "data"), { recursive: true });
@@ -387,6 +387,34 @@ describe("Web 工具箱 API（/api/toolbox/*）", () => {
       expect(dfNew.ok).toBe(true);
       const dfEsc = await post("/api/toolbox/diff", { a: "../../etc/passwd", b: "data/v2.txt" });
       expect(dfEsc.ok).toBe(false);
+
+      // v0.5.33：PDF 读取面 —— 引擎在场生成真 PDF 断言文本；越界拒绝
+      const uvExe2 = (() => {
+        const ext = process.platform === "win32" ? ".exe" : "";
+        for (const d of (process.env.PATH ?? "").split(path.delimiter)) {
+          for (const n of [`uv${ext}`, "uv"]) {
+            const p = path.join(d, n);
+            if (fs.existsSync(p)) return p;
+          }
+        }
+        return null;
+      })();
+      const pdfReady2 = pdfEngines().pdftotext || pdfEngines().uv;
+      if (pdfReady2 && uvExe2) {
+        const gen2 = Bun.spawnSync([uvExe2, "run", "--with", "fpdf", "python", "-c",
+          "from fpdf import FPDF; p=FPDF(); p.add_page(); p.set_font('Helvetica', size=16); p.cell(200,10,'Hello ORG PDF', ln=True); p.output('pdf-out/ok2.pdf')"],
+          { cwd: TEST_RUN, stdout: "pipe", stderr: "pipe" });
+        if (gen2.exitCode === 0) {
+          fs.mkdirSync(path.join(WS, "docs"), { recursive: true });
+          fs.writeFileSync(path.join(WS, "docs", "ok2.pdf"), fs.readFileSync(path.join(TEST_RUN, "pdf-out", "ok2.pdf")));
+          const pf = await post("/api/toolbox/pdfread", { file: "docs/ok2.pdf" });
+          expect(pf.ok).toBe(true);
+          expect(String(pf.text)).toContain("Hello ORG PDF");
+          expect(String(pf.engine)).not.toBe("none");
+        }
+      }
+      const pfEsc = await post("/api/toolbox/pdfread", { file: "../../etc/hosts" });
+      expect(pfEsc.ok).toBe(false);
 
       const rev = await post("/api/toolbox/review", { files: ["src/app.hsl"] });
       expect(rev.ok).toBe(true);

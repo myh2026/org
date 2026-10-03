@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## v0.5.33（2026-10-03）—— 「每功能一页」收官：PDF 读取 Web 面（#24 清欠）
+
+completion-matrix 遗留的最后一块模块级操作页面 —— 工具箱新增 📖 PDF 读取 Tab：
+
+- **端点** `POST /api/toolbox/pdfread`（工作区监狱 + 页帽 1-50 钳制）：与 CLI `org read` /
+  工具环 `read_pdf` 同源 `lib/pdfread.ts`（三层降级链 pdftotext → uv+pypdf → 诚实指引；
+  魔数嗅探 / 扫描件说明 / 引擎归因）。
+- **面板**：双输入（路径 + 页帽）→ 头部元信息（engine · 页数 · 耗时）+ 文本域（滚动，
+  与 diff 页同款视觉）；错误直出 hint（安装指引）。
+- **测试**：tools2 工具箱 e2e 扩 PDF 断言（uv+fpdf 生成真 PDF → 提取文本命中；
+  越界拒绝）并更名「八端点全通」清单。
+- 至此「#49 diff + #24 PDF」两大 Web 页面欠账全部清偿（D1 清欠闭环）。
+
 ## v0.5.32（2026-10-03）—— provider 第二批切片 2a：自定义请求头全链（用户 extra_headers）
 
 「支持所有主流 API key 模式」补协议层第一块 —— 扩展请求头从「注册表写死」升级为
