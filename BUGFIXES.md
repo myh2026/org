@@ -678,3 +678,46 @@
   （web / tasks / agent_spawn 回填）随 result.metrics 生效。scripted 零 no-op、幂等。
 - **教训**：「有真源 ≠ 有归集」—— 每新增一条数据出口都要检查核心账本同步；
   双口径（自报/实计）并存用 max 语义并显式双留痕，不给重复计留后门。
+
+## B-40（ORG 修复，v0.5.37）B 复用地板长 goal 失真：LLM 详述目标被比例判据拒绝 → 存量专家不复用、交付断流
+
+- **现象**：真实车道「D 大调卡农古典小品（交付可播放音频）」—— decompose 输出的
+  task#1「创作 D 大调卡农进行（Pachelbel 式 …）的古典小品，弦乐音色，确定标题、调性、
+  速度与多声部走向，产出可渲染的乐谱/MIDI 数据」（36 词元）**未复用注册表中已保留的
+  composer 专家**（描述逐字覆盖「创作三声部乐谱、和声进行 JSON 工件，引擎收尾自动渲染
+  可播放 WAV 音频」），路由走 C:generate 现场铸造 → 铸出产物是 bar 事件 JSON（非音频
+  协议）→ WAV/m4a 交付断流；连带「render」子任务工厂连败 3 次（运行期崩溃 / S-7 未用
+  绑定 ×2），最终 audio_ok=0。
+- **根因**：B 复用地板（v0.4.13）为**纯比例制**（词面命中 ratio ≥ 0.3）。短 goal
+  （scripted 剧本手写 15-26 词元）标定有效；LLM 生成的 30+ 词元详述目标使分母膨胀 ——
+  实测 7 命中/36 词元 = 0.194 < 0.3 被拒。信号本身是强的（7 个实质词元重合），
+  是**校准**问题不是匹配问题。
+- **修复**：`affinity_hit` 双判据 —— 原比例通道保留；新增绝对命中通道
+  `score ≥ REUSE_AFFINITY_MIN_HITS(6) 且 ratio ≥ REUSE_AFFINITY_RELAX_RATIO(0.15)`
+  同样放行。强拒例（2/22 = 9% 杂散）双判据下全拒；4 命中/0.129 近似例亦拒
+  （边界探针锁定）。
+- **验证**：`tests/fixes.test.ts` 新增两例（真实 decompose 原文 → B:reuse composer +
+  WAV/MIDI/M4A 全链；4 命中边界探针 → 仍 C:generate）。**修前负控已做**：同 fixture
+  修前跑 = `task#1 compose -> C:generate` + FIXTURE_EXHAUSTED + 零音频产物。
+  旧两例（9% 拒 / 54% 收）继续护持。
+- **教训**：「校准型阈值必须用真实分布定标」—— 剧本手写 goal 与 LLM 生成 goal 的
+  词元分布是两个世界；比例判据要配绝对信号通道兜底。工厂连败的 S-7 轨迹也说明：
+  铸造专家「写了不用」的背后是能力缺口（无法写二进制），不是模型不听话。
+
+## B-41（HSL 待修 → 上游队列 H5）`char::is_ascii_digit` 家族缺失：调用即运行期崩溃，check 不拦
+
+- **现象**：真实车道工厂铸造「render」专家连败轨迹第 1 次 —— 生成物 check 通过，
+  fixture 验收运行期崩溃：`✗ 运行期错误：String 没有方法 "is_ascii_digit"`。
+- **最小复现**（铸造产物原文，l·digit 提取模式）：
+  `let digits: String = rest.chars().filter(|c| c.is_ascii_digit()).collect();`
+  `chars()` 产出单字符 String 序列，`c` 命中 CHAR_METHODS（单字符回退面）——
+  该面已注册 to_string/is_alphabetic/is_numeric/clone，**缺 Rust 对等家族**：
+  is_ascii_digit / is_ascii_alphabetic / is_ascii_alphanumeric / is_ascii_whitespace /
+  is_ascii_lowercase / is_ascii_uppercase。
+- **影响面**：任何走「字符类判定」的铸造/导入专家（解析、清洗、校验类高频模式）
+  在 check 通过后运行期炸 —— 属 B-1 同族（check/run 对齐缺口：闭包参数类型面
+  S-19 不追）。工厂侧后果 = 再生成 3 次全败（模型在同缺口反复摔）→ 子任务交付失败。
+- **处置**：入 HSL 上游队列 **H5**（dhv-ts `builtins.ts` CHAR_METHODS 家族补齐 +
+  ruff/对拍语料 + org vendored 回流）；本批先落 finding 与复现，不做跨仓实现。
+- **判断**：为何不本轮修 —— 修复正确的落点在上游 hsl 仓（org vendored 是机械镜像，
+  直改会漂移）；且本批主线（音频交付）已由 B-40 修复恢复通路，H5 独立成轮更稳。

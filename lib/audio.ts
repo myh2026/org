@@ -10,6 +10,12 @@
 //   - 和弦库（11 种和弦质量 × 7 套进行预设 + 音名/MIDI/频率三向转换）
 //   - MIDI 导出（SMF 格式 0；notes.json 声明 export_midi: true 即同写 .mid）
 //
+// v0.5.37 交付链升级（测试项目 2「古典音乐」）：
+//   - 转码交付：WAV → mp3/m4a（ffmpeg 后处理；缺席诚实降级不炸 WAV）
+//   - 协议 deliver 字段：["wav","mid","mp3","m4a"] 显式声明交付形态
+//     （缺省 ["wav","mid"] = 历史行为零变化；转码须显式 opt-in）
+//   - 成品曲目一次成型：org audio compose（CLI）· /api/audio-compose（Web）
+//
 // 协议（notes.json）：
 //   {
 //     "title": "D 大调卡农（片段）",
@@ -17,6 +23,8 @@
 //     "sample_rate": 44100,             // 缺省 44100，夹紧 [8000, 48000]
 //     "timbre": "strings",             // v0.5.9：全曲音色（音符级 wave 可覆盖）
 //     "export_midi": true,              // v0.5.9：同时导出同名 .mid（SMF 0）
+//     "deliver": ["wav","mid","mp3"],   // v0.5.37：交付形态（缺省 wav+mid；
+//                                       //   mp3/m4a 须显式声明 —— ffmpeg 转码）
 //     "notes": [
 //       { "freq": 261.63,               // Hz（16..12000 夹紧）
 //         "start_beat": 0,              // 起拍（>= 0）
@@ -80,11 +88,119 @@ export interface RenderedArtifact {
   notesFile: string;
   wavFile: string;
   midiFile?: string; // v0.5.9：export_midi: true 时同写
+  mp3File?: string;  // v0.5.37：deliver 声明 mp3（ffmpeg 转码）
+  m4aFile?: string;  // v0.5.37：deliver 声明 m4a（ffmpeg 转码）
   bytes: number;
   durationSec: number;
   notes: number;
   title: string;
   timbre?: string;
+  /** v0.5.37：转码降级留痕（ffmpeg 缺席/失败 → 不静默，WAV 仍交付）。 */
+  transcodeNotes?: string[];
+}
+
+// ---- 转码交付（v0.5.37） -----------------------------------------------------
+
+/** 可转码的交付格式（WAV 为源；MIDI 不属转码面，走独立导出器）。 */
+export type DeliverFormat = "mp3" | "m4a";
+
+/** 编码器预设：容器 + ffmpeg 音频编码器 + 默认码率。 */
+export const TRANSCODE_PRESETS: Record<DeliverFormat, { ext: string; encoder: string; bitrate: string; mime: string; label: string }> = {
+  mp3: { ext: "mp3", encoder: "libmp3lame", bitrate: "192k", mime: "audio/mpeg", label: "MP3（通用分享）" },
+  m4a: { ext: "m4a", encoder: "aac", bitrate: "192k", mime: "audio/mp4", label: "M4A/AAC（iOS/Apple 生态）" },
+};
+
+/** 转码结果（成功带 outPath/bytes；失败带 error —— 不抛出）。 */
+export interface TranscodeOutcome {
+  ok: boolean;
+  error?: string;
+  outPath?: string;
+  bytes?: number;
+  format?: DeliverFormat;
+  /** ffmpeg 路径（诊断）；缺席时为 null。 */
+  ffmpegPath?: string | null;
+}
+
+/** which 扫描（PATH 活时读 + win32 exe 后缀）—— 与 deps.ts 同源的零依赖探测。 */
+function whichBinary(name: string): string | null {
+  const exe = process.platform === "win32" ? ".exe" : "";
+  for (const c of process.env.PATH?.split(path.delimiter) ?? []) {
+    if (!c) continue;
+    const p = path.join(c, name + exe);
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch {
+      /* 不可读目录跳过 */
+    }
+  }
+  return null;
+}
+
+/** 探测 ffmpeg（转码车道的存在性判据；无副作用）。 */
+export function probeFfmpeg(): { available: boolean; path: string | null; version: string | null } {
+  const bin = whichBinary("ffmpeg");
+  if (bin === null) return { available: false, path: null, version: null };
+  try {
+    const r = Bun.spawnSync([bin, "-version"], {
+      stdout: "pipe", stderr: "pipe", stdin: "ignore", timeout: 10_000,
+    } as Parameters<typeof Bun.spawnSync>[1]);
+    const first = (r.stdout?.toString() ?? "").split("\n")[0] ?? "";
+    const m = first.match(/ffmpeg version (\S+)/);
+    return { available: r.exitCode === 0, path: bin, version: m ? m[1] : null };
+  } catch {
+    return { available: false, path: bin, version: null };
+  }
+}
+
+/**
+ * WAV → mp3/m4a 转码（v0.5.37）。
+ * 车道：ffmpeg（which 定位 → 数组参数 spawn，零 shell 注入面）。
+ * 缺席/失败 → 返回 error 字符串（调用方决定降级策略；绝不抛出）。
+ * 输出落到与源同目录（<name>.<ext>）。
+ */
+export function transcodeAudio(
+  wavPath: string,
+  format: DeliverFormat,
+  opts?: { bitrate?: string; timeoutMs?: number; ffmpegPath?: string | null },
+): TranscodeOutcome {
+  const preset = TRANSCODE_PRESETS[format];
+  if (!preset) return { ok: false, error: `不支持的转码格式：${format}（可用 mp3/m4a）`, format };
+  if (!fs.existsSync(wavPath)) return { ok: false, error: `源文件不存在：${wavPath}`, format };
+  const bin = opts?.ffmpegPath === undefined ? whichBinary("ffmpeg") : opts.ffmpegPath;
+  if (!bin) {
+    return {
+      ok: false,
+      error: "ffmpeg 缺席（转码车道不可用）—— 安装：apk add ffmpeg / brew install ffmpeg；WAV 主产物不受影响",
+      ffmpegPath: null,
+      format,
+    };
+  }
+  const outPath = wavPath.slice(0, -".wav".length) + "." + preset.ext;
+  const argv = [
+    bin, "-y", "-hide_banner", "-loglevel", "error",
+    "-i", wavPath,
+    "-c:a", preset.encoder,
+    "-b:a", opts?.bitrate ?? preset.bitrate,
+    outPath,
+  ];
+  try {
+    const r = Bun.spawnSync(argv, {
+      stdout: "pipe", stderr: "pipe", stdin: "ignore",
+      timeout: opts?.timeoutMs ?? 90_000,
+    } as Parameters<typeof Bun.spawnSync>[1]);
+    if (r.exitCode !== 0) {
+      const err = (r.stderr?.toString() ?? "").trim().slice(0, 400);
+      return { ok: false, error: `ffmpeg 退出码 ${r.exitCode}：${err || "(无 stderr)"}`, ffmpegPath: bin, format };
+    }
+    if (!fs.existsSync(outPath)) {
+      return { ok: false, error: "ffmpeg 报成功但产物未落盘", ffmpegPath: bin, format };
+    }
+    const bytes = fs.statSync(outPath).size;
+    if (bytes <= 0) return { ok: false, error: "转码产物为空文件", ffmpegPath: bin, format };
+    return { ok: true, outPath, bytes, format, ffmpegPath: bin };
+  } catch (err) {
+    return { ok: false, error: `ffmpeg 调用异常：${(err as Error).message}`, ffmpegPath: bin, format };
+  }
 }
 
 // ---- 音色库（v0.5.9） --------------------------------------------------------
@@ -643,6 +759,7 @@ export function renderNotesToMidi(input: unknown): { ok: boolean; midi?: Buffer;
 /**
  * 渲染单份乐谱文件：<name>.notes.json → 同目录 <name>.wav
  * （协议声明 export_midi: true 时同时写 <name>.mid）。
+ * v0.5.37：协议 deliver 声明 mp3/m4a 时追加 ffmpeg 转码（降级不阻断 WAV）。
  * 读/解析/渲染三级容错：任何失败返回 error 字符串，绝不抛出。
  * MIDI 导出失败降级为备注（不阻断 WAV 主产物）。 */
 export function renderNotesFileSync(jsonPath: string): RenderedArtifact | { error: string } {
@@ -658,10 +775,12 @@ export function renderNotesFileSync(jsonPath: string): RenderedArtifact | { erro
   } catch (err) {
     return { error: `JSON 解析失败：${(err as Error).message}` };
   }
-  let wantsMidi = false;
-  if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-    wantsMidi = (parsed as Record<string, unknown>)["export_midi"] === true;
-  }
+  const obj = (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed))
+    ? parsed as Record<string, unknown>
+    : null;
+  const wantsMidi = obj?.["export_midi"] === true;
+  // v0.5.37：交付形态解析（缺省 = 历史行为 wav+mid；显式声明才转码）
+  const deliver = parseDeliver(obj?.["deliver"], wantsMidi);
   const outcome = renderNotesToWav(parsed);
   if (!outcome.ok || !outcome.wav) {
     return { error: outcome.error ?? "渲染失败" };
@@ -674,7 +793,7 @@ export function renderNotesFileSync(jsonPath: string): RenderedArtifact | { erro
   }
   // v0.5.9：MIDI 导出（opt-in；失败不炸 WAV）
   let midiFile: string | undefined;
-  if (wantsMidi) {
+  if (deliver.includes("mid")) {
     const midi = renderNotesToMidi(parsed);
     if (midi.ok && midi.midi) {
       midiFile = jsonPath.slice(0, -".notes.json".length) + ".mid";
@@ -685,21 +804,61 @@ export function renderNotesFileSync(jsonPath: string): RenderedArtifact | { erro
       }
     }
   }
+  // v0.5.37：转码交付（mp3/m4a；逐格式独立降级，失败留痕不阻断 WAV）
+  const transcodeNotes: string[] = [];
+  let mp3File: string | undefined;
+  let m4aFile: string | undefined;
+  for (const fmt of ["mp3", "m4a"] as DeliverFormat[]) {
+    if (!deliver.includes(fmt)) continue;
+    const t = transcodeAudio(wavFile, fmt);
+    if (t.ok && t.outPath) {
+      if (fmt === "mp3") mp3File = path.basename(t.outPath);
+      else m4aFile = path.basename(t.outPath);
+    } else {
+      transcodeNotes.push(`${fmt}: ${t.error ?? "转码失败"}`);
+    }
+  }
   let timbreName: string | undefined;
-  if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-    const t = (parsed as Record<string, unknown>)["timbre"];
+  if (obj) {
+    const t = obj["timbre"];
     if (typeof t === "string" && TIMBRES[t]) timbreName = t;
   }
   return {
     notesFile: path.basename(jsonPath),
     wavFile: path.basename(wavFile),
     ...(midiFile ? { midiFile: path.basename(midiFile) } : {}),
+    ...(mp3File ? { mp3File } : {}),
+    ...(m4aFile ? { m4aFile } : {}),
     bytes: outcome.wav.length,
     durationSec: outcome.durationSec ?? 0,
     notes: outcome.noteCount ?? 0,
     title: outcome.title ?? "untitled",
     ...(timbreName ? { timbre: timbreName } : {}),
+    ...(transcodeNotes.length ? { transcodeNotes } : {}),
   };
+}
+
+/** v0.5.37：deliver 字段解析（容错：非法形态 → 回落缺省；wav 恒在）。 */
+function parseDeliver(raw: unknown, exportMidi: boolean): Array<"wav" | "mid" | DeliverFormat> {
+  const VALID = new Set(["wav", "mid", "mp3", "m4a"]);
+  const out: Array<"wav" | "mid" | DeliverFormat> = ["wav"];
+  if (Array.isArray(raw)) {
+    for (const v of raw) {
+      const s = String(v).toLowerCase();
+      if (VALID.has(s) && !out.includes(s as "wav")) out.push(s as "wav");
+    }
+    return out;
+  }
+  if (typeof raw === "string" && raw.trim()) {
+    for (const part of raw.split(",")) {
+      const s = part.trim().toLowerCase();
+      if (VALID.has(s) && !out.includes(s as "wav")) out.push(s as "wav");
+    }
+    return out;
+  }
+  // 缺省：历史行为（wav + mid(export_midi 时)）
+  if (exportMidi) out.push("mid");
+  return out;
 }
 
 /**
@@ -731,7 +890,11 @@ export function scanAndRenderArtifacts(
           const notesStat = fs.statSync(p);
           if (fs.existsSync(wavPath)) {
             const wavStat = fs.statSync(wavPath);
-            if (wavStat.mtimeMs >= notesStat.mtimeMs) continue; // 已渲染且不旧
+            if (wavStat.mtimeMs >= notesStat.mtimeMs) {
+              // v0.5.37：WAV 虽新，但 deliver 声明的转码产物可能缺（首版渲染
+              // 时 ffmpeg 缺席、后装等情况）—— 缺则补齐，全在则跳过。
+              if (!declaredDeliverablesMissing(p, wavPath)) continue; // 已渲染且不旧
+            }
           }
         } catch {
           /* stat 失败 → 照常尝试渲染 */
@@ -760,4 +923,30 @@ export function wavInfo(buf: Buffer): { sampleRate: number; durationSec: number;
   const dataBytes = buf.readUInt32LE(40);
   if (channels <= 0 || sampleRate <= 0) return null;
   return { sampleRate, channels, durationSec: dataBytes / (sampleRate * channels * 2) };
+}
+
+/**
+ * v0.5.37：deliver 声明的交付产物是否都已在盘（缺任一 → 需重跑渲染）。
+ * 容错：解析失败按「不缺」处理（避免坏 JSON 引发无谓重渲染循环）。
+ */
+function declaredDeliverablesMissing(jsonPath: string, wavPath: string): boolean {
+  let obj: Record<string, unknown> | null = null;
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) obj = parsed as Record<string, unknown>;
+  } catch {
+    return false;
+  }
+  if (!obj) return false;
+  const deliver = parseDeliver(obj["deliver"], obj["export_midi"] === true);
+  const base = jsonPath.slice(0, -".notes.json".length);
+  for (const d of deliver) {
+    const ext = d === "mid" ? ".mid" : d === "mp3" ? ".mp3" : d === "m4a" ? ".m4a" : ".wav";
+    try {
+      if (!fs.existsSync(base + ext)) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
 }

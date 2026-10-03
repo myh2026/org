@@ -148,6 +148,13 @@ Rules:
   always recoverable, an inline route cannot generate content.
 - Do NOT create subtasks that require live network fetching; input material
   is already local.
+- The harness auto-renders score artifacts to PLAYABLE audio: a compose
+  expert that writes a score artifact yields WAV/MIDI (and mp3/m4a when the
+  goal says so) — rendering is built into the harness finishing step. For
+  music/audio missions, put the required deliverable formats IN the compose
+  subtask's goal (e.g. "deliver playable WAV + m4a") and do NOT add a
+  separate "render/convert score to audio" subtask; only add write/validate
+  subtasks for genuinely additional content or checks.
 - "input" routes the subtask's input material (v0.4.13): "mission" when the
   data to process is INLINE in the mission text itself (the user typed/pasted
   the actual content, e.g. feedback text to analyze); "workspace" when the

@@ -161,6 +161,16 @@ impl ExpertManifest {
     /// 兼容信号不是语义信号（parse 技能的公告解析器 vs 情感分析任务）。
     /// 比例制而非绝对值：中文 goal 的二元滑窗信号膨胀（演示 goal 命中 14）、
     /// 英文/短 goal 词元少（2-3 个词元命中 2 个就是强信号）—— 统一按比例。
+    ///
+    /// v0.5.37（真实车道定标）：长 goal（LLM 生成的 30+ 词元详述）下纯比例
+    /// 制失真 —— 实测「创作 D 大调卡农进行…产出可渲染的乐谱/MIDI 数据」
+    /// 36 词元 7 命中（0.194 < 0.3）被地板拒绝 → composer 存量专家（描述
+    /// 逐字覆盖「创作乐谱/渲染可播放音频」）不予复用，现场铸造的产物偏离
+    /// 音频协议（WAV/m4a 交付断流）。新增绝对命中数通道作为第二判据：
+    /// 命中 ≥ REUSE_AFFINITY_MIN_HITS（多个不同词元的实质重合）且比例 ≥
+    /// REUSE_AFFINITY_RELAX_RATIO（仍显著高于杂散噪声水平）同样算命中。
+    /// 强拒例保持：2/22 = 9% 的杂散重合（情感分析 vs 公告解析）双判据下
+    /// 全拒（命中数远低于下限）。
     fn affinity_hit(self, goal: String) -> bool {
         let words = goal_words(goal.clone());
         let total = words.len();
@@ -169,7 +179,10 @@ impl ExpertManifest {
         }
         let score = self.clone().affinity(goal);
         let ratio = score as f64 / total as f64;
-        ratio >= REUSE_AFFINITY_RATIO
+        if ratio >= REUSE_AFFINITY_RATIO {
+            return true;
+        }
+        score >= REUSE_AFFINITY_MIN_HITS && ratio >= REUSE_AFFINITY_RELAX_RATIO
     }
 
     /// manifest 序列化（JSON；写入注册表）。
@@ -553,3 +566,11 @@ fn parse_u32(text: String) -> u32 {
 ///   情感 validate goal vs validator      5/22 ≈ 23% → 生成 ✓
 ///   minted 描述由 goal 派生 → 重派命中率高 → 记忆化重派不受误伤
 export const REUSE_AFFINITY_RATIO: f64 = 0.3;
+
+/// v0.5.37：长 goal 第二判据 —— 绝对命中数下限（≥ 6 个词元命中即视为
+/// 实质重合，与比例共同成立才放行；见 affinity_hit 注释）。
+export const REUSE_AFFINITY_MIN_HITS: u32 = 6;
+
+/// v0.5.37：第二判据的比例下限（显著高于杂散噪声 9% 水平；实测正常长
+/// goal 命中比例 0.19 附近）。
+export const REUSE_AFFINITY_RELAX_RATIO: f64 = 0.15;

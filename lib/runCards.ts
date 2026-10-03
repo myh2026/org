@@ -186,7 +186,7 @@ export type RunFact =
   /** 待批准项：渲染层应给出可操作入口（Web 勾选 / CLI org approvals） */
   | { t: "approval"; id: string; capability: string; action: string; detail: string; tone: "warn"; text: string }
   /** v0.5.6：音频产物渲染完成（引擎桥收尾注入 —— 并非解释器事件） */
-  | { t: "audio"; files: Array<{ wavFile: string; bytes: number; durationSec: number; notes: number; title: string }>; failures: Array<{ file: string; error: string }> }
+  | { t: "audio"; files: Array<{ wavFile: string; midiFile?: string; mp3File?: string; m4aFile?: string; bytes: number; durationSec: number; notes: number; title: string }>; failures: Array<{ file: string; error: string }> }
   /** v0.5.10：scripted 车道域外任务语义地板判定（引擎桥预检注入）：
    *  reroute = 跨车道救援转直连（专家/评分可见）；degrade = 零消耗诚实降级。 */
   | { t: "rescue"; mode: "reroute" | "degrade"; expert?: string; score: number; stockScore: number; floor: number }
@@ -278,10 +278,14 @@ export function classifyRunEvent(ev:
         };
       }
       // v0.5.6：引擎桥收尾注入的音频渲染事实（notes.json → wav 开袋即食）
+      // v0.5.37：携带 midi/mp3/m4a 交付形态（回放渲染下载链接）
       if (ev.name === "audio_rendered") {
         const files = Array.isArray(ev.data?.["files"])
           ? (ev.data["files"] as Array<Record<string, unknown>>).map((f) => ({
               wavFile: String(f["wavFile"] ?? f["file"] ?? "?"),
+              ...(typeof f["midiFile"] === "string" ? { midiFile: f["midiFile"] } : {}),
+              ...(typeof f["mp3File"] === "string" ? { mp3File: f["mp3File"] } : {}),
+              ...(typeof f["m4aFile"] === "string" ? { m4aFile: f["m4aFile"] } : {}),
               bytes: Number(f["bytes"] ?? 0),
               durationSec: Number(f["durationSec"] ?? 0),
               notes: Number(f["notes"] ?? 0),

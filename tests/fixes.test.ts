@@ -25,6 +25,11 @@ import {
   TEST_RUN, FIXTURE, runDhv, runOrg, runOrgRun, runVariant, makeWorkspace, fixtureVariant, readJson, exists,
 } from "./helpers";
 
+/** 仓库根（fixtures 路径解析）。 */
+function ROOT(): string {
+  return path.resolve(import.meta.dir, "..");
+}
+
 describe("v0.4.12 修复：recurrence 序列化卫生", () => {
   test("写侧：note 含引号/反斜杠 → recurrence.json 仍是合法 JSON 且键完整", () => {
     const ws = makeWorkspace("fix-recurrence");
@@ -271,6 +276,96 @@ describe("v0.4.13 修复：B 复用语义地板（技能标签命中 ≠ 语义�
     expect(r.ok).toBe(true);
     const evs = fs.readFileSync(path.join(ws, "out-a/events.jsonl"), "utf-8");
     expect(evs).toContain("task#2 parse -> B:reuse");
+  }, TT);
+});
+
+// ============================================================================
+// v0.5.37 修复：B 复用地板长 goal 定标（真实车道实测驱动 · 测试项目 2 伴随修复）
+//   【实测根因】真实车道 decompose 生成的 30+ 词元长 goal（LLM 常态）在纯比例
+//   地板（0.3）下失真 ——「创作 D 大调卡农进行（Pachelbel 式 …）的古典小品，
+//   弦乐音色，确定标题、调性、速度与多声部走向，产出可渲染的乐谱/MIDI 数据」
+//   36 词元 7 命中（0.194 < 0.3）→ composer 存量专家（描述逐字覆盖「创作乐谱 /
+//   渲染可播放音频」）不予复用 → 现场铸造产物偏离音频协议（WAV/m4a 交付断流）。
+//   【修复】双判据：绝对命中 ≥ REUSE_AFFINITY_MIN_HITS（6）且比例 ≥
+//   REUSE_AFFINITY_RELAX_RATIO（0.15）同样放行；强拒例（2/22 = 9%）不变。
+// ============================================================================
+describe("v0.5.37 修复：B 复用长 goal 定标（真实车道 decompose 原文）", () => {
+  test("长 goal（7 命中 0.194）→ B:reuse composer + WAV/MIDI/M4A 交付链", () => {
+    const ws = makeWorkspace("fix-reuse-realgoal");
+    // 真实车道 decompose 输出原文（2026-10-03 任务：D 大调卡农小品）——
+    // 单子任务保真切片（路由判据只依赖 goal + skills）。
+    const base = JSON.parse(fs.readFileSync(path.join(ROOT(), "fixtures/run-music.json"), "utf-8")) as {
+      tracks: Record<string, string[]>;
+    };
+    base.tracks["decompose"] = [JSON.stringify([{
+      id: 1,
+      goal: "创作 D 大调卡农进行（Pachelbel 式 I–V–vi–iii–IV–I–IV–V）的古典小品，弦乐音色，确定标题、调性、速度与多声部走向，产出可渲染的乐谱/MIDI 数据",
+      role: "compose",
+      skills: ["compose"],
+      depends_on: [],
+      priority: 1,
+      input: "mission",
+    }])];
+    // compose 轨声明交付形态（v0.5.37 deliver 链：wav+mid+m4a）
+    const score = JSON.parse(base.tracks["compose"]![0]!) as Record<string, unknown>;
+    score.deliver = ["wav", "mid", "m4a"];
+    score.export_midi = true;
+    base.tracks["compose"] = [JSON.stringify(score)];
+    const fx = path.join(TEST_RUN, "fix-reuse-realgoal-fixture.json");
+    fs.writeFileSync(fx, JSON.stringify(base, null, 2));
+
+    const out = path.join(ws, "out-a");
+    const r = runOrg([
+      "run", "--task", "创作一首 D 大调卡农进行的古典小品（标题自定，弦乐音色），交付可播放音频",
+      "--workspace", ws, "--fixture", fx, "--out", out,
+    ]);
+    if (!r.ok) console.error(r.stdout + r.stderr);
+    expect(r.ok).toBe(true);
+    // 路由观测：修前 = C:generate（工厂铸造 → 音频断流）；修后 = B:reuse composer
+    const journal = fs.readFileSync(path.join(out, "journal.jsonl"), "utf-8");
+    expect(journal).toContain("task#1 compose -> B:reuse");
+    expect(journal).toContain("channel=reuse composer");
+    // 交付物：notes.json → WAV（引擎收尾）；deliver 链 → MIDI + M4A
+    expect(fs.existsSync(path.join(out, "music.notes.json"))).toBe(true);
+    expect(fs.existsSync(path.join(out, "music.wav"))).toBe(true);
+    expect(fs.existsSync(path.join(out, "music.mid"))).toBe(true);
+    // m4a 需 ffmpeg（iSH 已在场）；不在场时 engine 降级但 wav/mid 恒在
+    // （降级留痕断言由 audio-deliver.test.ts 承担 —— 此处只验证在场时的全链）
+    const ffOk = Bun.spawnSync(["which", "ffmpeg"], { stdout: "pipe" }).exitCode === 0;
+    if (ffOk) expect(fs.existsSync(path.join(out, "music.m4a"))).toBe(true);
+    // 事件留痕（audio_rendered 事实）
+    const evs = fs.readFileSync(path.join(out, "events.jsonl"), "utf-8");
+    expect(evs).toContain("audio_rendered");
+  }, TT);
+
+  test("边界探针：4 命中 0.129 的近似 goal → 仍拒绝复用（不因放宽而误伤）", () => {
+    // 取真实车道 task#3（notes.md 撰写）goal 原文 + compose 技能（能力面兼容，
+    // 语义面 4 命中 0.129 = 双判据下应全拒）—— 锚护 MIN_HITS=6 边界：
+    // 若阈值被后续调低到 ≤4，本用例即红。
+    const ws = makeWorkspace("fix-reuse-boundary");
+    const base = JSON.parse(fs.readFileSync(path.join(ROOT(), "fixtures/run-music.json"), "utf-8")) as {
+      tracks: Record<string, string[]>;
+    };
+    base.tracks["decompose"] = [JSON.stringify([{
+      id: 1,
+      goal: "撰写 notes.md 简短乐理说明，含卡农进行的逐段和声分析（和弦标记、功能、声部进行与终止式）",
+      role: "compose",
+      skills: ["compose"],
+      depends_on: [],
+      priority: 1,
+      input: "mission",
+    }])];
+    const fx = path.join(TEST_RUN, "fix-reuse-boundary-fixture.json");
+    fs.writeFileSync(fx, JSON.stringify(base, null, 2));
+    const out = path.join(ws, "out-a");
+    const r = runOrg([
+      "run", "--task", "撰写乐理说明",
+      "--workspace", ws, "--fixture", fx, "--out", out,
+    ]);
+    // 剧本无 mint 轨 → 工厂耗尽，run 仍 Ok（factory failed 兜底）；只测路由。
+    const journal = fs.readFileSync(path.join(out, "journal.jsonl"), "utf-8");
+    expect(journal).toContain("task#1 compose -> C:generate");
+    expect(journal).not.toContain("channel=reuse composer");
   }, TT);
 });
 

@@ -1097,6 +1097,84 @@ describe("Web v0.5.9：音频工坊端点（audio-demo / audio .mid / --host）"
     expect(bad.status).toBe(400);
   });
 
+  // ---- v0.5.37：成品曲目交付面（测试项目 2 —— 作曲端点 + 转码直通） ----
+
+  test("POST /api/audio-compose：确定性作曲 → 产物清单 + 可下载链接（wav/m4a）", async () => {
+    const r = await fetch(`${base}/api/audio-compose`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ root: "D3", prog: "canon", style: "arp", timbre: "strings", tempo: 88, title: "端点测试曲", deliver: ["mid", "m4a"] }),
+    });
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { ok: boolean; name: string; title: string; files: Array<{ file: string; url: string }>; notes: number; durationSec: number };
+    expect(j.ok).toBe(true);
+    expect(j.title).toBe("端点测试曲");
+    expect(j.notes).toBeGreaterThan(10);
+    expect(j.durationSec).toBeGreaterThan(5);
+    const names = j.files.map((f) => f.file);
+    expect(names.some((n) => n.endsWith(".wav"))).toBe(true);
+    expect(names.some((n) => n.endsWith(".mid"))).toBe(true);
+    // m4a 转码取决于 ffmpeg 是否在场（iSH 实测在场）；不在场 → 降级数组有值
+    // 产物落 audio-out/ + 直通链接可下载（wav 恒在）
+    const wav = j.files.find((f) => f.file.endsWith(".wav"))!;
+    expect(fs.existsSync(path.join(ws2, "audio-out", wav.file))).toBe(true);
+    const dl = await fetch(`${base}${wav.url}`);
+    expect(dl.status).toBe(200);
+    expect(dl.headers.get("content-type")).toBe("audio/wav");
+    expect(Buffer.from(await dl.arrayBuffer()).toString("ascii", 0, 4)).toBe("RIFF");
+  }, PERF(60_000));
+
+  test("POST /api/audio-compose：mp3/m4a 直通（MIME 正确）+ 非法进行 400 + 参数钳制", async () => {
+    const r = await fetch(`${base}/api/audio-compose`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prog: "pop", tempo: 999, timbre: "nope", deliver: ["mp3", "m4a"] }),
+    });
+    const j = (await r.json()) as { ok: boolean; tempo: number; timbre: string; files: Array<{ file: string; url: string }>; degrade: string[] };
+    expect(j.ok).toBe(true);
+    expect(j.tempo).toBe(72); // 999 越界 → 钳回缺省
+    expect(j.timbre).toBe("strings"); // 未注册音色 → 缺省
+    if (j.files.some((f) => f.file.endsWith(".mp3"))) {
+      const mp3 = j.files.find((f) => f.file.endsWith(".mp3"))!;
+      const dl = await fetch(`${base}${mp3.url}`);
+      expect(dl.headers.get("content-type")).toBe("audio/mpeg");
+    } else {
+      expect(j.degrade.length).toBeGreaterThan(0); // ffmpeg 缺席 → 降级留痕
+    }
+    // 未知进行 → 400
+    const bad = await fetch(`${base}/api/audio-compose`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prog: "not-a-progression" }),
+    });
+    expect(bad.status).toBe(400);
+  }, PERF(60_000));
+
+  test("get /api/audio：.mp3/.m4a MIME（audio/mpeg · audio/mp4）；越界仍拒", async () => {
+    const dir = path.join(ws2, "audio-out");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "t.mp3"), Buffer.from([0xff, 0xfb, 0x90, 0x00]));
+    fs.writeFileSync(path.join(dir, "t.m4a"), Buffer.from([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]));
+    const r1 = await fetch(`${base}/api/audio?dir=audio-out&file=t.mp3`);
+    expect(r1.status).toBe(200);
+    expect(r1.headers.get("content-type")).toBe("audio/mpeg");
+    const r2 = await fetch(`${base}/api/audio?dir=audio-out&file=t.m4a`);
+    expect(r2.status).toBe(200);
+    expect(r2.headers.get("content-type")).toBe("audio/mp4");
+    const bad = await fetch(`${base}/api/audio?dir=audio-out&file=../escape.mp3`);
+    expect(bad.status).toBe(400);
+  });
+
+  test("GUI 单页含成品曲目交付要素（mkBtn / 交付格式 / audio-compose 接线）", async () => {
+    const html = await (await fetch(`${base}/`)).text();
+    for (const needle of [
+      'id="mkBtn"', 'id="mkRoot"', 'id="mkTimbre"', 'id="mkTempo"', 'id="mkResult"',
+      'id="mkDlvMp3"', 'id="mkDlvM4a"', "/api/audio-compose", "生成成品曲目",
+    ]) {
+      expect(html).toContain(needle);
+    }
+  });
+
   test("GUI 单页含音频工坊要素（🎵 面板 / 音色网格 / 断连条 / Esc 关闭）", async () => {
     const html = await (await fetch(`${base}/`)).text();
     for (const needle of [

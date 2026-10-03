@@ -1,3 +1,39 @@
+## v0.5.37（2026-10-03）—— 测试项目 2：古典音乐交付链升级（转码交付 + 作曲操作面）
+
+- **交付链升级（lib/audio.ts）**：notes.json 协议新增 **`deliver`** 字段（`["wav","mid",
+  "mp3","m4a"]`）—— 缺省 = 历史行为零变化（wav + export_midi 时的 mid）；显式声明
+  mp3/m4a 即走 **ffmpeg 转码车道**（`transcodeAudio`：which 定位 → 数组参数 spawn 零
+  shell 注入面 → 90s 超时；缺席/失败诚实降级为 `transcodeNotes` 留痕，绝不炸 WAV）。
+  `scanAndRenderArtifacts` 幂等判据扩展：WAV 虽新但 deliver 声明的转码产物缺失 →
+  补齐（首版渲染时 ffmpeg 缺席、后装等场景不再漏交付）。
+- **`org audio compose`（CLI 操作面）**：确定性作曲 → 可播放音频（零模型调用，纯合成
+  —— CI 可复现）。`--chords D3:canon:arp --timbre strings --tempo 72 [--title X]
+  [--deliver wav,mid,mp3,m4a] [--out DIR] [--name N]`；8 音色 × 7 进行 × 柱式/琶音；
+  `org audio probe` 探测转码车道（ffmpeg 路径/版本 + 格式表）。
+- **Web 操作面**：音频工坊新增 **「生成成品曲目」面板**（根音/音色/速度/标题 +
+  交付格式勾选 + 生成按钮 → 内联播放器 + 逐格式下载）—— 新端点 `POST /api/audio-compose`
+  （与 CLI 同源 lib/audio.ts；参数钳制：未知进行 400 / 越界 tempo 钳回缺省 / 未注册
+  音色回落 strings；产物落 `<ws>/audio-out/`）；`GET /api/audio` 直通扩展 **.mp3
+  （audio/mpeg）/ .m4a（audio/mp4）**（越界/后缀白名单不变）。
+- **链路贯通**：`audio_rendered` 事件与运行卡/回放（runCards）携带 mp3File/m4aFile ——
+  运行结果卡与直连答复卡均渲染 MP3/M4A 下载链接（附 MIDI 同理）。
+- **composer 专家**：COMPOSE_PROMPT 教学 `deliver` 字段 + normalize_score 白名单透传
+  （真实车道按任务要求可声明 m4a 分享格式）。
+- **B-40 修复（真实车道伴随发现）**：B 复用地板长 goal 失真 —— 真实车道 decompose
+  的 36 词元详述 target（7 命中/0.194）被纯比例判据（0.3）拒绝 → composer 存量专家
+  不复用、现场铸造产物偏离音频协议（WAV/m4a 断流）。修复：`affinity_hit` 双判据
+  （原比例通道 + 绝对命中通道 `≥6 命中 且 ≥0.15`）；强拒例（9% 杂散）与近似例
+  （4 命中/0.129）双判据下全拒。decompose 提示词同步补规则：音频任务写进 compose
+  子任务（harness 收尾自动渲染），不另立 render 子任务。
+- **B-41 记录（HSL 上游队列 H5）**：工厂铸造轨迹实锤 `char::is_ascii_digit` 家族
+  缺失（`chars().filter(|c| c.is_ascii_digit())` 运行期崩溃、check 不拦）；入上游
+  队列先落 finding + 最小复现，跨仓修复独立成轮。
+- **回归**：新测试 `tests/audio-deliver.test.ts` **20 例**（转码车道含真 ffmpeg 实跑
+  mp3/m4a 魔数+时长对拍 / 降级矩阵四态 / deliver 解析五形态 / 扫描幂等两态 / CLI 冒烟
+  含错误面 exit 2）；`tests/web.test.ts` 扩 **5 例**（作曲端点产物+下载直通 / 钳制与 400 /
+  mp3-m4a MIME / GUI 要素）；`tests/fixes.test.ts` 扩 **2 例**（B-40 双例，含修前负控）；
+  原 audio 套件 29/29 复跑零回归；org check 48/48。
+
 ## v0.5.36（2026-10-03）—— 真实车道首演 F1/F2 修复：交付物对齐 + 计量归集
 
 - **F1 · 交付物对齐（B-38）**：写文件子任务被物料路由劫持 —— 分解器已正确声明

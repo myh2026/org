@@ -38,7 +38,9 @@ import { dhvRun, assertWorkspaceNotTemplate, assertSafeResetWorkspace,
 import { readCostTimeline, renderCostTimeline, latestScorecardDir, reconcileRealUsage } from "../lib/engine.ts"; // v0.5.36（F2）：用量归集
 import { stockAffinityOf, rescueExpertOf, writeOutOfDomainRun, SEMANTIC_FLOOR, shouldApplySemanticFloor } from "../lib/engine.ts"; // v0.5.10 语义地板（B-19）· v0.5.27 共享判据
 import { directAskGateOf, directDegradeAnswer, writeDirectDegradeRun, prependAskRescueEvent } from "../lib/engine.ts"; // v0.5.14 直连语义地板（B-22）
-import { scanAndRenderArtifacts } from "../lib/audio.ts"; // v0.5.6 音频产物通道（CLI 车道）
+import { scanAndRenderArtifacts, renderNotesToWav, renderNotesToMidi, progressionToNotes,
+  probeFfmpeg, transcodeAudio, TIMBRES, CHORD_QUALITIES, PROGRESSIONS, TRANSCODE_PRESETS,
+  type DeliverFormat } from "../lib/audio.ts"; // v0.5.6 音频产物通道（CLI 车道）· v0.5.37 转码交付 + org audio
 import { semanticSearch } from "../lib/search.ts"; // v0.5.8 语义检索（capabilities #19/#22）
 import { synthesizeSpeech, voiceStatus, VOICES } from "../lib/voice.ts"; // v0.5.12 语音入口（ASR/TTS）
 import { analyzeImages, visionStatus, VISION_MAX_IMAGES } from "../lib/vision.ts"; // v0.5.13 视觉入口（VLM）
@@ -2503,6 +2505,182 @@ async function cmdDbdiag(a: Args): Promise<number> {
   return 0;
 }
 
+// ---- org audio（v0.5.37 · 测试项目 2 古典音乐交付链） ------------------------
+
+/** deliver 字段解析（CLI 面；逗号/空格分隔；非法项忽略并回显合法集）。 */
+function parseDeliverArg(raw: string | undefined): { formats: Array<"wav" | "mid" | DeliverFormat>; rejected: string[] } {
+  const ALL = ["wav", "mid", "mp3", "m4a"] as const;
+  if (!raw || !raw.trim()) return { formats: ["wav", "mid"], rejected: [] };
+  const formats: Array<"wav" | "mid" | DeliverFormat> = [];
+  const rejected: string[] = [];
+  for (const part of raw.split(/[, ]+/)) {
+    const s = part.trim().toLowerCase();
+    if (!s) continue;
+    if ((ALL as readonly string[]).includes(s)) {
+      if (!formats.includes(s as "wav")) formats.push(s as "wav");
+    } else rejected.push(s);
+  }
+  if (!formats.includes("wav")) formats.unshift("wav"); // WAV 恒在（转码之源）
+  return { formats, rejected };
+}
+
+/** 把交付格式集落到 notes.json 的 deliver 字段（mid 由 export_midi 承载）。 */
+function deliverToProtocol(formats: Array<"wav" | "mid" | DeliverFormat>): { deliver: string[]; export_midi: boolean } {
+  const deliver = formats.filter((f) => f !== "mid");
+  return { deliver, export_midi: formats.includes("mid") };
+}
+
+/**
+ * org audio compose —— 确定性作曲 → 可播放音频（零模型调用，纯合成）。
+ * org audio probe   —— ffmpeg 转码车道探测 + 支持格式表。
+ * 用法：
+ *   org audio compose --chords D3:canon:arp --timbre strings --tempo 72
+ *       [--title X] [--style block|arp] [--beats N] [--deliver wav,mid,mp3,m4a]
+ *       [--out DIR] [--name 文件名]
+ *   org audio probe
+ */
+async function cmdAudio(a: Args): Promise<number> {
+  const sub = (a.rest[0] ?? rawPositionals(a)[0] ?? "help").toLowerCase();
+  if (sub === "probe") {
+    const ff = probeFfmpeg();
+    console.log("🎧 音频交付车道探测");
+    console.log(`  ffmpeg ${ff.available ? "✓" : "✗"} ${ff.path ?? "（缺席）"}${ff.version ? ` · ${ff.version}` : ""}`);
+    for (const [fmt, p] of Object.entries(TRANSCODE_PRESETS)) {
+      console.log(`  ${fmt} → ${p.label} · 编码器 ${p.encoder} · 默认码率 ${p.bitrate}`);
+    }
+    if (!ff.available) {
+      console.log("  ⚠ 转码车道缺席 —— WAV/MIDI 仍可交付；装 ffmpeg 后启用 mp3/m4a");
+      console.log("    安装：apk add ffmpeg（Alpine）/ brew install ffmpeg（macOS）");
+      return 1;
+    }
+    return 0;
+  }
+  if (sub !== "compose") {
+    console.error("用法：org audio <compose|probe> …");
+    console.error("  compose --chords <根:进行[:柱式|琶音]> [--timbre <乐器>] [--tempo N]");
+    console.error("          [--title X] [--deliver wav,mid,mp3,m4a] [--out DIR] [--name 基名]");
+    console.error(`  乐器（8）：${Object.keys(TIMBRES).join("/")}`);
+    console.error(`  进行（${Object.keys(PROGRESSIONS).length}）：${Object.keys(PROGRESSIONS).join("/")}`);
+    console.error("  probe —— ffmpeg 转码车道探测");
+    return 2;
+  }
+
+  const chords = restFlag(a, "chords") ?? "D3:canon:arp";
+  const title = restFlag(a, "title") ?? "";
+  const name = restFlag(a, "name") ?? "music";
+  const outRank = restFlag(a, "out");
+  const outDir = outRank !== undefined && outRank !== "" ? outRank : (a.out !== "" ? a.out : process.cwd());
+  const timbre = (restFlag(a, "timbre") ?? "strings").toLowerCase();
+  const tempoRaw = restFlag(a, "tempo");
+  const tempo = tempoRaw ? Number(tempoRaw) : 72;
+  const beatsRaw = restFlag(a, "beats");
+  const beatsPerChord = beatsRaw ? Number(beatsRaw) : 4;
+  const styleRaw = (restFlag(a, "style") ?? "").toLowerCase();
+  const deliverArg = restFlag(a, "deliver");
+
+  // 和弦串解析：根音:进行[:柱式|琶音]
+  const parts = chords.split(":");
+  const root = parts[0] || "D3";
+  const prog = parts[1] || "canon";
+  const styleFromChord = parts[2]?.toLowerCase();
+  const style: "block" | "arp" = styleFromChord === "block" || styleFromChord === "柱式"
+    ? "block"
+    : styleFromChord === "arp" || styleFromChord === "琶音"
+      ? "arp"
+      : styleRaw === "block" ? "block" : "arp";
+
+  if (!Number.isFinite(tempo) || tempo < 20 || tempo > 300) {
+    console.error(`✗ --tempo 非法：${tempoRaw}（须 20..300）`);
+    return 2;
+  }
+  if (timbre && !TIMBRES[timbre]) {
+    console.error(`✗ --timbre 未知：${timbre}（可用：${Object.keys(TIMBRES).join("/")}）`);
+    return 2;
+  }
+  if (!PROGRESSIONS[prog]) {
+    console.error(`✗ --chords 的进行未知：${prog}（可用：${Object.keys(PROGRESSIONS).join("/")}）`);
+    return 2;
+  }
+  const { formats, rejected } = parseDeliverArg(deliverArg);
+  if (rejected.length > 0) console.error(`⚠ 忽略未知交付格式：${rejected.join(", ")}（可用 wav/mid/mp3/m4a）`);
+
+  // 生成音符（确定性合成 —— 零模型调用，CI 可复现）
+  const gen = progressionToNotes(root, prog, { beatsPerChord: Number.isFinite(beatsPerChord) ? beatsPerChord : 4, style });
+  if (!gen.ok || gen.notes.length === 0) {
+    console.error(`✗ 作曲失败：根音/进行未产出有效音符（${root}:${prog}）`);
+    return 1;
+  }
+  const scoreTitle = title || `${root} 上的 ${PROGRESSIONS[prog]!.label}`;
+  const protocol = deliverToProtocol(formats);
+  const score = {
+    title: scoreTitle,
+    tempo,
+    timbre,
+    export_midi: protocol.export_midi,
+    deliver: protocol.deliver,
+    notes: gen.notes,
+  };
+  const outcome = renderNotesToWav(score);
+  if (!outcome.ok || !outcome.wav) {
+    console.error(`✗ 渲染失败：${outcome.error ?? "未知错误"}`);
+    return 1;
+  }
+  // 落盘（工作区监狱：out 目录必须在 workspace 内或 cwd；此处直接写用户给定目录）
+  if (!fs.existsSync(outDir)) {
+    try {
+      fs.mkdirSync(outDir, { recursive: true });
+    } catch (err) {
+      console.error(`✗ 目录创建失败：${(err as Error).message}`);
+      return 1;
+    }
+  }
+  const notesPath = path.join(outDir, `${name}.notes.json`);
+  try {
+    fs.writeFileSync(notesPath, JSON.stringify(score, null, 2));
+  } catch (err) {
+    console.error(`✗ 乐谱落盘失败：${(err as Error).message}`);
+    return 1;
+  }
+  const wavPath = path.join(outDir, `${name}.wav`);
+  try {
+    fs.writeFileSync(wavPath, outcome.wav);
+  } catch (err) {
+    console.error(`✗ WAV 落盘失败：${(err as Error).message}`);
+    return 1;
+  }
+
+  console.log(`🎼 ${scoreTitle}`);
+  console.log(`  进行 ${root}:${prog}（${PROGRESSIONS[prog]!.label}）· ${style === "arp" ? "琶音" : "柱式"} · ${TIMBRES[timbre]!.label} · ${tempo} BPM`);
+  console.log(`  和弦：${gen.chords.join(" → ")}`);
+  console.log(`  音符 ${gen.notes.length} · 时长 ${(outcome.durationSec ?? 0).toFixed(1)}s · 采样 ${score.notes.length > 0 ? (outcome.durationSec ? (outcome.wav.length / (outcome.durationSec * 1000)).toFixed(0) : "?") : "?"}Kbps 等效`);
+  console.log(`  ♪ ${path.basename(wavPath)}（${(outcome.wav.length / 1024).toFixed(0)} KB）`);
+
+  // MIDI（导出器直写；不走 renderNotesFileSync 以避免二次 WAV 渲染）
+  if (protocol.export_midi) {
+    const midi = renderNotesToMidi(score);
+    if (midi.ok && midi.midi) {
+      try {
+        fs.writeFileSync(path.join(outDir, `${name}.mid`), midi.midi);
+        console.log(`  ♬ ${name}.mid（${(midi.midi.length / 1024).toFixed(1)} KB）`);
+      } catch { /* 落盘失败降级（WAV 仍在） */ }
+    }
+  }
+  // 转码交付（mp3/m4a；逐格式独立降级）
+  let degradeCount = 0;
+  for (const fmt of ["mp3", "m4a"] as DeliverFormat[]) {
+    if (!formats.includes(fmt)) continue;
+    const t = transcodeAudio(wavPath, fmt);
+    if (t.ok && t.outPath) {
+      console.log(`  ♪ ${path.basename(t.outPath)}（${((t.bytes ?? 0) / 1024).toFixed(0)} KB · ${TRANSCODE_PRESETS[fmt].label}）`);
+    } else {
+      console.error(`  ⚠ ${fmt} 转码降级：${t.error ?? "失败"}`);
+      degradeCount++;
+    }
+  }
+  console.log(`\n交付目录：${outDir}`);
+  return degradeCount > 0 ? 1 : 0;
+}
+
 /** org mergestate [--repo DIR] —— merge/rebase 只读状态探测（#80）。 */
 function printMergeState(repo: string): number {
   const s = gitMergeState(repo);
@@ -4784,6 +4962,8 @@ export async function orgMain(): Promise<number> {
     case "deps": case "dep": return cmdDeps(a);
     case "retest": return cmdRetest(a);
     case "devtools": return cmdDevtools(a);
+    // v0.5.37 音频交付链（测试项目 2 古典音乐 —— 成品可播放音频）
+    case "audio": case "music": return cmdAudio(a);
     default:
       console.log(`ORG — Organization Harness v${VERSION}（基于 HSL · BNF v1.5.0）
 
@@ -4870,6 +5050,12 @@ export async function orgMain(): Promise<number> {
       "…@?审计制度…" 检索命中自动织入上下文）
   org speak "文本" [--voice v] [--speed s] [--out file.wav]
       文本合成语音（TTS · 7 声音 · 语速 0.5-2.0 · 超长分段拼接）落盘 WAV
+  org audio <compose|probe>
+      音频交付链（v0.5.37 · 测试项目 2 古典音乐）：确定性作曲 → 可播放
+      音频（零模型调用）。compose --chords D3:canon:arp --timbre strings
+      [--tempo N] [--title X] [--deliver wav,mid,mp3,m4a] [--out DIR]——
+      8 音色 × 7 进行 · mp3/m4a 经 ffmpeg 转码（缺席降级不炸 WAV）·
+      probe 探测转码车道
   org vision [图片...] [--prompt "问题"]
       VLM 图片理解（多图 ≤4 · png/jpeg/gif/webp/bmp · 魔数唤探；无参显示状态）
   org spawn [prune --failed | --all [--dry-run]]

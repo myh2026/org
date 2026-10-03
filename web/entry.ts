@@ -150,7 +150,8 @@ import {
 import { expandMentions } from "../lib/mentions.ts"; // @文件引用（v0.5.3）
 import { listMemories, addMemory, removeMemory, allMemories } from "../lib/memories.ts"; // 长期记忆（v0.5.3）
 import { semanticSearch } from "../lib/search.ts"; // 语义检索（v0.5.8 · capabilities #19/#22）
-import { scanAndRenderArtifacts } from "../lib/audio.ts"; // 音频收尾（v0.5.9：GUI 直连车道的三入口同钩子）
+import { scanAndRenderArtifacts, renderNotesToWav, renderNotesToMidi, progressionToNotes,
+  transcodeAudio, TIMBRES as TIMBRES_W, PROGRESSIONS as PROGRESSIONS_W } from "../lib/audio.ts"; // 音频收尾（v0.5.9：GUI 直连车道的三入口同钩子）· v0.5.37 转码交付 + 作曲端点
 import { dbSchema, dbQuery, dbTables } from "../lib/db.ts"; // v0.5.15 数据库操作层（#43/#73）
 import { indexSymbols, lookupDef, findRefs } from "../lib/symbols.ts"; // v0.5.15 符号索引（#20）
 import { scanWorkspace as scanSecrets, SECRET_PATTERNS } from "../lib/scan.ts"; // v0.5.15 密钥扫描（#141；别名避开 engine.ts 的 scanWorkspace）
@@ -239,7 +240,7 @@ export interface AskOutcome {
   turn: number | null;
   logs: string;
   /** v0.5.9：直连车道的音频产物（out-ask 的 audio_rendered 事实；无则缺省）。 */
-  audio?: Array<{ wavFile: string; midiFile?: string; timbre?: string; durationSec: number; notes: number; title: string }>;
+  audio?: Array<{ wavFile: string; midiFile?: string; mp3File?: string; m4aFile?: string; timbre?: string; durationSec: number; notes: number; title: string }>;
   /** v0.5.14：B-22 直连语义地板 —— 域外问题的跨车道救援元数据（换专家应答
    *  的事实回执；GUI 气泡渲染 ⇄ 徽标，回放面板由 lane_rescue 事件渲染卡）。 */
   rescue?: { from: string; to: string; score: number; selfScore: number };
@@ -554,6 +555,8 @@ function withAskAudio(outcome: AskOutcome, outDir: string): AskOutcome {
       outcome.audio = r.rendered.map((a) => ({
         wavFile: a.wavFile,
         ...(a.midiFile ? { midiFile: a.midiFile } : {}),
+        ...(a.mp3File ? { mp3File: a.mp3File } : {}),
+        ...(a.m4aFile ? { m4aFile: a.m4aFile } : {}),
         ...(a.timbre ? { timbre: a.timbre } : {}),
         durationSec: a.durationSec,
         notes: a.notes,
@@ -1190,20 +1193,94 @@ export function startWebServer(opts: { workspace: string; port: number; host?: s
           // v0.5.6：音频产物直通（开袋即食的 Web 面 —— <audio> 播放/下载）。
           // v0.5.9：允许 .mid（MIDI 下载）；dir 同 /api/run 的 run 目录名；
           // file 限 [A-Za-z0-9_.-]+ 且必为 .wav/.mid。
+          // v0.5.37：+.mp3/.m4a（成品曲目交付 —— 转码产物同源直通）。
           const name = url.searchParams.get("dir") ?? "";
           const file = url.searchParams.get("file") ?? "";
           if (!SAFE_NAME.test(name)) return json({ error: "run 目录名不合法" }, 400);
-          if (!/^[A-Za-z0-9_.-]+\.(wav|mid)$/.test(file) || file.includes("..")) {
+          if (!/^[A-Za-z0-9_.-]+\.(wav|mid|mp3|m4a)$/.test(file) || file.includes("..")) {
             return json({ error: "音频文件名不合法" }, 400);
           }
           const p = path.join(readWorkspaceOf(ws), name, file);
           if (!fs.existsSync(p)) return json({ error: `找不到音频产物：${name}/${file}` }, 404);
+          const mime = file.endsWith(".mid") ? "audio/midi"
+            : file.endsWith(".mp3") ? "audio/mpeg"
+            : file.endsWith(".m4a") ? "audio/mp4"
+            : "audio/wav";
           return new Response(Bun.file(p), {
             headers: {
-              "Content-Type": file.endsWith(".mid") ? "audio/midi" : "audio/wav",
+              "Content-Type": mime,
               "Cache-Control": "no-store",
               "Content-Disposition": 'inline; filename="' + file + '"',
             },
+          });
+        }
+        if (route === "POST /api/audio-compose") {
+          // v0.5.37：确定性作曲 → 可播放音频（测试项目 2 交付面）。
+          // 零模型调用（纯合成），与 CLI org audio compose 同源（lib/audio.ts）。
+          // 产物落 <ws>/audio-out/（固定目录，可预测）；返回清单 + 直通链接。
+          const body = (await req.json().catch(() => ({}))) as {
+            root?: string; prog?: string; style?: string; timbre?: string; tempo?: number;
+            title?: string; name?: string; deliver?: unknown;
+          };
+          const root = typeof body.root === "string" && /^[A-Ga-g][#b]?\d$/.test(body.root.trim()) ? body.root.trim() : "D3";
+          const prog = typeof body.prog === "string" && /^[a-z0-9-]{1,24}$/.test(body.prog) ? body.prog : "canon";
+          const style = body.style === "block" ? "block" : "arp";
+          const timbre = typeof body.timbre === "string" && TIMBRES_W[body.timbre] ? body.timbre : "strings";
+          const tempo = typeof body.tempo === "number" && Number.isFinite(body.tempo) && body.tempo >= 20 && body.tempo <= 300
+            ? Math.round(body.tempo) : 72;
+          const rawName = typeof body.name === "string" ? body.name.trim() : "";
+          const name = /^[A-Za-z0-9_-]{1,48}$/.test(rawName) ? rawName : `track-${Date.now().toString(36)}`;
+          if (!PROGRESSIONS_W[prog]) return json({ ok: false, error: `进行未知：${prog}（可用：${Object.keys(PROGRESSIONS_W).join("/")}）` }, 400);
+          // deliver 解析（缺省 wav+mid；mp3/m4a 显式声明）
+          const deliver = new Set<string>(["wav"]);
+          const rawDeliver = body.deliver;
+          const parts = Array.isArray(rawDeliver) ? rawDeliver.map(String) : typeof rawDeliver === "string" ? rawDeliver.split(/[, ]+/) : ["mid"];
+          for (const p0 of parts) {
+            const s = p0.trim().toLowerCase();
+            if (["wav", "mid", "mp3", "m4a"].includes(s)) deliver.add(s);
+          }
+          if (!deliver.has("wav") && (deliver.has("mp3") || deliver.has("m4a"))) deliver.add("wav"); // 转码之源
+          const gen = progressionToNotes(root, prog, { beatsPerChord: 4, style });
+          if (!gen.ok || gen.notes.length === 0) return json({ ok: false, error: "作曲失败（根音/进行未产出有效音符）" }, 400);
+          const outDir = path.join(readWorkspaceOf(ws), "audio-out");
+          try { fs.mkdirSync(outDir, { recursive: true }); } catch (e) {
+            return json({ ok: false, error: `目录创建失败：${(e as Error).message}` }, 500);
+          }
+          const score = {
+            title: typeof body.title === "string" && body.title.trim() ? body.title.trim().slice(0, 120) : `${root} 上的 ${PROGRESSIONS_W[prog]!.label}`,
+            tempo, timbre, export_midi: deliver.has("mid"),
+            deliver: [...deliver].filter((d) => d !== "mid"),
+            notes: gen.notes,
+          };
+          const outcome = renderNotesToWav(score);
+          if (!outcome.ok || !outcome.wav) return json({ ok: false, error: outcome.error ?? "渲染失败" }, 500);
+          const written: string[] = [];
+          try {
+            fs.writeFileSync(path.join(outDir, `${name}.notes.json`), JSON.stringify(score, null, 2));
+            written.push(`${name}.notes.json`);
+            fs.writeFileSync(path.join(outDir, `${name}.wav`), outcome.wav);
+            written.push(`${name}.wav`);
+          } catch (e) {
+            return json({ ok: false, error: `落盘失败：${(e as Error).message}` }, 500);
+          }
+          const degrade: string[] = [];
+          if (deliver.has("mid")) {
+            const midi = renderNotesToMidi(score);
+            if (midi.ok && midi.midi) {
+              try { fs.writeFileSync(path.join(outDir, `${name}.mid`), midi.midi); written.push(`${name}.mid`); } catch { /* 降级 */ }
+            }
+          }
+          for (const fmt of ["mp3", "m4a"] as const) {
+            if (!deliver.has(fmt)) continue;
+            const t = transcodeAudio(path.join(outDir, `${name}.wav`), fmt);
+            if (t.ok && t.outPath) written.push(path.basename(t.outPath));
+            else degrade.push(`${fmt}: ${t.error ?? "转码失败"}`);
+          }
+          return json({
+            ok: true, name, title: score.title, tempo, timbre, style, root, prog,
+            chords: gen.chords, notes: gen.notes.length, durationSec: outcome.durationSec ?? 0,
+            files: written.map((f) => ({ file: f, url: `/api/audio?dir=audio-out&file=${encodeURIComponent(f)}` })),
+            degrade,
           });
         }
         if (route === "GET /api/audio-demo") {
@@ -3931,6 +4008,36 @@ button.danger:hover, .apacts button.danger:hover {
 .audbody { padding: 0 20px 20px; }
 .audnote { padding: 12px 20px; font: 11.5px/1.8 var(--sans); color: var(--dim); }
 .audnote b { color: var(--muted); }
+/* v0.5.37：成品曲目交付面（测试项目 2）—— 确定性作曲 + 转码交付 */
+.audmk { padding: 12px 20px; border-top: 1px solid var(--border); }
+.audmk .hd { font: 600 12px var(--sans); color: var(--muted); margin-bottom: 9px; }
+.audmkrow { display: flex; flex-wrap: wrap; gap: 9px; align-items: center; margin-bottom: 9px; }
+.audmkrow label { font: 11.5px var(--sans); color: var(--dim); }
+.audmkrow select, .audmkrow input[type=number] { background: var(--hi); color: var(--text);
+  border: 1px solid var(--border2); border-radius: 8px; padding: 5px 8px;
+  font: 12px var(--sans); }
+.audmkrow input[type=number] { width: 62px; }
+.audmkrow .chk { display: inline-flex; gap: 4px; align-items: center;
+  font: 11.5px var(--mono); color: var(--dim); cursor: pointer;
+  border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px; }
+.audmkrow .chk input { accent-color: var(--accent); margin: 0; }
+.audmk .mkbtn { background: var(--accent-soft); color: var(--text);
+  border: 1px solid rgba(122, 176, 255, .4); border-radius: 9px;
+  padding: 6px 14px; font: 600 12px var(--sans); cursor: pointer;
+  transition: transform 140ms var(--ease-out), background 140ms var(--ease-out); }
+.audmk .mkbtn:hover { background: rgba(122, 176, 255, .2); }
+.audmk .mkbtn:active { transform: scale(.97); }
+.audmk .mkbtn[disabled] { opacity: .55; cursor: default; }
+.audres { margin-top: 4px; }
+.audres .rcard { border: 1px solid var(--border); border-radius: 11px;
+  padding: 10px 13px; background: rgba(255, 255, 255, .02); }
+.audres .rtitle { font: 600 12.5px var(--sans); color: var(--text); }
+.audres .rmeta { margin-top: 3px; font: 11px var(--mono); color: var(--dim); }
+.audres audio { width: 100%; margin-top: 7px; height: 34px; }
+.audres .rlinks { margin-top: 7px; display: flex; gap: 10px; flex-wrap: wrap; }
+.audres .rlinks a { color: var(--accent); font: 11.5px var(--mono); text-decoration: none; }
+.audres .rlinks a:hover { text-decoration: underline; }
+.audres .rerr { font: 11.5px var(--sans); color: var(--amberb); }
 
 /* ── 派生池 ────────────────────────────────────────────────── */
 .spwstats { flex: none; display: flex; flex-wrap: wrap; gap: 8px;
@@ -4234,7 +4341,35 @@ header { height: 44px; }                    /* 少用顶栏：更瘦 */
     </select>
     <button id="audStyle" type="button" title="柱式和弦与琶音滚动切换">琶音</button>
   </div>
-  <div class="audnote">作曲任务用法：团队/直连派单时在问题里写明音色与进行，如「用弦乐音色写一段卡农进行」或直连 composer/audio_compose 工具（timbre + chords 参数）。产物 = .wav（开袋即食）+ .mid（可导入 DAW/打谱软件）。</div>
+  <!-- v0.5.37：成品曲目交付面（测试项目 2）—— 确定性作曲 → wav/mid/mp3/m4a -->
+  <div class="audmk">
+    <div class="hd">🎼 生成成品曲目（零模型调用 · 确定性合成 · 可交付音频）</div>
+    <div class="audmkrow">
+      <label for="mkRoot">根音</label>
+      <select id="mkRoot" aria-label="根音">
+        <option value="C3">C3</option><option value="D3" selected>D3</option>
+        <option value="Eb3">E♭3</option><option value="F3">F3</option>
+        <option value="G3">G3</option><option value="A3">A3</option>
+        <option value="Bb3">B♭3</option><option value="C4">C4</option>
+      </select>
+      <label for="mkTimbre">音色</label>
+      <select id="mkTimbre" aria-label="音色"></select>
+      <label for="mkTempo">速度</label>
+      <input id="mkTempo" type="number" min="20" max="300" value="72" aria-label="速度 BPM" />
+      <label for="mkTitle">标题</label>
+      <input id="mkTitle" type="text" placeholder="（可选）" aria-label="曲目标题" style="min-width:120px" />
+    </div>
+    <div class="audmkrow">
+      <label>交付格式</label>
+      <label class="chk"><input type="checkbox" id="mkDlvWav" checked disabled title="WAV 恒交付（转码之源）" />wav</label>
+      <label class="chk"><input type="checkbox" id="mkDlvMid" checked />mid</label>
+      <label class="chk"><input type="checkbox" id="mkDlvMp3" checked />mp3</label>
+      <label class="chk"><input type="checkbox" id="mkDlvM4a" checked />m4a</label>
+      <button id="mkBtn" class="mkbtn" type="button">生成曲目 ▸</button>
+    </div>
+    <div class="audres" id="mkResult"></div>
+  </div>
+  <div class="audnote">作曲任务用法：团队/直连派单时在问题里写明音色与进行，如「用弦乐音色写一段卡农进行」或直连 composer/audio_compose 工具（timbre + chords 参数）。产物 = .wav（开袋即食）+ .mid（可导入 DAW/打谱软件）。<b>v0.5.37</b> 起交付面全开：上方面板可直接生成成品曲目并转码 mp3/m4a（ffmpeg 车道），产物落 <b>audio-out/</b>。</div>
 </div>
 <div id="spawnScrim" aria-hidden="true"></div>
 <div id="spawnPane" role="dialog" aria-modal="true" aria-labelledby="spwTitle">
@@ -5332,7 +5467,9 @@ function renderRun(m) {
     h += '<div class="revt nv-ok">♪ 音频产物 ' + esc(a.wavFile) +
          ' · ' + esc(a.title) + ' · ' + a.durationSec + 's · ' + a.notes + ' 音符' +
          (a.timbre ? ' · <b>' + esc(a.timbre) + '</b> 音色' : '') +
-         (a.midiFile ? ' · 附 MIDI' : '') + '</div>';
+         (a.midiFile ? ' · 附 MIDI' : '') +
+         (a.mp3File ? ' · 附 MP3' : '') +
+         (a.m4aFile ? ' · 附 M4A' : '') + '</div>';
   });
   m.audioFailures.forEach(function (f) {
     h += '<div class="revt nv-warn">♪ 渲染失败 ' + esc(f.file) + '：<span class="dim">' + esc(f.error) + '</span></div>';
@@ -5395,6 +5532,10 @@ function runDoneHtml(x) {
            '<a class="dim" download href="' + esc(src) + '">下载</a>' +
            (a.midiFile ? '<a class="dim" download href="/api/audio?dir=' + encodeURIComponent(dirName) +
              '&file=' + encodeURIComponent(a.midiFile) + '">MIDI</a>' : '') +
+           (a.mp3File ? '<a class="dim" download href="/api/audio?dir=' + encodeURIComponent(dirName) +
+             '&file=' + encodeURIComponent(a.mp3File) + '">MP3</a>' : '') +
+           (a.m4aFile ? '<a class="dim" download href="/api/audio?dir=' + encodeURIComponent(dirName) +
+             '&file=' + encodeURIComponent(a.m4aFile) + '">M4A</a>' : '') +
            '</div>';
     });
   }
@@ -6127,6 +6268,75 @@ document.getElementById("audioScrim").onclick = closeTimbre;
   };
   var progSel = document.getElementById("audProg");
   if (progSel) progSel.onchange = function () { stopTimbreDemo(); };
+})();
+
+// ---- 成品曲目交付面（v0.5.37：测试项目 2 —— 确定性作曲 + 转码交付） ----
+(function () {
+  var sel = document.getElementById("mkTimbre");
+  if (!sel) return;
+  // 音色下拉填充（与试听卡片同源元数据；strings 缺省）
+  TIMBRE_META.forEach(function (t) {
+    var o = document.createElement("option");
+    o.value = t.id;
+    o.textContent = t.icon + " " + t.label;
+    if (t.id === "strings") o.selected = true;
+    sel.appendChild(o);
+  });
+  var btn = document.getElementById("mkBtn");
+  var res = document.getElementById("mkResult");
+  btn.onclick = function () {
+    var root = (document.getElementById("mkRoot") || { value: "D3" }).value || "D3";
+    var prog = (document.getElementById("audProg") || { value: "canon" }).value || "canon";
+    var style = (document.getElementById("audStyle") || { classList: { contains: function () { return false; } } }).classList.contains("on") ? "arp" : "block";
+    var timbre = sel.value || "strings";
+    var tempoEl = document.getElementById("mkTempo");
+    var tempo = parseInt((tempoEl || { value: "72" }).value, 10);
+    if (isNaN(tempo)) tempo = 72;
+    var title = (document.getElementById("mkTitle") || { value: "" }).value || "";
+    var deliver = [];
+    if ((document.getElementById("mkDlvMid") || {}).checked) deliver.push("mid");
+    if ((document.getElementById("mkDlvMp3") || {}).checked) deliver.push("mp3");
+    if ((document.getElementById("mkDlvM4a") || {}).checked) deliver.push("m4a");
+    btn.disabled = true;
+    var old = btn.textContent;
+    btn.textContent = "生成中 …";
+    res.innerHTML = "";
+    fetch("/api/audio-compose", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ root: root, prog: prog, style: style, timbre: timbre, tempo: tempo, title: title, deliver: deliver }),
+    })
+      .then(function (r) { return r.json().then(function (j) { return { status: r.status, j: j }; }); })
+      .then(function (x) {
+        btn.disabled = false;
+        btn.textContent = old;
+        if (!x.j || !x.j.ok) {
+          res.innerHTML = '<div class="rerr">✗ 生成失败：' + esc(String((x.j && x.j.error) || x.status)) + "</div>";
+          return;
+        }
+        var j = x.j;
+        var wav = (j.files || []).filter(function (f) { return /\.wav$/.test(f.file); })[0];
+        var links = (j.files || []).map(function (f) {
+          var label = f.file.replace(/^[^.]*\./, ".").slice(1).toUpperCase();
+          return '<a download href="' + f.url + '">⬇ ' + label + "（" + esc(f.file) + "）</a>";
+        }).join("");
+        var player = wav ? '<audio controls preload="none" src="' + wav.url + '"></audio>' : "";
+        var degrade = (j.degrade && j.degrade.length)
+          ? '<div class="rerr">⚠ 降级：' + esc(j.degrade.join(" · ")) + "</div>" : "";
+        res.innerHTML = '<div class="rcard">' +
+          '<div class="rtitle">🎼 ' + esc(String(j.title)) + "</div>" +
+          '<div class="rmeta">' + esc(String(j.chords).replace(/,/g, " → ")) + " · " + j.notes + " 音符 · " + Number(j.durationSec).toFixed(1) + "s · " + esc(j.timbre) + " · " + j.tempo + " BPM</div>" +
+          player +
+          '<div class="rlinks">' + links + "</div>" + degrade +
+          '<div class="rmeta">产物目录：audio-out/（工作区可查）</div>' +
+          "</div>";
+      })
+      .catch(function (e) {
+        btn.disabled = false;
+        btn.textContent = old;
+        res.innerHTML = '<div class="rerr">✗ 生成失败：' + esc(String(e && e.message || e)) + "</div>";
+      });
+  };
 })();
 
 // ---- 派生池面板（v0.5.11：预算继承 + 池化重档的观测面） ----
@@ -8791,6 +9001,10 @@ function askAudioHtml(audio) {
       '<a class="dim" download href="' + esc(src) + '">下载</a>' +
       (a.midiFile ? '<a class="dim" download href="/api/audio?dir=' + encodeURIComponent(dirName) +
         '&file=' + encodeURIComponent(a.midiFile) + '">MIDI</a>' : '') +
+      (a.mp3File ? '<a class="dim" download href="/api/audio?dir=' + encodeURIComponent(dirName) +
+        '&file=' + encodeURIComponent(a.mp3File) + '">MP3</a>' : '') +
+      (a.m4aFile ? '<a class="dim" download href="/api/audio?dir=' + encodeURIComponent(dirName) +
+        '&file=' + encodeURIComponent(a.m4aFile) + '">M4A</a>' : '') +
       '</div>';
   }).join("");
 }
