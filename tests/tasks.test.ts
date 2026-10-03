@@ -19,7 +19,7 @@ import { TT } from "./tt.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "../lib/fssafe-fs.ts"; // fs 垫片（删除入口带降级链；详见 lib/fssafe.ts）
 import * as path from "node:path";
-import { TEST_RUN, makeWorkspace, makeOut } from "./helpers";
+import { TEST_RUN, makeWorkspace, makeOut, runOrg } from "./helpers";
 import {
   submitTask, listTasks, getTask, readTaskJournal, cancelTask, pauseTask,
   resumeTask, retryTask, runNextTask, TaskRunner,
@@ -363,5 +363,19 @@ describe("engine：RunHandle.pause/resume（spawn 车道 SIGSTOP/SIGCONT）", ()
     expect(await handle.resume()).toBe(true);
     const r = await donePromise;
     expect(r.ok).toBe(true);
+  }, TT);
+});
+
+// ---- v0.5.35：org task submit --priority CLI 面（此前幽灵访问恒 P5） -------------
+
+describe("任务队列：CLI 优先级面（v0.5.35）", () => {
+  test("submit --priority 0 → 入队 P0；越界钳制 0-10", () => {
+    const ws = makeWorkspace("task-cli-prio");
+    const r = runOrg(["task", "submit", "run", "--task", "测试任务 P0", "--workspace", ws, "--priority", "0"]);
+    expect(r.ok).toBe(true);
+    expect(r.stdout).toContain("P0");
+    const r2 = runOrg(["task", "submit", "run", "--task", "越界夹取", "--workspace", ws, "--priority", "99"]);
+    expect(r2.ok).toBe(true);
+    expect(r2.stdout).toContain("P10"); // 钳制上限
   }, TT);
 });

@@ -636,3 +636,14 @@
 - **修复**：ensureRouter 条件 +`userHeaders || registryHeaders`；转发两处合并
   `lane.extraHeaders`（用户覆盖注册表）；用户扩展头配置面同步落地（见 CHANGELOG v0.5.32）。
 - **教训**：「写进去 ≠ 有人读」—— 环境变量/配置注入点必须与消费方成对出现并测试锁定。
+
+## B-37（ORG 修复，v0.5.35）org task 无法设优先级：--priority 幽灵访问 + 0||5 假值陷阱
+
+- **现象**：CLI `org task submit` 传任何合法优先级都不生效（实际恒 P5）；`--priority`
+  甚至不是可识别旗标（落入 rest 静默丢弃）。
+- **根因**：cmdTask 引用 `a.priority` 但 Args 无此字段、解析循环无此分支（幽灵访问恒
+  undefined → submitTask 缺省 5）；首版修复又踩 `0 || 5 → 5` 假值陷阱（P0 被吞）。
+- **修复**：Args +priority 字段（缺省 5）+ `--priority` 解析（显式 NaN 判定 + 钳制 0-10）
+  + 空态提示补旗标；tasks.test 新增 CLI 优先级回归（P0 / P99→P10）。
+- **教训**：库能力 ≠ CLI 能力——「旗标接线」是独立盲区，需端到端冒烟锁定；
+  数值解析里 0 是经典假值地雷（`||` 默认值语法慎用于可为 0 的参数）。

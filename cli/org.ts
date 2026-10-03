@@ -199,6 +199,7 @@ interface Args {
   spawnDepth: number;     // v0.5.6：递归派生深度（agent_spawn 工具注入；内部旗标）
   spawnBudget: number;    // v0.5.11：递归派生预算（--spawn-budget N|off；NaN=未设不注入；内部旗标）
   k: number;              // v0.5.8：org search --k（top-N 命中数）
+  priority: number;       // v0.5.35：org task submit --priority 0-10（CLI 面补齐；此前幽灵访问恒 5）
   rest: string[];
 }
 
@@ -232,6 +233,7 @@ function parseArgs(argv: string[]): Args {
     spawnDepth: 0,
     spawnBudget: Number.NaN,
     k: 5,
+    priority: 5,
     rest: [],
   };
   let i = 1;
@@ -263,6 +265,11 @@ function parseArgs(argv: string[]): Args {
       }
     }
     else if (v === "--k") a.k = Math.max(1, Math.floor(Number(argv[++i] ?? "5") || 5));
+    else if (v === "--priority") {
+      // v0.5.35：0 是真值陷阱高危区（0||5 → 5）—— 显式 NaN 判定，钳制 0-10
+      const n = Math.floor(Number(argv[++i] ?? "5"));
+      a.priority = Number.isFinite(n) ? Math.max(0, Math.min(10, n)) : 5;
+    }
     else if (v === "--continue" || v === "-c") a.continue = true;
     else if (v === "--name") a.name = (argv[++i] ?? "").toLowerCase();
     else if (v === "--description" || v === "--desc") a.description = argv[++i] ?? "";
@@ -1679,7 +1686,7 @@ async function cmdTask(a: Args): Promise<number> {
     const tasks = listTasks(ws, status ? { status } : undefined);
     console.log(`任务队列 · ${ws}/runtime/tasks（执行器状态见 org taskd）\n`);
     if (tasks.length === 0) {
-      console.log("（空 —— org task submit --task \"...\" 入队）");
+      console.log("（空 —— org task submit --task \"...\" [--priority 0-10] 入队）");
       return 0;
     }
     for (const t of tasks) {

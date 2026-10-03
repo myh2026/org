@@ -5,7 +5,7 @@
 **基于 HSL 的组织化多智能体系统 · 子智能体可生成、可验收、可复用、可演进**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.5.34_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
+[![Status](https://img.shields.io/badge/status-v0.5.35_可运行-brightgreen.svg)](https://github.com/myh2026/org/releases)
 [![Tests](https://img.shields.io/badge/tests-1387_passing-brightgreen.svg)](#-测试与验证状态)
 [![Built on HSL](https://img.shields.io/badge/built_on-HSL_v0.2.72-blue.svg)](https://github.com/myh2026/harness-specification-language)
 [![BNF](https://img.shields.io/badge/BNF-v1.5.0-blue.svg)](https://github.com/myh2026/harness-specification-language/blob/main/toolchain/hsl-spec/BNF.md)
@@ -19,7 +19,7 @@
 
 > **一句话定位**：现有框架把子智能体当作一次性函数——任务结束即销毁，不留任何资产；ORG 把子智能体当作**工程资产**管理——结构用 HSL 语言描述、生成经编译期校验与 fixture 验收、任务结束沉淀回库，使系统能力随使用持续增强。
 
-> **v0.5.34 当前状态（最新）**：可运行实现。v0.5.27 → v0.5.34 八连批：**车道清欠**（语义地板共享判据「生效车道」· B-33 Web 车道过滤器修复 · deepseek 残留清理 · CLI help 补齐）→ **统一入口 P1/P2**（lane_decision 判定事件 + 运行卡判定徽标 + B-35 桥层事件落盘留痕）→ **provider 扩容与协议**（注册表 21→30 家 · 自定义请求头全链 + B-36）→ **vendored dhv-ts 0.2.71→0.2.72**（上游 v0.2.72.1「vec![expr; n] 重复形态」修复回流）→ **「每功能一页」收官**（🧾 diff + 📖 PDF 两个 Web 面板清欠 · 工具箱八端点）。UI v4 设计稿评审中（issue #65）。**v0.5.34（D2/D6 文档批）**：本段「单一当前状态」治理（6 处旧块转历史）+ Gauntlet 故障注入 **org 侧回归接线**（tests/gauntlet 两例）+ 矩阵口径修订。测试：各批新增用例随批入册；全量分块复跑列入回主前清单。
+> **v0.5.35 当前状态（最新）**：可运行实现。v0.5.27 → v0.5.35 八连批：**车道清欠**（语义地板共享判据「生效车道」· B-33 Web 车道过滤器修复 · deepseek 残留清理 · CLI help 补齐）→ **统一入口 P1/P2**（lane_decision 判定事件 + 运行卡判定徽标 + B-35 桥层事件落盘留痕）→ **provider 扩容与协议**（注册表 21→30 家 · 自定义请求头全链 + B-36）→ **vendored dhv-ts 0.2.71→0.2.72**（上游 v0.2.72.1「vec![expr; n] 重复形态」修复回流）→ **「每功能一页」收官**（🧾 diff + 📖 PDF 两个 Web 面板清欠 · 工具箱八端点）。UI v4 设计稿评审中（issue #65）。**v0.5.34（D2/D6 文档批）**：本段「单一当前状态」治理（6 处旧块转历史）+ Gauntlet 故障注入 **org 侧回归接线**（tests/gauntlet 两例）+ 矩阵口径修订。**v0.5.35**：长程任务机制实测（队列/暂停/取消/通知全链）+ CLI 优先级面修复（B-37）。测试：各批新增用例随批入册；全量分块复跑列入回主前清单。
 
 > **v0.5.24 历史状态**：可运行实现，机制级测试全绿（64 文件 · 1385/1385 本地分块实测）。本版为 **vendored 工具链同步 + 版本卫生批**：① vendored dhv-ts 0.2.70 → **0.2.71**（上游 issue #23 三层修复回流：N-6 空分组 check 期拦截（双端同码）+ native 桥 new Function 构造移入 try（可诊断性兜底）+ Ok/Err/Some/None 垫片注入（__enum 标记，HSL match 正确派发）—— org 工具环的 native 定式（IIFE `(() => {...})()`）经此批次实测互证：三段模式误伤 IIFE 已修为四段，org check 闸门全绿）；② 版本单一来源修复：lib/version.ts 停留 0.5.20（v0.5.21~23 三批漏改）→ 0.5.24 对齐 package.json；③ README 徽章三处漂移（status/tests/HSL 版本）+ 本状态段补记。上游对拍：vendored 新鲜度守卫 0.2.71 ≥ 上游 main 0.2.70 ✓；conformance 110/110（+N6 语料双端码集合一致）。
 

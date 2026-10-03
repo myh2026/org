@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## v0.5.35（2026-10-03）—— 长程任务机制实测 + CLI 优先级面修复（B-37）
+
+- **长程任务机制实测（生产路径全真实）**：3 任务队列（P0/P5/P9）全链实跑 —— 优先级排序 ✓ ·
+  运行中暂停（journal：`pause_requested → sigstop` SIGSTOP 子进程；~13s 真暂停窗口）→ 恢复
+  （`sigcont`）✓ · 运行中取消（SIGTERM）→ cancelled ✓ · **通知中心 3 条**（2× task_done +
+  1× task_cancelled）✓ · 产物/用量归因（model_calls 5/1 · 资产 3 · 38.6s/42.5s）。
+  报告：`/root/audit/longrun-report.md`（原日志 longrun-events.log + 任务 journal 三行留痕）。
+- **B-37 修复**：`org task submit --priority` CLI 面补齐 —— 此前为幽灵属性访问（Args 无字段，
+  恒 P5）；首修又中 `0 || 5` 假值陷阱（P0 吞成 P5）→ 显式 NaN 判定 + 钳制 0-10；
+  tasks.test 新增「CLI 优先级面」回归（P0 / P99→P10 双断言）。
+- 备注：真实模型车道测试项目（写诗/作曲/机器识别等实车道轮）需任一服务商 key；
+  本机暂无（已探明）——配好后即解锁（解锁说明见报告附节）。
+
 ## v0.5.34（2026-10-03）—— 文档批收尾（D6/D2）：README 单一状态块 + Gauntlet org 侧回归接线
 
 - **D6 · README 单一「当前状态」**：六个历史遗留的「当前状态」块（v0.5.18/.20/.24/.25/.25.3/.26）
