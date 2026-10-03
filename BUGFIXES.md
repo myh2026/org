@@ -661,6 +661,10 @@
   execute 签名贯通 accepted 快照（6 个 prepare 调用点 + 3 个 execute 调用站）。
 - **教训**：「依赖声明 ≠ 数据到达」—— 拓扑依赖必须伴随载荷编接；最毒的是它“看起来能跑”
   且通过一切机械闸门（覆盖率 1.00、格式齐全），只有语义对齐面能抓住。
+- **回归锁（R13 补强）**：`tests/depends-transfer.test.ts` —— scripted 正/反向双例
+  （正向：parse 真实交付物 → write 载荷=记录 JSON；反向：「(」占位 → 回落 raw 语义不变），
+  观测点 `factory/current-spec.json`；**修前负控已做**：回退 `dea78b7` 版 `hsl/org.hsl`
+  后正向例必红（payload=raw/notices 全文，负控日志 /root/audit/b38-negative-control.log）。
 
 ## B-39（ORG 修复，v0.5.36）真实车道用量不入账：llm_stream_done 真源 → metrics 恒 0
 
