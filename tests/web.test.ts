@@ -94,6 +94,8 @@ describe("Web GUI 原型：服务端到端（startWebServer · port 0 随机）"
     expect(html).toContain('id="modelSeg"');        // 模型切换分段控制
     expect(html).toContain('"/api/abort"');         // 停止生成端点
     expect(html).toContain('id="jumpBtn"');         // 回到最新悬浮按钮
+    expect(html).toContain("laneChipHtml");         // v0.5.31：入口判定徽标渲染（P2 消费）
+    expect(html).toContain("laneDecision");         // 判定事实消费管道
     expect(html).toContain("renderMd");              // Markdown 渲染器注入（issue #13）
     expect(html).toContain('id="sessSearch"');       // 会话搜索框
     expect(html).toContain('id="menuBtn"');          // 移动端抽屉菜单钮
@@ -864,7 +866,7 @@ describe("Web 团队模式：派单 SSE + 运行产物 + 评分卡", () => {
     const facts = text.split("\n")
       .filter((l) => l.startsWith("data: ") && l.includes("\"fact\""))
       .map((l) => (JSON.parse(l.slice(6)) as { fact: { t: string } }).fact.t);
-    for (const want of ["mission", "route", "dispatch", "review", "asset", "runEnd"]) {
+    for (const want of ["mission", "laneDecision", "route", "dispatch", "review", "asset", "runEnd"]) {
       expect(facts).toContain(want);
     }
     // 非法事实不得出现（分类器的兜底必须留名，而不是 undefined）

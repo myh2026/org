@@ -1572,6 +1572,10 @@ export function startRun(opts: RunOptions): RunHandle {
   const outDir = makeOutDir(opts.workspace, opts.outDir);
   const runId = `${path.basename(outDir)}-${Math.random().toString(36).slice(2, 6)}`;
   const q = new EventQueue();
+  // v0.5.31（B-35）：桥层车道事件落盘留痕 —— 宿主收尾 writeFileSync 整写
+  // events.jsonl（truncate），桥层无法前置追加；在 finish 收尾统一补写（去重）。
+  const laneFileEvents: Array<{ seq: number; ts: string; name: string; data: unknown }> = [];
+  const pushLane = (ev: EngineEvent): void => { laneFileEvents.push(ev); q.push(ev); };
   const off: PumpOffsets = { events: 0, journal: 0, llmStream: 0, seen: new Set() };
   let proc: SpawnProc | null = null;
   let canceled = false;
@@ -1604,6 +1608,18 @@ export function startRun(opts: RunOptions): RunHandle {
         });
       }
     } catch { /* 音频渲染是增强通道：失败不影响 run 语义 */ }
+    // v0.5.31（B-35）：补写桥层车道事件（宿主收尾 truncate 写盘 → 前置追加会被覆盖；
+    // 去重防御与降级手写路径的重复）
+    if (laneFileEvents.length > 0) {
+      try {
+        const evFile = path.join(outDir, "events.jsonl");
+        const existing = fs.existsSync(evFile) ? fs.readFileSync(evFile, "utf-8") : "";
+        for (const ev of laneFileEvents) {
+          const line = JSON.stringify(ev);
+          if (!existing.includes(line)) fs.appendFileSync(evFile, line + "\n");
+        }
+      } catch { /* 留痕是增强通道：失败不影响 run 语义 */ }
+    }
     const runJson = readRunJson(outDir);
     const metrics = readMetrics(outDir);
     const turns = opts.entry === "direct"
@@ -1653,16 +1669,16 @@ export function startRun(opts: RunOptions): RunHandle {
             opts.expert = pick.expert;
             opts.session = opts.session ?? "default";
             rescued = true;
-            q.push(laneDecisionEvent({
+            pushLane(laneDecisionEvent({
               mode: "expert", because: "域外任务：注册表命中域内专家，跨车道救援转直连",
               expert: pick.expert, stockScore, rescueScore: pick.score, laneKind: preparedLane.kind,
             }));
-            q.push(laneRescueEvent({
+            pushLane(laneRescueEvent({
               mode: "reroute", expert: pick.expert, score: pick.score, stockScore,
             }));
           } else {
             writeOutOfDomainRun(outDir, opts.task, stockScore);
-            q.push(laneDecisionEvent({
+            pushLane(laneDecisionEvent({
               mode: "degrade", because: "域外任务且无救援专家：零消耗诚实降级（流水线未启动）",
               stockScore, laneKind: preparedLane.kind,
             }));
@@ -1674,13 +1690,13 @@ export function startRun(opts: RunOptions): RunHandle {
             return;
           }
         } else {
-          q.push(laneDecisionEvent({
+          pushLane(laneDecisionEvent({
             mode: "team", because: "域内任务（与团队剧本重合 ≥ 地板）：原团队流水线",
             stockScore, laneKind: preparedLane.kind,
           }));
         }
       } else if (opts.entry === "org") {
-        q.push(laneDecisionEvent({
+        pushLane(laneDecisionEvent({
           mode: "team",
           because: opts.fixture ? "显式剧本直入（用户意图优先）" : "真实车道直入（域感知是模型的活）",
           laneKind: preparedLane.kind, fixtureExplicit: Boolean(opts.fixture),

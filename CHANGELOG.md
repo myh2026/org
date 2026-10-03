@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## v0.5.31（2026-10-03）—— 统一入口 P2 切片：lane_decision 卡片徽标（判定面开始被消费）
+
+把 v0.5.29 的判定器观测面带进 UI —— 运行卡头新增「本输入被如何判定」徽标：
+
+- **卡片徽标**：`renderRun` 卡头新增 🧭 chip —— `团队直入`（域内/显式剧本/真实车道）·
+  `跨车道救援`（青蓝）· `零消耗降级`（琥珀）；**悬停显示 because 人读理由**（即判定器的
+  `because` 字段）。live 流式与 `/api/run` 回放共用同一条 applyFact 管道，两处同时生效。
+- **测试**：web.test 双挂 —— ①页内管道断言（laneChipHtml/laneDecision）②**真实监督回路
+  SSE e2e 事实清单**扩 `laneDecision`（服务端分类 → card 帧实际送达）。
+- **附修（B-35）**：桥层车道事件落盘留痕 —— 宿主收尾 `writeFileSync` 整写 events.jsonl（truncate），
+  桥层 lane_decision/lane_rescue 此前只进 SSE 流、不进文件（回放面丢徽章/丢救援卡）；现于
+  finish 收尾统一补写（按行去重，杜绝与降级手写路径重复）。rescue R9/R10 增「文件可见」断言。
+- 附：该批为「样式越做越细」起点 —— 徽标样式随卡头语言（发丝边框/11px/悬停可解释）。
+
 ## v0.5.30（2026-10-03）—— provider 第二批（切片 1）：注册表 +9 家（国内第二批 + 海外三家）
 
 「支持所有主流 API key 模式」扩容 —— 注册表 21 → **30 家**（全部 OpenAI 兼容 Bearer，零协议层改动）：

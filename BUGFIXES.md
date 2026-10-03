@@ -614,3 +614,14 @@
   全新增语义、unified + stats 渲染），与 CLI `org diff` / 工具环同源；tools2 工具箱 e2e 扩用例锁定。
 - **教训**：「三端消费」类声明必须由测试或机械守卫背书 —— 口述性的第三端最容易在迭代中虚化；
   本轮连带消化审计 D3/D5 矩阵改文与 D4/D6 README 修订（见 CHANGELOG v0.5.28）。
+
+## B-35（ORG 修复，v0.5.31）桥层车道事件不落盘：lane_decision/lane_rescue 只进 SSE 不进 events.jsonl（回放面丢失）
+
+- **现象**：v0.5.31 视觉验证时发现 —— 跑完的任务在 events.jsonl 里搜不到 lane_decision（SSE 流里明明有）。
+- **根因**：宿主（dhv-ts host）收尾 `flushArtifacts()` 用 `writeFileSync` **整写** events.jsonl（truncate
+  语义）；桥层事件（引擎 q 队列）经 SSE 送达前端，但落盘面此前只有 audio_rendered 一条走
+  `appendEvent`（解释器退出后追加）—— lanes 家族没有补写，回放（/api/run、org replay）丢判定/救援卡。
+  **历史影响**：lane_rescue（v0.5.10 起）在回放面同样缺失（读流可见、读盘不可见）。
+- **修复**：finish 收尾统一补写 `laneFileEvents`（pushLane 收集；按 JSON 行去重防御降级手写路径重复）；
+  reroute/team/real 分支全覆盖；degrade 分支仅补 laneDecision（rescue 已由 writeOutOfDomainRun 手写）。
+- **教训**：「流可见 ≠ 盘可见」—— 双通道（SSE + 产物文件）事件必须各有一条写路径，缺一条只在回放面暴露。

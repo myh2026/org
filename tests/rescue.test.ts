@@ -183,6 +183,10 @@ describe("v0.5.10 跨车道救援（e2e）", () => {
     // 音频收尾钩子在直连车道同样生效（B-18 契约）
     expect(res.audioRendered.length).toBeGreaterThanOrEqual(1);
     expect(res.audioRendered[0]!.wavFile).toBe("music.wav");
+    // v0.5.31（B-35）：reroute 路径双留痕（lane_decision + lane_rescue 均落盘）
+    const evFile4 = fs.readFileSync(path.join(res.outDir, "events.jsonl"), "utf-8");
+    expect(evFile4).toContain("lane_decision");
+    expect(evFile4).toContain("lane_rescue");
   }, TT);
 
   test("R5 CLI degrade：完全域外 → 零消耗 + 产物诚实（不套用域外剧本）", () => {
@@ -270,6 +274,9 @@ describe("v0.5.29 判定器观测：lane_decision 三态（startRun 事件流）
     const decFact = classifyRunEvent(decEv as never);
     expect(decFact).toMatchObject({ t: "laneDecision", mode: "team", laneKind: "scripted" });
     expect((decFact as { stockScore: number }).stockScore).toBeGreaterThanOrEqual(0);
+    // v0.5.31（B-35）：落盘留痕 —— 回放面（/api/run 读 events.jsonl）同样可见
+    const evFile = fs.readFileSync(path.join(res.outDir, "events.jsonl"), "utf-8");
+    expect(evFile).toContain("lane_decision");
   }, TT);
 
   test("R10 域外无救援 → lane_decision=degrade（零消耗 + 事件齐）", async () => {
@@ -287,5 +294,8 @@ describe("v0.5.29 判定器观测：lane_decision 三态（startRun 事件流）
     const decFact = classifyRunEvent(decEv as never);
     expect(decFact).toMatchObject({ t: "laneDecision", mode: "degrade" });
     expect((decFact as { because: string }).because).toContain("零消耗");
+    // v0.5.31（B-35）：降级手写路径 + 收尾补写 → 文件同样可见
+    const evFile = fs.readFileSync(path.join(res.outDir, "events.jsonl"), "utf-8");
+    expect(evFile).toContain("lane_decision");
   }, TT);
 });

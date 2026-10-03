@@ -4045,6 +4045,11 @@ button.danger:hover, .apacts button.danger:hover {
 .revt.nv-err { border-left-color: var(--redb); }
 .revt.nv-info { border-left-color: var(--accent); }
 .revt.nv-approval { border-left-color: #b7a6ff; }
+/* v0.5.31：入口判定徽标（lane_decision 消费面 —— 团队直入/跨车道救援/零消耗降级） */
+.rdec { display: inline-block; margin-left: 6px; padding: 1px 7px; border: 1px solid rgba(255,255,255,.14);
+        border-radius: 7px; font-size: 11px; color: var(--dim); cursor: help; vertical-align: 1px; }
+.rdec.expert { color: #7dd3fc; border-color: rgba(125,211,252,.35); }
+.rdec.degrade { color: var(--amberb); border-color: rgba(217,119,6,.35); }
 .raud { margin-top: 8px; }
 .raud a { color: var(--accent); font: 12px var(--sans); margin-right: 10px; }
 .raud audio { width: 100%; margin-top: 6px; height: 34px; }
@@ -5099,6 +5104,7 @@ function newRunModel(task, model) {
     approvals: [], noise: 0,
     drift: 0, mined: 0, ctx: null, factoryNodes: [],
     rescues: [],
+    lane: null,
     audio: [], audioFailures: [],
     runOk: null, elapsed: 0
   };
@@ -5126,6 +5132,8 @@ function applyFact(m, fact) {
       }
       break;
     case "rescue": m.rescues.push(fact); break;
+    // v0.5.31：入口判定徽标（P2 消费 lane_decision —— 团队直入/跨车道救援/零消耗降级）
+    case "laneDecision": m.lane = fact; break;
     case "route": {
       var s1 = subOf(m, fact.id);
       s1.role = fact.role; s1.route = fact.route; s1.channel = fact.channel;
@@ -5207,11 +5215,19 @@ function subRowHtml(s) {
   return h + '</div>';
 }
 
+var LANE_CN = { team: "团队直入", expert: "跨车道救援", degrade: "零消耗降级" };
+function laneChipHtml(lane) {
+  if (!lane) return "";
+  var label = LANE_CN[lane.mode] || lane.mode;
+  return '<span class="rdec ' + esc(lane.mode) + '" title="' + esc(lane.because || "") + '">🧭 ' + esc(label) + '</span>';
+}
+
 function renderRun(m) {
   if (!m) return "";
   var h = '<div class="rcard" id="runCard' + m.id + '">';
   h += '<div class="rchead"><span class="rt">团队派单</span><span>· ' + esc(m.model) +
-       '</span><span style="margin-left:auto" id="runStatus' + m.id + '">运行中…</span></div>';
+       '</span>' + laneChipHtml(m.lane) +
+       '<span style="margin-left:auto" id="runStatus' + m.id + '">运行中…</span></div>';
   h += '<div class="rcbody">';
   if (m.mission) h += '<div class="rc-mission">' + esc(m.mission) + '</div>';
   // v0.5.10：车道救援判定行（语义地板 —— 先于任务树，用户第一眼看到车道决策）
