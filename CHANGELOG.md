@@ -85,6 +85,17 @@
 - 验证：物料路由回归子集 3/3（notices 语义零变化）；重跑 proj3c 两修均在场。链路仍被
   「生成语法健壮性（backtick/block 类残留）+ 考试 ≥0.95 标准张力」拦下 → 续攻（#71）。
 
+## v0.5.41（2026-10-04）—— 工厂链收官：围栏防御净化 + 输出纪律 —— 测试项目 3 全链跑通 🏁
+
+- **strip_code_fences（hsl/factory/pipeline.hsl）**：mint 生成物（源码与 fixture）自动剥离
+  Markdown 代码围栏（````hsl … ````）——真实模型实测会把输出包进围栏（首字符反引号 →
+  词法即崩，测试项目 3 复跑实锤）；防御性净化，围栏内非法字符仍由 dhv check 拦截。
+- **MINT_SOURCE_PROMPT 输出纪律**：明确「纯 HSL 源码、无围栏/反引号/模板串、字符串双引号」。
+- **收官验证（proj3d 重跑 · 15.7min · 46 calls）**：accepted 3/3 · **资产 2 项**
+  （`softmax-digit-classifier` + `experiment-report-writer` **双双注册上岗**）·
+  实验报告 coverage **1.00** · 产物齐备（scripts×4 / results 十件 / 中文实验报告含
+  混淆矩阵表）——#71 四层根因（契约/白名单/载荷/语义）+ 本批净化 = **全链闭合**。
+
 # CHANGELOG
 
 ## v0.5.35（2026-10-03）—— 长程任务机制实测 + CLI 优先级面修复（B-37）

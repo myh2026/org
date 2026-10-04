@@ -45,6 +45,8 @@ HSL is a Rust-like language. SYNTAX RULES (violations fail the dhv check gate):
 - Types are String/Vec<T>/HashMap<K,V>/Option<T>/Result<T,E>/u32/i64/f64/bool.
 - NOT available anywhere: `use`, serde_json, reqwest, std::fs, $host.http — none exist.
 - Reserved words (never use as identifiers): block / fn / let / mut / match / for / in / if / else / return.
+- Output pure HSL source ONLY: no Markdown code fences (\`\`\`), no backticks (\`), no
+  template literals; string literals use double quotes exclusively.
 - Inside native typescript blocks ONLY these exist:
   $host.fs.read/write/edit/list, $host.json.parse/stringify/fields,
   $host.artifacts.write, $host.events.emit, $host.config, $host.log,

@@ -155,7 +155,7 @@ export graph Factory(goal: String, skills: Vec<String>, payload_preview: String)
                     );
                 }
                 let raw = ask(String::from("mint_hsl"), MINT_SOURCE_PROMPT.clone(), brief).await?;
-                source = raw.trim();
+                source = strip_code_fences(raw);
                 mint_attempts = mint_attempts + 1;
                 stage = MintStage::StructuralCheck;
             },
@@ -454,6 +454,19 @@ fn resolve_dispatch_paths(expert: String) -> DispatchPaths {
     }
 }
 
+/// 模型输出 Markdown 围栏剥离（v0.5.41）：mint 生成物包进 ``` 围栏时去壳 ——
+/// 真实模型实测会把源码包进 Markdown 代码围栏（首字符反引号 → 词法即崩，
+/// 测试项目 3 复跑实锤）。本层为防御性净化；围栏内仍含非法字符时由 dhv check
+/// 闸门按预期拦截（有界再生成）。
+fn strip_code_fences(raw: String) -> String {
+    let out: String = native typescript {
+        const t = String(raw).trim();
+        const m = t.match(/^```[a-zA-Z0-9_-]*\n([\s\S]*?)\n?```\s*$/);
+        return m ? String(m[1]).trim() : t;
+    };
+    out
+}
+
 /// 验收样本落盘 + 嵌套执行专家（真实闸门：子进程解释器）。
 /// 寻址：注册表登记优先（导入专家 → registry/harnesses/），未登记回退约定
 /// （mint Exam 时新专家尚未注册 —— 此时约定车道正是刚写入的文件）。
@@ -678,7 +691,8 @@ async fn sample_spec(spec: ExpertSpec, payload_preview: String) -> Result<TaskSp
             brief, clipped
         );
     }
-    let raw = ask(String::from("mint_fixture"), MINT_SAMPLE_PROMPT.clone(), brief).await?;
+    let raw0 = ask(String::from("mint_fixture"), MINT_SAMPLE_PROMPT.clone(), brief).await?;
+    let raw = strip_code_fences(raw0);
     let fields: HashMap<String, String> = native typescript {
         try {
             return $host.json.fields(raw);
