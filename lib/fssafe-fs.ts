@@ -18,9 +18,39 @@
 // 关闭开关：ORG_FSSAFE_OFF=1。
 // ============================================================================
 
-export * from "node:fs";
 import * as nodeFs from "node:fs";
 import { fssafeFallback, FSSAFE_STATS } from "./fssafe.ts";
+
+// ---- 显式再导出（v0.5.43：替代 `export * from "node:fs"`）--------------------
+// 背景：`export * from "node:fs"` 触发 bun 打包器边角 —— 编译版输出
+// `__reExport(exports_fssafe_fs, node_fs)` 而 `node_fs` 声明缺失 → 运行期
+// ReferenceError: node_fs is not defined（主仓 native-smoke 三平台自 10-01 起红，
+// 本文件为唯一触发源）。逐名显式再导出：语义等价、零边角、类型完整。
+export const readFileSync = nodeFs.readFileSync;
+export const writeFileSync = nodeFs.writeFileSync;
+export const appendFileSync = nodeFs.appendFileSync;
+export const existsSync = nodeFs.existsSync;
+export const mkdirSync = nodeFs.mkdirSync;
+export const mkdtempSync = nodeFs.mkdtempSync;
+export const readdirSync = nodeFs.readdirSync;
+export const statSync = nodeFs.statSync;
+export const lstatSync = nodeFs.lstatSync;
+export const fstatSync = nodeFs.fstatSync;
+export const chmodSync = nodeFs.chmodSync;
+export const cpSync = nodeFs.cpSync;
+export const copyFileSync = nodeFs.copyFileSync;
+export const renameSync = nodeFs.renameSync;
+export const unlinkSync = nodeFs.unlinkSync;
+export const rmdirSync = nodeFs.rmdirSync;
+export const symlinkSync = nodeFs.symlinkSync;
+export const accessSync = nodeFs.accessSync;
+export const openSync = nodeFs.openSync;
+export const closeSync = nodeFs.closeSync;
+export const readSync = nodeFs.readSync;
+export const utimesSync = nodeFs.utimesSync;
+export const truncateSync = nodeFs.truncateSync;
+export const constants = nodeFs.constants;
+export type { Dirent, Stats } from "node:fs";
 
 /** 可恢复错误集：命中才进入降级链（其余错误照原样抛出）。 */
 const RECOVERABLE = new Set(["EPERM", "EACCES", "EFAULT", "EBUSY", "ENOTEMPTY"]);

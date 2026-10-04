@@ -106,6 +106,17 @@
   指向隔离缺席路径；修复「真机已配置 gh_token → 无 token / 优先级两用例假红」。
 - 验证：symbols **14/14** · tracker **20/20** · turing rust 投射隔离 3/3（批跑差异=负载 flake）。
 
+## v0.5.43（2026-10-04）—— CI 修复：fssafe-fs 显式再导出（native-smoke 三平台复活）
+
+- **lib/fssafe-fs.ts**：`export * from "node:fs"` → **逐名显式再导出**。该星号形态触发
+  bun 打包器边角：编译版输出 `__reExport(exports_fssafe_fs, node_fs)` 而 `node_fs`
+  声明缺失 → 运行期 `ReferenceError: node_fs is not defined`（主仓 CI **native-smoke
+  macos/windows 自 10-01 起红**；根因定位 + 负控实证：旧版编译产物启动即崩于
+  `__reExport` 同行，修复版干净启动）。
+- 验证（本地全链）：bundle `node_fs` 计数 **0**（修前 1）· `bun build --compile`
+  修复版 `--help` / TUI 帧（5.2KB 完整渲染）/ check 正常；修前编译版启动即崩。
+- 影响面：所有 fs 消费方**零改动**（显式面覆盖消费全集：23 API + Dirent/Stats 类型）。
+
 # CHANGELOG
 
 ## v0.5.35（2026-10-03）—— 长程任务机制实测 + CLI 优先级面修复（B-37）
