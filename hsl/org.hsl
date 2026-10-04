@@ -871,6 +871,27 @@ fn prepare_payload(subtask: SubTask, accepted: Vec<Acceptance>) -> String {
         if upstream.len() > 0 {
             return upstream.join("\n\n");
         }
+        // v0.5.40（#71 根因四）：依赖链出现**失败标注**（且无真实交付物）时，
+        // 回落使命文本而非工作区 raw —— 避免把演示材料（raw/notices.txt）当
+        // 下游语境（实测：报告专家被公告域污染）。良性占位（"(fetched raw
+        // notices)" / "(mission material)"）不触发本分支，保持既有物料路由。
+        let mut dep_failed: bool = false;
+        for dep2 in subtask.depends_on.iter() {
+            for a2 in accepted.iter() {
+                if a2.task_id == dep2.clone() {
+                    let d2 = a2.report.clone().deliverable.trim().to_string();
+                    if d2.starts_with("(") && (d2.contains("failed") || d2.contains("missing")) {
+                        dep_failed = true;
+                    }
+                }
+            }
+        }
+        if dep_failed == true {
+            let mission_fb: String = native typescript {
+                return String($host.config.task || "");
+            };
+            return mission_fb;
+        }
         let mission: String = native typescript {
             return String($host.config.task || "");
         };

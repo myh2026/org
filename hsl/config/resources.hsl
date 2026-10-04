@@ -70,6 +70,10 @@ Envelope contract:
 - Write your verdict artifact with $host.artifacts.write("acceptance.json", ...) —
   JSON string with fields: coverage (0..1 number), summary, note, and optionally
   deliverable (the output artifact JSON string).
+- coverage SEMANTICS: the fraction of the TASK REQUIREMENTS this run fulfilled
+  (0..1). If every requested step executed and its artifacts were produced,
+  report coverage 1.0. It is NOT an output-quality metric — never report an
+  experiment's accuracy / score / similarity value as coverage.
 - Print a one-line summary with println!.
 
 COMPLETE MINIMAL EXAMPLE (verified to pass dhv check and run):
