@@ -139,6 +139,27 @@ input,textarea,select { font-family:var(--sans); color:var(--tx); background:non
 .fact b { color:var(--tx); font-weight:600; }
 .fact code { font:11.5px var(--mono); color:var(--tx2); background:var(--bg3);
   padding:0 4px; border-radius:4px; }
+/* v5 · S1：任务行聚合 + 会话工具 + 空态 */
+.fact .role { color:var(--tx2); font-style:normal; }
+.fact .seg { margin-left:7px; }
+.fact .seg.ok { color:var(--ok); }
+.fact .seg.warn { color:var(--warn); }
+.fact .seg.err { color:var(--err); }
+button.mini { font:var(--fs-xs) var(--mono); color:var(--tx3); border:1px solid var(--ln2);
+  border-radius:99px; padding:1px 8px; cursor:pointer; background:none; }
+button.mini:hover { color:var(--tx); background:var(--bg3); }
+.sitem .stools { float:right; margin-left:4px; }
+.sitem .stools button { padding:0 5px; border-radius:var(--r1); color:var(--tx3); font-size:10px; background:none; border:none; cursor:pointer; }
+.sitem .stools button:hover { color:var(--err); background:var(--bg3); }
+.sitem .stools button[data-a="ren"]:hover { color:var(--ac); }
+.empty { max-width:560px; margin:9vh auto 0; padding:0 20px; text-align:center; color:var(--tx3); }
+.empty .eh-t { font:600 var(--fs-xl)/1.3 var(--sans); color:var(--tx); letter-spacing:-.01em; }
+.empty .eh-s { margin-top:6px; font-size:var(--fs-sm); }
+.empty .eh-h { margin:22px 0 8px; font:600 var(--fs-xs) var(--sans); text-transform:uppercase;
+  letter-spacing:.06em; color:var(--tx3); }
+.empty .eh-runs { display:flex; flex-wrap:wrap; gap:6px; justify-content:center; }
+.empty .eh-k { font-size:var(--fs-sm); line-height:1.9; }
+.empty .eh-k code { font:11.5px var(--mono); background:var(--bg3); padding:1px 6px; border-radius:4px; color:var(--tx2); }
 .rc .rfoot { display:flex; gap:var(--sp3); padding:8px 13px; border-top:1px solid var(--ln);
   color:var(--tx3); font:var(--fs-xs) var(--mono); }
 .badge { display:inline-block; padding:1px 7px; border-radius:99px; border:1px solid var(--ln2);
@@ -284,6 +305,7 @@ function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function
 function fmtTok(n) { n = Number(n) || 0; return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n); }
 function fmtMs(ms) { ms = Number(ms) || 0; return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms"; }
 
+var VERSION = "${VERSION}"; /* 服务端注入（单一来源 lib/version.ts）—— 客户端展示用 */
 var state = {
   experts: [], usages: [], runs: [], sessions: [], tasks: [],
   currentExpert: null, currentSession: null,
@@ -403,7 +425,9 @@ function down(force) {
   if (force || near) streamEl.scrollTop = streamEl.scrollHeight;
 }
 function clearStream() { streamCol.innerHTML = ""; }
+function killHero() { var h = document.getElementById("emptyHero"); if (h) h.remove(); }
 function pushMsg(role, inner) {
+  killHero();
   var m = document.createElement("div");
   m.className = "msg " + role;
   var who = document.createElement("div");
@@ -419,6 +443,7 @@ function pushMsg(role, inner) {
 function pushUser(t) { return pushMsg("user", t); }
 function pushAgentMd(md) { return pushMsg("agent", mdToHtml(md)); }
 function newCard(title) {
+  killHero();
   var el = document.createElement("div");
   el.className = "rc";
   el.innerHTML = '<div class="rhead"><span class="ttl">' + esc(title) + '</span><span class="st"></span></div>' +
@@ -428,13 +453,45 @@ function newCard(title) {
 }
 function cardSt(card, text) { card.st.textContent = text; }
 function cardFoot(card, text) { card.foot.hidden = false; card.foot.textContent = text; }
+/* v5 · S1：任务事实 → 聚合成一行（route/dispatch/review/revision/reroute 按 task# 归组） */
+function taskSeg(f) {
+  if (f.t === "route") return { c: "", s: "→ " + esc(f.route) + ":" + esc(f.channel) };
+  if (f.t === "dispatch") return { c: "", s: "派单 " + esc(short(f.detail, 44)) };
+  if (f.t === "review") return { c: f.verdict === "Accept" ? "ok" : (f.verdict === "Revise" ? "warn" : "err"),
+    s: esc(f.verdict) + (f.coverage != null ? " " + Number(f.coverage).toFixed(2) : "") };
+  if (f.t === "revision") return { c: "warn", s: "返工#" + f.attempt };
+  if (f.t === "reroute") return { c: "warn", s: "重派" };
+  return null;
+}
 function appendFact(card, fact) {
+  if (!fact || !fact.t) return;
+  killHero();
+  var seg = taskSeg(fact);
+  if (seg && typeof fact.id === "number") {
+    card.tasks = card.tasks || {};
+    var row = card.tasks[fact.id];
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "fact task";
+      row.innerHTML = '<span class="dot">·</span><span><b>task#' + fact.id +
+        '</b> <em class="role"></em></span><span class="segs"></span>';
+      card.body.appendChild(row);
+      card.tasks[fact.id] = row;
+    }
+    if (fact.role) row.querySelector(".role").textContent = fact.role;
+    var sp = document.createElement("span");
+    sp.className = "seg" + (seg.c ? " " + seg.c : "");
+    sp.innerHTML = seg.s;
+    row.querySelector(".segs").appendChild(sp);
+    down(false);
+    return;
+  }
   var line = factLine(fact);
   if (!line) return;
-  var row = document.createElement("div");
-  row.className = "fact" + (line.c ? " " + line.c : "");
-  row.innerHTML = '<span class="dot">·</span><span>' + line.h + "</span>";
-  card.body.appendChild(row); down(false);
+  var row2 = document.createElement("div");
+  row2.className = "fact" + (line.c ? " " + line.c : "");
+  row2.innerHTML = '<span class="dot">·</span><span>' + line.h + "</span>";
+  card.body.appendChild(row2); down(false);
 }
 function short(s, n) { s = String(s || ""); return s.length > (n || 56) ? s.slice(0, n || 56) + "…" : s; }
 
@@ -452,17 +509,63 @@ function renderExperts() {
     el.appendChild(b);
   });
 }
+function apiSend(method, url, body) {
+  return fetch(url, { method: method, headers: { "content-type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined }).then(function (r) { return r.json(); });
+}
 function renderSessions() {
   var el = $("lstSes"); el.innerHTML = "";
   $("cntSes").textContent = String(state.sessions.length);
   if (!state.sessions.length) { el.innerHTML = '<div class="sempty">该专家暂无会话</div>'; return; }
   state.sessions.forEach(function (s) {
-    var b = document.createElement("button");
-    b.className = "sitem" + (state.currentSession === (s.name || s.session) ? " on" : "");
-    b.innerHTML = esc(s.name || s.session || "?") + '<span class="bdg">' + (s.turns != null ? s.turns + " 轮" : "") + "</span>";
-    b.onclick = function () { openSession(s.name || s.session); };
+    var name = s.name || s.session || "?";
+    var b = document.createElement("div");
+    b.className = "sitem" + (state.currentSession === name ? " on" : "");
+    b.setAttribute("role", "button");
+    b.innerHTML = '<span class="stools">' +
+      '<button class="mini" data-a="ren" title="重命名">✎</button>' +
+      '<button class="mini" data-a="del" title="删除">✕</button></span>' +
+      '<span class="bdg">' + (s.turns != null ? s.turns + " 轮" : "") + "</span>" + esc(name);
+    b.onclick = function (ev) {
+      var a = ev.target && ev.target.getAttribute ? ev.target.getAttribute("data-a") : null;
+      if (a === "ren") { renameSession(name); return; }
+      if (a === "del") { deleteSession(name, ev.target); return; }
+      openSession(name);
+    };
     el.appendChild(b);
   });
+}
+function renameSession(name) {
+  var to = prompt("重命名为：", name);
+  if (!to || to === name) return;
+  apiSend("PATCH", "/api/session/" + encodeURIComponent(state.currentExpert) + "/" + encodeURIComponent(name), { to: to })
+    .then(function (r) {
+      if (r && r.ok === false) { hint("重命名失败：" + (r.error || "?")); return; }
+      if (state.currentSession === name) state.currentSession = to;
+      hint("已重命名 → " + to); loadSessions();
+    }).catch(function () { hint("重命名失败（网络）"); });
+}
+var pendingDel = { name: null, until: 0 };
+function deleteSession(name, btn) {
+  // 两击确认（嵌入式 webview 的 confirm() 不可靠，S1 改为就地确认）
+  var now = Date.now();
+  if (pendingDel.name === name && now < pendingDel.until) {
+    pendingDel = { name: null, until: 0 };
+    if (btn) btn.textContent = "✕";
+    apiSend("DELETE", "/api/session/" + encodeURIComponent(state.currentExpert) + "/" + encodeURIComponent(name))
+      .then(function (r) {
+        if (r && r.ok === false) { hint("删除失败：" + (r.error || "?")); return; }
+        if (state.currentSession === name) { state.currentSession = null; crumb(); }
+        hint("已删除 " + name); loadSessions();
+      }).catch(function () { hint("删除失败（网络）"); });
+    return;
+  }
+  pendingDel = { name: name, until: now + 4000 };
+  if (btn) { btn.textContent = "确认?"; btn.style.color = "var(--err)"; }
+  hint("再点一次「确认?」删除 " + name + "（4 秒内）");
+  setTimeout(function () {
+    if (pendingDel.name === name && btn) { btn.textContent = "✕"; btn.style.color = ""; }
+  }, 4200);
 }
 function selectExpert(name) {
   state.currentExpert = name; state.currentSession = null;
@@ -479,13 +582,35 @@ function openSession(sess) {
         if (t.question) pushUser(t.question);
         if (t.answer) pushAgentMd(t.answer);
       });
-      if (!turns.length) hint("会话为空");
+      if (!turns.length) renderEmpty();
     });
 }
 function crumb() {
   $("crumb").innerHTML = "<b>" + esc(state.currentExpert || "未选专家") + "</b>" +
     (state.currentSession ? ' <span class="sub">· ' + esc(state.currentSession) + "</span>" : " · 新会话") +
     " · " + (state.mode === "team" ? "团队" : "直连");
+}
+/* v5 · S1：空态（品牌 + 最近运行 + 快捷键）—— 流区无内容时展示 */
+function renderEmpty() {
+  if (document.getElementById("emptyHero")) return;
+  if (streamCol.children.length) return;
+  var d = document.createElement("div");
+  d.className = "empty"; d.id = "emptyHero";
+  d.innerHTML = '<div class="eh-t">org · console</div>' +
+    '<div class="eh-s">v' + VERSION + ' · 团队模式：直接输入任务派单 · 直连模式：先在左栏选专家</div>' +
+    '<div class="eh-h">最近运行</div><div class="eh-runs" id="ehRuns"></div>' +
+    '<div class="eh-h">快捷键</div><div class="eh-k"><code>Enter</code> 发送 · ' +
+    '<code>Shift+Enter</code> 换行 · <code>Esc</code> 停止运行</div>';
+  streamCol.appendChild(d);
+  var box = $("ehRuns");
+  state.runs.slice(0, 4).forEach(function (r) {
+    var b = document.createElement("button");
+    b.className = "mini";
+    b.textContent = (r.name || r.dir || "?") + (r.elapsed_ms != null ? " · " + fmtMs(r.elapsed_ms) : "");
+    b.onclick = function () { replayRun(r.name || r.dir); };
+    box.appendChild(b);
+  });
+  if (!state.runs.length) box.innerHTML = '<span class="sub">暂无运行 —— 输入任务开跑第一轮</span>';
 }
 function renderRuns() {
   var el = $("lstRuns"); el.innerHTML = "";
@@ -607,6 +732,13 @@ function startTeam(task) {
     else if (ev === "done") {
       cardSt(card, d && d.ok === false ? "异常结束" : "完成");
       if (d) cardFoot(card, "ok=" + (d.ok === false ? "false" : "true") + (d.outDir ? " · " + d.outDir : ""));
+      if (d && d.outDir) {
+        var dirName = String(d.outDir).split("/").filter(Boolean).pop();
+        var rb = document.createElement("button");
+        rb.className = "mini"; rb.textContent = "查看回放";
+        rb.onclick = function () { replayRun(dirName); };
+        card.foot.appendChild(rb);
+      }
       loadRuns(); loadStatus();
     } else if (ev === "error") {
       cardSt(card, "失败");
@@ -701,6 +833,7 @@ function loadRuns() {
   api("/api/runs").then(function (r) {
     state.runs = (r && r.runs) || [];
     renderRuns();
+    renderEmpty();
   }).catch(function () {});
 }
 function loadProviders() {
@@ -725,7 +858,7 @@ $("rbChat").onclick = function () { switchSec("chat"); };
 $("rbRuns").onclick = function () { switchSec("runs"); };
 $("rbTasks").onclick = function () { switchSec("tasks"); };
 $("rbAbout").onclick = function () { showAbout(); };
-$("newAsk").onclick = function () { state.currentSession = null; renderSessions(); crumb(); clearStream(); hint("新会话"); };
+$("newAsk").onclick = function () { state.currentSession = null; renderSessions(); crumb(); clearStream(); renderEmpty(); hint("新会话"); };
 $("chipMode").onclick = function () {
   state.mode = state.mode === "team" ? "direct" : "team";
   $("modeTx").textContent = state.mode === "team" ? "团队" : "直连";
