@@ -77,6 +77,10 @@ jobs:
       - name: status 冒烟
         run: bun cli/org.ts status
 
+      # v4 设计约束守卫（ui-v4-design.md §3.4）：字号白名单 / 色值基线债 / 契约串 ×8
+      - name: UI 令牌守卫（v4 设计约束）
+        run: bun scripts/check-ui-tokens.ts
+
       - name: 上传运行产物
         if: always()
         uses: actions/upload-artifact@v4
