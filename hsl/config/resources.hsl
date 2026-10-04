@@ -44,9 +44,18 @@ HSL is a Rust-like language. SYNTAX RULES (violations fail the dhv check gate):
 - match on Option/Result must be exhaustive: match opt { Option::Some(v) => ..., Option::None => ... }
 - Types are String/Vec<T>/HashMap<K,V>/Option<T>/Result<T,E>/u32/i64/f64/bool.
 - NOT available anywhere: `use`, serde_json, reqwest, std::fs, $host.http — none exist.
+- Reserved words (never use as identifiers): block / fn / let / mut / match / for / in / if / else / return.
 - Inside native typescript blocks ONLY these exist:
   $host.fs.read/write/edit/list, $host.json.parse/stringify/fields,
-  $host.artifacts.write, $host.events.emit, $host.config, $host.log.
+  $host.artifacts.write, $host.events.emit, $host.config, $host.log,
+  $host.shell.run(cmd, { timeoutMs }) — runs a shell command, returns
+  { ok, code, stdout, stderr } (command name is gated by the run's allow list).
+- Native blocks are a SANDBOX, not Node.js: `require`, `import`, `process` and
+  Node modules (fs / path / child_process / ...) DO NOT EXIST inside them.
+  Standard JS builtins (JSON/Array/String/Math/RegExp/...) are available.
+  Persist a file with: $host.fs.write("relative/path.ext", content)
+  Run a script with:   const r = await $host.shell.run("python3 scripts/foo.py", { timeoutMs: 120000 });
+                       const out = String(r.stdout || "") + String(r.stderr || "");
 - Safe String/Vec/HashMap methods: len trim split split_once lines contains
   starts_with ends_with strip_prefix find char_at replace to_string push_str;
   Vec: push len iter iter_mut map filter contains join first last;

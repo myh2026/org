@@ -150,7 +150,7 @@ export graph Factory(goal: String, skills: Vec<String>, payload_preview: String)
                     // 附最常犯三错的速查（真实模型实测：use→Rust 风格、
                     // 虚构 ./std/*.hsl 路径、调用不存在的宿主 API）。
                     brief = format!(
-                        "{}\n\n上一次生成物未通过 dhv check（结构闸门，第 {} 次）。诊断信息：\n{}\n请针对诊断修复，重新输出完整的 HSL 文件。速查：Vec/HashMap/String/Option/Result 是内建类型（绝不 import、绝无 use）；用户模块 import {{ Foo }} from \"./dir/file.hsl\"；宿主 API 只能在 native typescript 块内调用（$host.fs / $host.json / $host.artifacts）。",
+                        "{}\n\n上一次生成物未通过 dhv check（结构闸门，第 {} 次）。诊断信息：\n{}\n请针对诊断修复，重新输出完整的 HSL 文件。速查：Vec/HashMap/String/Option/Result 是内建类型（绝不 import、绝无 use）；用户模块 import {{ Foo }} from \"./dir/file.hsl\"；宿主 API 只能在 native typescript 块内调用（$host.fs / $host.json / $host.artifacts / $host.shell.run——native 块是沙箱，无 require/Node 模块）。",
                         brief, mint_attempts, repair_feedback
                     );
                 }
@@ -586,7 +586,7 @@ fn dhv_run_gate(entry: String, task: String, fixture: String, out_dir: String) -
         // 路径，维持原样。
         let task_q = sh_quote(task.clone());
         let cmd = format!(
-            "bun {} run {} --workspace . --task {} --model scripted --fixture {} --out {} --quiet",
+            "bun {} run {} --workspace . --task {} --model scripted --fixture {} --out {} --allow bun,node,python3,python,ls,cat,grep,diff,git --quiet",
             dhv_path(), entry, task_q, fixture, out_dir
         );
         return shell_exec(cmd);
@@ -600,7 +600,8 @@ fn dhv_run_gate(entry: String, task: String, fixture: String, out_dir: String) -
         const out = await $host.dhv.run([
             "run", joinWs(entry), "--workspace", ws, "--task", task,
             "--model", "scripted", "--fixture", joinWs(fixture),
-            "--out", joinWs(out_dir), "--quiet",
+            "--out", joinWs(out_dir),
+            "--allow", "bun,node,python3,python,ls,cat,grep,diff,git", "--quiet",
         ]);
         return { ok: out.ok, code: out.code, stdout: out.stdout, stderr: out.stderr };
     };

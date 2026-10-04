@@ -59,6 +59,22 @@
   任务中执行 Python；`bun`/`node` 已在白名单（同属任意代码执行面），安全面不变。
 - 动因：测试项目 3（机器识别）需要纯 numpy 训练脚本 + 混淆矩阵图表（matplotlib 3.9.3）。
 
+## v0.5.39（2026-10-04）—— 工厂生成契约 + 嵌套运行白名单（测试项目 3 解锁）
+
+- **MINT_SOURCE_PROMPT（hsl/config/resources.hsl）**：native typescript 块 API 清单补
+  `$host.shell.run(cmd, { timeoutMs })`（返回 { ok, code, stdout, stderr }）——此前清单
+  缺此 API，生成器需要执行脚本时改用 Node 惯用法（`require('child_process')`/`execSync`），
+  而 native 块是沙箱（无 require / Node 模块）→ 生成物运行期即崩（测试项目 3 首跑
+  3/3 mint 失败根因之一）。另补沙箱说明、保留字警示（`block` 等不得作标识符）与
+  执行/写文件示例；check 修复速查同步补 `$host.shell.run`。
+- **dhv_run_gate（hsl/factory/pipeline.hsl）**：嵌套专家运行（fixture 验收考试 / 磁盘
+  车道派单）补 `--allow bun,node,python3,python,ls,cat,grep,diff,git`（shell + 进程内
+  两条路径）——与 v0.5.38 工具环白名单对齐；此前嵌套走 dhv 默认名单，python 类专家
+  在考试/派单环节必被 capability_denied。
+- 验证：测试项目 3（机器识别）重跑 —— 管线专家正确使用 $host.shell.run，numpy 实验
+  真实执行（scripts/ + results/：混淆矩阵 PNG（matplotlib）+ metrics + 实验报告），
+  准确率 0.87→0.91（迭代收敛）。
+
 # CHANGELOG
 
 ## v0.5.35（2026-10-03）—— 长程任务机制实测 + CLI 优先级面修复（B-37）
