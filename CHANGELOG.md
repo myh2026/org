@@ -52,6 +52,13 @@
 - **回归**：reconcile 单测 5 例（归集 / 幂等 / 取大 / no-op / 缺席容错）；hsl/org.hsl
   过 dhv check（20 模块）；demo/check 既有套件复跑（scripted 语义零变化）。
 
+## v0.5.38（2026-10-04）—— 工具环白名单 +python3/python（机器识别/数据分析类任务解锁）
+
+- 工具环 shell 白名单（org 侧两处硬编码：cli/org.ts `runHsl` · lib/engine.ts `startRun`）
+  加入 `python3` / `python` —— 机器识别（numpy）、数据分析、脚本类测试项目可直接在 org
+  任务中执行 Python；`bun`/`node` 已在白名单（同属任意代码执行面），安全面不变。
+- 动因：测试项目 3（机器识别）需要纯 numpy 训练脚本 + 混淆矩阵图表（matplotlib 3.9.3）。
+
 # CHANGELOG
 
 ## v0.5.35（2026-10-03）—— 长程任务机制实测 + CLI 优先级面修复（B-37）

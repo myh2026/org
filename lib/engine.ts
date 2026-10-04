@@ -1774,7 +1774,7 @@ export function startRun(opts: RunOptions): RunHandle {
         "--model", opts.model,
         "--fixture", fixture,
         "--out", outDir,
-        "--allow", "bun,node,ls,cat,grep,diff,git",
+        "--allow", "bun,node,python3,python,ls,cat,grep,diff,git", // v0.5.38：+python3/python（机器识别/数据分析类任务解锁；bun/node 已属任意代码执行面，安全面不变）
       ];
       const env: Record<string, string> = {};
       for (const [k, v] of Object.entries(process.env)) {
