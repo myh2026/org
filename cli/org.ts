@@ -343,11 +343,23 @@ async function checkFile(file: string): Promise<boolean> {
 }
 
 // ---- 命令 ----
+/** v0.5.45 · B-42：剧本车道占位提示文案（真实车道或显式选定 → null）。
+ * 背景：歌曲生成测试 F1 —— 裸跑 `org run` 落 scripted 且零提示，用户视角
+ * 「模型已生成」与「占位剧本秒回」不可区分。显式 --model 视为用户知情。 */
+export function scriptedLaneNotice(model: string, modelExplicit: boolean): string | null {
+  if (model !== "scripted" || modelExplicit) return null;
+  return "⚠ 剧本车道 scripted（占位 · 零模型调用）—— 真实生成请 `org run --model <车道>`"
+    + "（例：--model deepseek），或先 `org config set default_lane <车道>`";
+}
+
 async function cmdRun(a: Args): Promise<number> {
   if (!a.task) { console.error("✗ --task 必填"); return 2; }
   ensureWorkspace(a.workspace);
   const out = a.out || path.join(a.workspace, "out-latest");
   const env: Record<string, string> = {};
+  // v0.5.45 · B-42：剧本车道占位提示（歌曲测试 F1 —— 静默 scripted 不可见）
+  const laneNotice = scriptedLaneNotice(a.model, !!a.modelExplicit);
+  if (laneNotice) console.log("  " + laneNotice + "\n");
   // 预授权：运行前一次性放行全部能力变更（旧语义，保留）
   if (a.approveCapability) env.ORG_CAPABILITY_APPROVED = "1";
   // 交互式审批：能力类决策写请求 + 有界等待（另一终端跑 org approvals --watch）
