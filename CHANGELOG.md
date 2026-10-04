@@ -96,6 +96,16 @@
   实验报告 coverage **1.00** · 产物齐备（scripts×4 / results 十件 / 中文实验报告含
   混淆矩阵表）——#71 四层根因（契约/白名单/载荷/语义）+ 本批净化 = **全链闭合**。
 
+## v0.5.42（2026-10-04）—— 回主预检修复批：符号单文件帽 512KB→1MB + 测试隔离延伸
+
+- **lib/symbols.ts**：单文件帽 512KB → **1MB** —— web/entry.ts（单页应用本体）长至 ~540KB
+  后越过旧帽被整体跳过（符号索引对最大源文件失明 + truncated 假红；回主预检 chunk 9b 实锤）。
+  扫描面现状最大 ~540KB < 1MB；未来再超帽仍按诚实 truncated 标注。
+- **tests/symbols.test.ts**：单文件帽用例夹具 600KB → 1.2MB（随帽同步）；真实仓库 e2e 恢复全绿。
+- **tests/tracker.test.ts**：B-25 隔离延伸到 in-process 单元 —— beforeEach 设 `ORG_CONFIG`
+  指向隔离缺席路径；修复「真机已配置 gh_token → 无 token / 优先级两用例假红」。
+- 验证：symbols **14/14** · tracker **20/20** · turing rust 投射隔离 3/3（批跑差异=负载 flake）。
+
 # CHANGELOG
 
 ## v0.5.35（2026-10-03）—— 长程任务机制实测 + CLI 优先级面修复（B-37）

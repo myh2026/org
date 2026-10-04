@@ -44,8 +44,10 @@ const LANG_BY_EXT: Record<string, "hsl" | "ts" | "py"> = {
 /** 文件帽：索引/引用扫描最多收录 600 个文件（超帽 → truncated:true）。 */
 const MAX_FILES = 600;
 
-/** 单文件帽：超过 512KB 跳过（防单个巨文件拖死交互；跳过 → truncated:true）。 */
-const MAX_FILE_BYTES = 512 * 1024;
+/** 单文件帽：超过 1MB 跳过（防单个巨文件拖死交互；跳过 → truncated:true）。
+ * v0.5.42：512KB → 1MB —— web/entry.ts（单页应用本体）长至 ~540KB 后越过旧帽
+ * 被整体跳过（符号索引对最大源文件失明 + truncated 假红，回主预检实锤）。 */
+const MAX_FILE_BYTES = 1024 * 1024;
 
 /** 病态目录树保护：候选收集的硬上限（正常仓库远达不到；触顶即超帽）。 */
 const HARD_COLLECT_CAP = 10_000;

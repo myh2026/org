@@ -32,7 +32,7 @@ import { TEST_RUN, runOrg, runDhv, eventsOf } from "./helpers";
 
 // ---- 环境隔离（helpers 已注入 ORG_CONFIG 隔离；GH token 三件套显式管理） ----
 const SAVED: Record<string, string | undefined> = {};
-const VARS = ["ORG_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "ORG_GH_API"];
+const VARS = ["ORG_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "ORG_GH_API", "ORG_CONFIG"];
 
 let server: ReturnType<typeof Bun.serve> | null = null;
 let requests: { method: string; path: string; auth: string | null; accept: string | null; body: unknown }[] = [];
@@ -137,6 +137,8 @@ function target(api = ghUrl()) {
 beforeEach(() => {
   for (const v of VARS) SAVED[v] = process.env[v];
   for (const v of VARS) delete process.env[v];
+  // B-25 隔离延伸到 in-process 单元：真机 config（如已配置 gh_token）不得渗入测试
+  process.env.ORG_CONFIG = path.join(TEST_RUN, "isolated-user-config-absent.json");
   startMockGh();
 });
 

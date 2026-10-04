@@ -265,12 +265,12 @@ describe("降级与预算帽", () => {
     expect(idx.symbols).toHaveLength(600); // 每文件恰 1 个 fn
   }, 30_000);
 
-  test("单文件帽 512KB：超帽跳过（truncated + 符号缺席）；缺目录 = 空索引不炸", () => {
+  test("单文件帽 1MB：超帽跳过（truncated + 符号缺席）；缺目录 = 空索引不炸", () => {
     const ws = makeTmp("symbols-big");
     fs.mkdirSync(path.join(ws, "big"), { recursive: true });
     fs.writeFileSync(
       path.join(ws, "big", "huge.hsl"),
-      `fn real_symbol() {}\n//${"x".repeat(600 * 1024)}\n`,
+      `fn real_symbol() {}\n//${"x".repeat(1200 * 1024)}\n`,
     );
     const idx = indexSymbols(ws, ["big"]);
     expect(idx.files).toBe(0);
@@ -291,7 +291,7 @@ describe("e2e · org-lab 真实仓库根", () => {
   test("indexSymbols(process.cwd())：真实符号命中（TS + HSL 双语言）", () => {
     const idx = indexSymbols(process.cwd());
     expect(idx.files).toBeGreaterThanOrEqual(10);
-    expect(idx.truncated).toBe(false); // ~106 个代码文件 · 最大 293KB < 帽
+    expect(idx.truncated).toBe(false); // ~180 个代码文件 · 最大 ~540KB < 帽（1MB · v0.5.42）
     const hit = (name: string, file: string, kind: SymbolHit["kind"]): void => {
       expect(
         lookupDef(idx.symbols, name).some((h) => h.file === file && h.kind === kind),
