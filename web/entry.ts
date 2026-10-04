@@ -67,6 +67,7 @@ import { AskGate, QueueCancelledError } from "./gate.ts";
 import { transcribeAudio, synthesizeSpeech, voiceStatus, VOICES } from "../lib/voice.ts"; // v0.5.12 语音入口（ASR/TTS）
 import { analyzeImages, visionStatus, VISION_MAX_IMAGES } from "../lib/vision.ts"; // v0.5.13 视觉入口（VLM 图片理解）
 import { ORG_VERSION as VERSION } from "../lib/version.ts"; // 版本单一来源（v0.4.14 漂移治理：此前本文件落后两版）
+import { renderV5Page } from "./ui5/ui.ts"; // UI v5（从零重写）——ORG_WEB_UI=v5 时接管页面渲染
 import { latestSession } from "../lib/sessions.ts"; // v0.5.17：collab bridge 缺省会话（只读复用会话账本协议）
 import {
   currentUser, setUser, postThread, commentOn, listThreads, threadFeed, flattenThread,
@@ -3181,6 +3182,8 @@ export function renderMd(src: string): string {
 // 一律字符串拼接（不用反引号模板）；除 VERSION 外不出现 ${ 字样。
 
 function renderIndexHtml(): string {
+  // UI v5（从零重写）过渡开关：ORG_WEB_UI=v5 → 新界面接管；缺省仍 v4（旧客户端）
+  if (process.env.ORG_WEB_UI === "v5") return renderV5Page();
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
